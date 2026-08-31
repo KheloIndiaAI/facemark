@@ -1,0 +1,15 @@
+# Every dependency here permits commercial use and redistribution.
+#
+# Deliberately absent:
+#   ultralytics   AGPL-3.0 - its network clause would oblige publishing this
+#                 entire application to anyone who uses it over a network
+#   torch         only ever pulled in by ultralytics; ~500 MB for nothing
+#   onnxruntime   no longer needed - OpenCV's DNN module runs YuNet and SFace
+
+fastapi>=0.111              # MIT
+uvicorn[standard]>=0.30     # BSD-3-Clause
+python-multipart>=0.0.9     # Apache-2.0
+opencv-python-headless>=4.10  # Apache-2.0 - also provides YuNet and SFace
+numpy>=1.26                 # BSD-3-Clause
+Pillow>=10.3                # MIT-CMU
+requests>=2.32              # Apache-2.0

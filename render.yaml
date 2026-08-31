@@ -1,0 +1,56 @@
+# Render blueprint - https://render.com/docs/blueprint-spec
+#
+# Deploy: Render dashboard -> New -> Blueprint -> pick this repo.
+#
+# PLAN SIZING. Measured after the licence migration, not estimated:
+#
+#   memory      122 MB   (previous stack: 1,178 MB)
+#   models       37 MB   (previous stack: 1,022 MB)
+#   per photo   0.6 s    (previous stack: 12-16 s)
+#
+# YuNet (MIT) and SFace (Apache-2.0) replaced YOLO (AGPL-3.0) and the
+# InsightFace ensemble (non-commercial research only), which also removed torch,
+# ultralytics and onnxruntime. Starter is now comfortable; even Free fits on
+# memory, though it has no persistent disk so enrolled templates would not
+# survive a restart.
+
+services:
+  - type: web
+    name: facemark-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter           # 512 MB is ample for a 122 MB footprint
+    region: singapore       # closest region to India; also: oregon, frankfurt, ohio
+    healthCheckPath: /api/health
+
+    # No build args needed - both models are public and permissively licensed.
+
+    # Persistent disk. Without it every deploy wipes the database, the enrolled
+    # face templates and every uploaded photo.
+    disk:
+      name: facemark-data
+      mountPath: /data
+      sizeGB: 5
+
+    envVars:
+      - key: FACEMARK_DATA_DIR
+        value: /data
+      - key: FACEMARK_MODELS_DIR
+        value: /app/data/models      # baked into the image, not the disk
+      - key: DETECTION_MODE
+        value: fused
+      - key: ORT_THREADS
+        value: "2"
+      # Set to your Vercel URL, e.g. https://facemark.vercel.app
+      # Only needed if the browser calls the API directly; the Vercel rewrite
+      # proxies /api so requests normally arrive same-origin.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: COOKIE_SECURE
+        value: "1"
+      # First boot creates the 'admin' super admin with this password. Set it in
+      # the Render dashboard; if omitted a random one is printed to the logs once.
+      - key: FACEMARK_ADMIN_PASSWORD
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11"

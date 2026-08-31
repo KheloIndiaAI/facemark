@@ -1,0 +1,45 @@
+{
+  "data/uploads/group_20260820_182245_858.jpg": {
+    "present_ids": [
+      68,
+      67,
+      66,
+      65,
+      64,
+      63,
+      61,
+      62,
+      59,
+      60,
+      58,
+      57,
+      56
+    ],
+    "expected_faces": 13,
+    "note": "class group photo, all 13 enrolled present, taken on a different day from enrolment"
+  },
+  "data/uploads/group_20260820_155900_522.jpg": {
+    "present_ids": [
+      68,
+      67,
+      66,
+      65,
+      64,
+      63,
+      61,
+      62,
+      59,
+      60,
+      58,
+      57,
+      56
+    ],
+    "expected_faces": 13,
+    "note": "second frame of the same burst as above - repeatability check, NOT an independent sample"
+  },
+  "data/uploads/group_20260820_182331_818.jpg": {
+    "present_ids": [],
+    "expected_faces": 16,
+    "note": "unrelated group, nobody enrolled - open-set rejection test"
+  }
+}

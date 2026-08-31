@@ -1,0 +1,1238 @@
+:root {
+    /* Color Palette - light theme */
+    color-scheme: light;          /* native controls (date picker, scrollbars) follow suit */
+
+    --bg-base: #f5f6f8;           /* page background */
+    --bg-surface: #ffffff;        /* cards, sidebar, modals */
+    --bg-elevated: #eef0f4;       /* secondary buttons, avatars, chips */
+    --bg-input: #f8fafc;          /* inputs and wells */
+    --track: #e2e5ea;             /* progress / meter tracks, which need to read against white */
+
+    --border-subtle: #e4e7ec;
+    --border-hover: #cfd4dc;
+    --border-focus: rgba(37,99,235,0.5);
+
+    --text-primary: #101828;
+    --text-secondary: #475467;
+    --text-muted: #667085;         /* darkened from #737d8c: it labels 11-12px text, which needs AA 4.5:1 */
+    --on-accent: #ffffff;         /* text on a filled accent surface */
+
+    /* Overlays. On a light base these must darken, not lighten - the old
+       rgba(255,255,255,x) versions were invisible against white. */
+    --hover-overlay: rgba(16,24,40,0.05);
+    --row-hover: rgba(16,24,40,0.025);
+    --scrim: rgba(16,24,40,0.45);
+
+    --shadow-sm: 0 1px 2px rgba(16,24,40,0.06);
+    --shadow-md: 0 4px 12px rgba(16,24,40,0.10);
+    --shadow-lg: 0 20px 25px -5px rgba(16,24,40,0.15);
+
+    /* Accents darkened for contrast against white (the dark-theme pastels
+       failed WCAG AA as text/icon colours on a light surface). */
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --accent-bg: rgba(37,99,235,0.10);
+
+    --green: #047857;
+    --green-bg: rgba(4,120,87,0.10);
+    --amber: #b45309;
+    --amber-bg: rgba(180,83,9,0.10);
+    --red: #dc2626;
+    --red-bg: rgba(220,38,38,0.10);
+
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+
+    --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+    --transition-fast: 150ms ease;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: var(--bg-base);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+}
+
+/* Custom Scrollbar / Slider */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+::-webkit-scrollbar-track {
+    background: rgba(16,24,40,0.05);
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb {
+    background: rgba(16,24,40,0.22);
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    transition: background var(--transition-fast);
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--accent);
+}
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(16,24,40,0.22) rgba(16,24,40,0.05);
+}
+
+/* Typography */
+h1, h2, h3, h4, h5, h6 { color: var(--text-primary); font-weight: 600; }
+h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
+h2 { font-size: 18px; }
+h3 { font-size: 14px; }
+a { color: var(--accent); text-decoration: none; transition: color var(--transition-fast); }
+a:hover { color: var(--accent-hover); }
+
+/* Layout - Desktop Base */
+.app-layout {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+}
+
+/* Permanent Full Desktop Sidebar */
+.sidebar {
+    width: 240px;
+    height: 100vh;
+    background-color: var(--bg-surface);
+    border-right: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    z-index: 100;
+}
+
+.sidebar-header {
+    height: 64px;
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.logo-text { font-size: 16px; font-weight: 700; color: var(--text-primary); letter-spacing: -0.01em; }
+.logo-icon { color: var(--accent); }
+
+.sidebar-nav {
+    padding: 16px 12px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    color: var(--text-secondary);
+    border-radius: var(--radius-md);
+    font-weight: 500;
+    transition: all var(--transition-fast);
+    min-height: 36px;
+}
+
+.nav-item:hover { background-color: var(--hover-overlay); color: var(--text-primary); }
+.nav-item.active { background-color: var(--bg-elevated); color: var(--text-primary); }
+
+.sidebar-footer { padding: 16px 24px; border-top: 1px solid var(--border-subtle); }
+.status-indicator { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background-color: var(--green); }
+.status-dot.offline { background-color: var(--red); }
+
+.main-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    height: 100vh;
+    overflow-y: auto;
+}
+
+.top-header {
+    height: 64px;
+    padding: 0 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border-subtle);
+    flex-shrink: 0;
+    background-color: var(--bg-base);
+}
+
+.mobile-header {
+    display: flex;
+    align-items: center;
+}
+
+.hamburger-btn {
+    display: none;
+    margin-right: 12px;
+}
+
+.header-title { font-size: 18px; font-weight: 600; }
+.header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.page-container {
+    padding: 32px;
+    flex: 1;
+    overflow-y: auto;
+}
+
+.bottom-nav, .sidebar-overlay {
+    display: none;
+}
+
+/* Components */
+.card { background-color: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-sm); }
+.card-header { padding: 16px; border-bottom: 1px solid var(--border-subtle); }
+.card-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.card-body { padding: 16px; }
+.card-body.p-0 { padding: 0; }
+
+/* Buttons */
+.btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    min-height: 44px; /* Touch target */
+    padding: 0 16px; border-radius: var(--radius-md); font-size: 14px; font-weight: 500;
+    font-family: inherit; cursor: pointer; transition: all var(--transition-fast);
+    border: 1px solid transparent; white-space: nowrap;
+}
+.btn-primary { background-color: var(--accent); color: var(--on-accent); }
+.btn-primary:hover:not(:disabled) { background-color: var(--accent-hover); }
+.btn-secondary { background-color: var(--bg-elevated); border-color: var(--border-subtle); color: var(--text-primary); }
+.btn-secondary:hover:not(:disabled) { background-color: var(--hover-overlay); border-color: var(--border-hover); }
+.btn-danger { background-color: var(--red-bg); color: var(--red); }
+.btn-danger:hover:not(:disabled) { background-color: rgba(220,38,38,0.16); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 44px; height: 44px; /* Touch target */
+    border-radius: var(--radius-md); background: transparent; border: none;
+    color: var(--text-secondary); cursor: pointer; transition: all var(--transition-fast);
+}
+.btn-icon:hover { background-color: var(--bg-elevated); color: var(--text-primary); }
+
+/* Forms */
+.form-group { margin-bottom: 16px; }
+.form-label { display: block; font-size: 12px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px; }
+.form-input {
+    width: 100%; height: 44px; /* Touch target */
+    padding: 0 12px; background-color: var(--bg-input); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md); color: var(--text-primary); font-family: inherit; font-size: 16px; /* prevent iOS zoom */
+    transition: border-color var(--transition-fast);
+}
+.form-input:focus { outline: none; border-color: var(--border-focus); }
+.form-input::placeholder { color: var(--text-muted); }
+.search-box { position: relative; width: 100%; }
+.search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); }
+.search-input { padding-left: 36px; }
+
+/* Data Table */
+.data-table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.data-table { width: 100%; border-collapse: collapse; min-width: 600px; }
+.data-table th { text-align: left; padding: 12px 16px; font-size: 12px; font-weight: 500; color: var(--text-secondary); border-bottom: 1px solid var(--border-subtle); background-color: var(--bg-surface); }
+.data-table td { padding: 12px 16px; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
+.data-table tbody tr:hover { background-color: var(--row-hover); }
+.data-table tbody tr:last-child td { border-bottom: none; }
+
+/* Utilities */
+.flex { display: flex; } .flex-col { display: flex; flex-direction: column; }
+.items-center { align-items: center; } .justify-between { justify-content: space-between; }
+.flex-between { display: flex; align-items: center; justify-content: space-between; }
+.flex-1 { flex: 1; } .gap-2 { gap: 8px; } .gap-4 { gap: 16px; }
+.w-full { width: 100%; } .h-full { height: 100%; }
+.mt-2 { margin-top: 8px; } .mt-4 { margin-top: 16px; } .mt-6 { margin-top: 24px; } .mb-6 { margin-bottom: 24px; }
+.py-12 { padding-top: 48px; padding-bottom: 48px; }
+.text-sm { font-size: 12px; } .text-xs { font-size: 11px; }
+.text-muted { color: var(--text-muted); } .text-secondary { color: var(--text-secondary); }
+.font-mono { font-family: var(--font-mono); } .overflow-auto { overflow: auto; }
+.hidden { display: none !important; }
+
+/* Dashboard */
+.stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 20px; }
+.stat-card { background-color: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); padding: 16px; box-shadow: var(--shadow-sm); }
+.stat-header { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); margin-bottom: 12px; font-size: 12px;}
+/* Sans, not the mono face, and proportional figures. A monospace number at
+   24px reads as code rather than a headline, and fixed-width digits make a
+   value like 121 look loosely spaced at display size. tabular-nums stays where
+   it belongs - table rows and axis ticks, which align vertically. */
+.stat-value { font-size: 26px; font-weight: 600; line-height: 1; font-family: var(--font-sans);
+              font-variant-numeric: proportional-nums; letter-spacing: -0.01em; }
+.dashboard-layout { display: grid; grid-template-columns: 1fr; gap: 16px; }
+
+.activity-item { display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border-subtle); }
+.activity-item:last-child { border-bottom: none; }
+.avatar { width: 36px; height: 36px; border-radius: 50%; background-color: var(--bg-elevated); display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; color: var(--text-secondary); object-fit: cover; border: 1px solid var(--border-subtle); }
+.avatar-sm { width: 28px; height: 28px; font-size: 11px; }
+.activity-details { margin-left: 12px; flex: 1; }
+.activity-name { font-weight: 500; font-size: 14px;}
+.activity-sub { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
+.activity-meta { text-align: right; }
+.activity-time { font-size: 12px; color: var(--text-muted); }
+.system-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border-subtle); font-size: 13px; }
+.system-row:last-child { border-bottom: none; }
+.system-label { color: var(--text-secondary); }
+.system-value { font-family: var(--font-mono); }
+
+/* Badges */
+.badge { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 500; line-height: 1; }
+.badge-green { background-color: var(--green-bg); color: var(--green); }
+.badge-amber { background-color: var(--amber-bg); color: var(--amber); }
+.badge-red { background-color: var(--red-bg); color: var(--red); }
+.badge-blue { background-color: var(--accent-bg); color: var(--accent); }
+
+/* Mark Page */
+.mark-layout { display: grid; grid-template-columns: 1fr; gap: 16px; height: auto; }
+.dropzone { border: 1px dashed var(--border-subtle); border-radius: var(--radius-md); background-color: var(--bg-input); position: relative; transition: all var(--transition-fast); cursor: pointer; overflow: hidden; min-height: 150px;}
+.dropzone:hover { border-color: var(--border-hover); background-color: var(--bg-elevated); }
+.dropzone.dragover { border-color: var(--accent); background-color: var(--accent-bg); }
+.dropzone-content { padding: 32px 16px; text-align: center; display: flex; flex-direction: column; align-items: center; }
+.hidden-input { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.image-preview-container { position: relative; width: 100%; padding-top: 75%; }
+.image-preview { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+.btn-clear-image { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); color: white; border: none; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 10; }
+
+.capture-tabs { display: flex; border-bottom: 1px solid var(--border-subtle); margin-bottom: 16px; }
+.tab-btn { flex: 1; background: transparent; border: none; color: var(--text-secondary); padding: 12px; font-size: 14px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; min-height: 44px; }
+.tab-btn.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* Camera Viewfinder */
+.camera-container { position: relative; width: 100%; aspect-ratio: 3/4; background: #000; border-radius: var(--radius-md); overflow: hidden; }
+.camera-video { width: 100%; height: 100%; object-fit: cover; }
+.camera-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+.camera-guides { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+.guide-circle { width: 60%; aspect-ratio: 1; border: 2px dashed rgba(255,255,255,0.5); border-radius: 50%; }
+.camera-quality-badge { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.6); color: #fff; padding: 4px 12px; border-radius: 16px; font-size: 12px; font-weight: 500; backdrop-filter: blur(4px); }
+.camera-controls { position: absolute; bottom: 0; left: 0; width: 100%; padding: 24px; display: flex; align-items: center; justify-content: space-between; background: linear-gradient(transparent, rgba(0,0,0,0.8)); }
+.camera-shutter { width: 72px; height: 72px; border-radius: 50%; background: transparent; border: 4px solid #fff; padding: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform var(--transition-fast); }
+.camera-shutter:active { transform: scale(0.95); }
+.shutter-inner { width: 100%; height: 100%; background: #fff; border-radius: 50%; transition: background var(--transition-fast); }
+.camera-shutter:active .shutter-inner { background: #e5e7eb; }
+.camera-switch-btn, .camera-flash-btn { width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,0.2); border: none; color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; backdrop-filter: blur(4px); }
+
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 32px 16px; text-align: center; color: var(--text-muted); }
+.empty-state-text { margin-top: 12px; font-size: 14px; }
+
+/* Results Grid */
+.summary-chips { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+.chip { padding: 8px 12px; border-radius: 16px; font-size: 12px; font-weight: 500; border: 1px solid var(--border-subtle); background-color: var(--bg-elevated); }
+.results-grid { display: grid; grid-template-columns: 1fr; gap: 16px; margin-bottom: 24px; }
+.face-card { background-color: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; display: flex; flex-direction: row; }
+.face-img-wrap { width: 100px; aspect-ratio: 1; overflow: hidden; background-color: var(--bg-input); flex-shrink: 0; }
+.face-img { width: 100%; height: 100%; object-fit: cover; }
+/* min-width:0 is what lets this shrink. A flex item defaults to min-width:auto,
+   so it refuses to go below its content's intrinsic width - and because the
+   card sets overflow:hidden, the surplus was silently clipped rather than
+   wrapping. That is what cut the "Who is this?" buttons in half. */
+.face-info { padding: 12px; flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center;}
+.face-info .btn { white-space: normal; }   /* buttons may wrap in a narrow card */
+
+/* Stacked variant for grids of face thumbnails. Side by side, a 100px image
+   plus a caption plus a button needs more width than a grid cell has. */
+.face-card.stacked { flex-direction: column; }
+.face-card.stacked .face-img-wrap { width: 100%; aspect-ratio: auto; }
+.face-card.stacked .face-info { justify-content: flex-start; gap: 4px; }
+.face-name { font-weight: 600; margin-bottom: 4px; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.face-sub { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); margin-bottom: 8px;}
+.similarity-bar-wrap { height: 4px; background-color: var(--track); border-radius: 2px; margin-bottom: 8px; overflow: hidden; }
+.similarity-bar { height: 100%; background-color: var(--green); }
+.annotated-img-wrap { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; }
+.annotated-img { display: block; max-width: 100%; height: auto; }
+
+/* Students Grid */
+.students-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 20px;
+}
+
+.student-card {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    position: relative;
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.student-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+}
+
+.student-photo-wrap {
+    width: 100%;
+    aspect-ratio: 4/3;
+    background-color: var(--bg-elevated);
+}
+
+.student-photo {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.student-info {
+    padding: 16px;
+}
+
+.student-name {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 2px;
+}
+
+.student-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.student-roll {
+    font-family: var(--font-mono);
+}
+
+.btn-delete-student {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    opacity: 0;
+    color: #fff;
+    background: rgba(16,24,40,0.55);
+    backdrop-filter: blur(4px);
+}
+
+.student-card:hover .btn-delete-student {
+    opacity: 1;
+}
+
+.btn-delete-student:hover { background: var(--red); color: #fff; }
+
+/* Modals */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background-color: var(--scrim);
+    backdrop-filter: blur(2px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+}
+
+.modal-dialog {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    width: 100%;
+    max-width: 480px;
+    box-shadow: var(--shadow-lg);
+    display: flex;
+    flex-direction: column;
+    max-height: 90vh;
+    overflow: hidden;
+}
+
+.modal-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.modal-title {
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.modal-body {
+    padding: 20px;
+    overflow-y: auto;
+}
+
+.modal-footer {
+    padding: 16px 20px;
+    border-top: 1px solid var(--border-subtle);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+/* Toasts */
+.toast-container {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 3000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 320px;
+}
+
+.toast {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    padding: 12px 16px;
+    border-radius: var(--radius-md);
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    box-shadow: var(--shadow-md);
+}
+
+.toast-title {
+    font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 2px;
+}
+
+.toast-message {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+/* ==========================================================================
+   Responsive Breakpoints for Mobile (< 768px)
+   ========================================================================== */
+@media (max-width: 768px) {
+    body {
+        overflow: auto;
+    }
+
+    .app-layout {
+        flex-direction: column;
+        height: auto;
+        min-height: 100vh;
+        overflow: visible;
+    }
+
+    .sidebar {
+        position: fixed;
+        top: 0;
+        left: -280px;
+        width: 260px;
+        height: 100vh;
+        z-index: 1500;
+        transition: left var(--transition-fast);
+    }
+
+    .sidebar.open {
+        left: 0;
+    }
+
+    .sidebar-overlay {
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: var(--scrim);
+        z-index: 1400;
+        display: none;
+        opacity: 0;
+        transition: opacity var(--transition-fast);
+    }
+
+    .sidebar-overlay.active {
+        display: block;
+        opacity: 1;
+    }
+
+    .hamburger-btn {
+        display: inline-flex;
+    }
+
+    /* A fixed height plus align-items:center made wrapped action buttons
+       overflow UPWARDS out of the bar - "Take Attendance" was rendering at
+       top:-20px, on top of the title. The bar grows to fit its content
+       instead, with the actions on their own full-width row. */
+    .top-header {
+        height: auto;
+        min-height: 56px;
+        padding: 8px 16px;
+        position: sticky;
+        top: 0;
+        z-index: 200;
+        flex-wrap: wrap;
+        row-gap: 8px;
+        align-items: center;
+    }
+    .mobile-header { flex: 1 1 auto; min-width: 0; }
+    .header-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    /* One scrollable row rather than wrapping. Wrapping worked, but three
+       buttons stacked made the sticky bar 165px tall - a fifth of the screen,
+       permanently. This keeps it at a predictable two rows however many
+       actions a page has. */
+    .top-header .header-actions {
+        flex: 1 1 100%;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+    }
+    .top-header .header-actions::-webkit-scrollbar { display: none; }
+    .top-header .header-actions > .btn { flex: 0 0 auto; }
+
+    .main-content {
+        height: auto;
+        padding-bottom: 64px;
+        overflow: visible;
+    }
+
+    .page-container {
+        padding: 16px;
+        overflow: visible;
+    }
+
+    .bottom-nav {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 56px;
+        background-color: var(--bg-surface);
+        border-top: 1px solid var(--border-subtle);
+        display: flex;
+        z-index: 900;
+        padding-bottom: env(safe-area-inset-bottom);
+    }
+
+    .bottom-nav-item {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-secondary);
+        font-size: 10px;
+        gap: 3px;
+        transition: color var(--transition-fast);
+        min-height: 44px;
+    }
+
+    .bottom-nav-item.active {
+        color: var(--accent);
+    }
+
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+    }
+
+    .dashboard-layout {
+        grid-template-columns: 1fr;
+        gap: 16px;
+    }
+
+    .mark-layout {
+        grid-template-columns: 1fr;
+        height: auto;
+        gap: 16px;
+    }
+
+    .students-grid {
+        grid-template-columns: 1fr;
+        gap: 12px;
+    }
+
+    .search-box {
+        width: 100%;
+    }
+
+    .toast-container {
+        left: 16px;
+        right: 16px;
+        bottom: 72px;
+        width: auto;
+    }
+
+    .modal-dialog {
+        width: 92%;
+        max-height: 85vh;
+    }
+
+    .btn-delete-student {
+        opacity: 1;
+    }
+}
+/* ==========================================================================
+   Login gate
+   ========================================================================== */
+.login-gate {
+    position: fixed; inset: 0; z-index: 5000;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px; background: var(--bg-base); overflow-y: auto;
+}
+.login-card {
+    width: 100%; max-width: 380px; background: var(--bg-surface);
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-lg);
+    padding: 28px; box-shadow: var(--shadow-md);
+}
+.login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+.login-title { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+.login-sub { font-size: 12px; color: var(--text-muted); }
+.login-error {
+    background: var(--red-bg); color: var(--red); border-radius: var(--radius-md);
+    padding: 10px 12px; font-size: 12px; margin-bottom: 14px;
+}
+.login-foot {
+    margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border-subtle);
+    font-size: 11px; color: var(--text-muted); line-height: 1.6;
+}
+
+/* User chip in the sidebar footer */
+.user-chip { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.user-chip-avatar {
+    width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+    background: var(--accent); color: var(--on-accent);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px;
+}
+.user-chip-text { min-width: 0; }
+.user-chip-name {
+    font-size: 13px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.user-chip-role {
+    font-size: 11px; color: var(--text-muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.user-chip-actions { display: flex; gap: 6px; }
+
+/* ==========================================================================
+   Centres
+   ========================================================================== */
+.centre-search-bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.centre-grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+.centre-card {
+    background: var(--bg-surface); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg); padding: 16px; cursor: pointer;
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast),
+                border-color var(--transition-fast);
+    box-shadow: var(--shadow-sm);
+}
+.centre-card:hover {
+    transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--border-hover);
+}
+.centre-card-head { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+.centre-name { font-weight: 600; font-size: 15px; }
+.centre-code { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
+.centre-meta { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.centre-card-foot {
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-subtle);
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+}
+.ck {
+    display: inline-block; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; margin-right: 6px;
+}
+.tag {
+    display: inline-block; padding: 2px 8px; margin: 2px 3px 2px 0;
+    background: var(--accent-bg); color: var(--accent);
+    border-radius: 10px; font-size: 11px; font-weight: 500;
+}
+.detail-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 14px; font-size: 13px;
+}
+.detail-people {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px;
+}
+.detail-person {
+    display: flex; align-items: center; gap: 10px; padding: 8px;
+    background: var(--bg-elevated); border-radius: var(--radius-md);
+}
+
+/* ==========================================================================
+   Shared: scrollable charts, notices, form rows
+   ========================================================================== */
+.chart-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.notice {
+    padding: 12px 14px; border-radius: var(--radius-md); font-size: 12px; line-height: 1.6;
+    border-left: 3px solid;
+}
+.notice-blue  { background: var(--accent-bg); border-color: var(--accent); }
+.notice-amber { background: var(--amber-bg);  border-color: var(--amber); }
+.notice code {
+    font-family: var(--font-mono); font-size: 11px;
+    background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;
+}
+
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+@media (max-width: 768px) {
+    .form-row { grid-template-columns: 1fr; }
+    .centre-grid { grid-template-columns: 1fr; }
+    .login-card { padding: 22px; }
+}
+
+/* Ranked identity suggestions when correcting an unmatched face */
+.suggest-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 10px; border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md); margin-bottom: 7px; cursor: pointer;
+    background: var(--surface); transition: all var(--transition-fast);
+}
+.suggest-row:hover { border-color: var(--accent); background: var(--accent-bg); }
+.suggest-row:first-child { border-color: var(--border-hover); }
+
+/* Guided multi-view enrolment capture */
+.mv-stage {
+    position: relative; width: 100%; aspect-ratio: 4/3;
+    background: #000; border-radius: var(--radius-md); overflow: hidden;
+}
+.mv-stage video {
+    width: 100%; height: 100%; object-fit: cover;
+    transform: scaleX(-1);          /* mirror the preview only, never the capture */
+}
+/* The ring is the whole interface: 24 segments around the face, each lighting
+   as that angle is covered. Progress is a map of which poses exist, not a
+   count of button presses. */
+.mv-ringsvg {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    height: 96%; aspect-ratio: 1; pointer-events: none;
+}
+.mv-seg {
+    fill: rgba(255,255,255,0.28);
+    transition: fill 160ms ease-out;
+}
+/* Lit segments are green AND noticeably brighter, so the state does not rest
+   on colour alone. */
+.mv-seg.lit { fill: var(--green); }
+
+/* Darkens everything outside the face circle, which is what makes people
+   centre themselves without being told to. */
+.mv-mask {
+    position: absolute; inset: 0; pointer-events: none;
+    background: rgba(0,0,0,0.45);
+    -webkit-mask: radial-gradient(circle at 50% 50%, transparent 0 41%, #000 42%);
+    mask: radial-gradient(circle at 50% 50%, transparent 0 41%, #000 42%);
+}
+
+.mv-step {
+    position: absolute; bottom: 0; left: 0; right: 0; padding: 12px;
+    background: linear-gradient(transparent, rgba(0,0,0,0.75));
+    color: #fff; font-weight: 600; font-size: 15px; text-align: center;
+}
+.mv-count {
+    text-align: center; margin-top: 10px; font-size: 13px; font-weight: 600;
+    color: var(--text-secondary); font-variant-numeric: tabular-nums;
+}
+.mv-flash {
+    position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none;
+}
+.mv-flash.fire { animation: mv-flash 260ms ease-out; }
+@keyframes mv-flash { from { opacity: 0.55; } to { opacity: 0; } }
+
+
+/* ==========================================================================
+   Mobile layout
+   --------------------------------------------------------------------------
+   Measured at 375px rather than guessed: the page header's button row was
+   pushing four pages 47-129px past the viewport because it could not wrap, and
+   the records table is 724px wide, which "worked" only by sideways scrolling.
+   ========================================================================== */
+@media (max-width: 768px) {
+    .page-container { padding: 16px; }
+
+    /* Title above the buttons, and the buttons share the width evenly rather
+       than overflowing. */
+    .page-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+    }
+    .header-actions { width: 100%; }
+    .header-actions > .btn,
+    .header-actions > a.btn { flex: 1 1 auto; justify-content: center; }
+
+    /* Records: one card per person instead of a table nobody can read on a
+       phone. Same markup and the same renderer - each cell carries the column
+       name in data-label and shows it here. */
+    .data-table-wrapper { overflow-x: visible; }
+    .data-table { min-width: 0; display: block; }
+    .data-table thead { display: none; }
+    .data-table tbody, .data-table tr, .data-table td { display: block; width: auto; }
+    .data-table tr {
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        background: var(--bg-elevated);
+        padding: 12px 14px;
+        margin-bottom: 10px;
+    }
+    .data-table td {
+        border: none;
+        padding: 5px 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        text-align: right;
+    }
+    .data-table td::before {
+        content: attr(data-label);
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-muted);
+        text-align: left;
+        flex-shrink: 0;
+    }
+    /* The person is the card's heading, so it spans the full width. */
+    .data-table td.cell-primary {
+        justify-content: flex-start;
+        text-align: left;
+        padding-bottom: 10px;
+        margin-bottom: 6px;
+        border-bottom: 1px solid var(--border-subtle);
+        font-size: 15px;
+    }
+    .data-table td.cell-primary::before { content: none; }
+
+    .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .results-grid { gap: 12px; }
+
+    /* Inputs below 16px make iOS zoom the page on focus, which then leaves the
+       layout scrolled sideways. */
+    .form-input, .form-select, input[type="date"], select, textarea { font-size: 16px; }
+
+    .modal { width: 100%; max-width: 100%; margin: 0; border-radius: 0; }
+    .modal-footer { flex-wrap: wrap; }
+    .modal-footer .btn { flex: 1 1 auto; }
+}
+
+
+/* Icons sit on the text baseline and take the colour of whatever they are in,
+   so one rule keeps every button, badge and heading consistent instead of each
+   call site guessing at vertical-align. */
+.icon {
+    display: inline-block;
+    vertical-align: -0.18em;
+    flex-shrink: 0;
+}
+.btn .icon, .badge .icon, .card-title .icon, .tab-btn .icon { margin-right: 6px; }
+.badge .icon { margin-right: 4px; vertical-align: -0.15em; }
+
+/* ==========================================================================
+   Charts
+   --------------------------------------------------------------------------
+   The marks live in SVG; this is the chrome around them - tooltip, legend,
+   stacked bar, ranked rows. Colours come from charts.js, which validated them
+   against this surface, so nothing here sets a series colour.
+   ========================================================================== */
+.ch-wrap { position: relative; }
+.ch-svg { display: block; overflow: visible; }
+
+/* The hit target is the mark plus slack, never only the painted pixels. */
+.ch-hit { cursor: pointer; outline: none; }
+.ch-hit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ch-hit.ch-active { filter: brightness(1.08); }
+
+.ch-tip {
+    position: absolute;
+    transform: translate(-50%, -100%);
+    background: var(--text-primary);
+    color: #fff;
+    padding: 6px 9px;
+    border-radius: var(--radius-md);
+    font-size: 12px;
+    line-height: 1.35;
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 10;
+    box-shadow: var(--shadow-md);
+}
+/* Value leads, label follows: the reader already knows the series and wants
+   the number. */
+.ch-tip strong { display: block; font-size: 13px; font-weight: 600; }
+.ch-tip span { display: block; opacity: 0.75; font-size: 11px; }
+
+/* Stacked bar: the 2px gaps are surface-coloured, not strokes - a border
+   around a segment adds ink that is not data. */
+.ch-stack {
+    display: flex; width: 100%; border-radius: var(--radius-md);
+    overflow: hidden; background: var(--track); gap: 2px;
+}
+.ch-seg { position: relative; display: flex; align-items: center; justify-content: center; min-width: 2px; }
+.ch-seg-label { font-size: 11px; font-weight: 600; color: #fff; }
+
+.ch-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; }
+.ch-key {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-secondary);
+}
+.ch-key-rect { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+.ch-key b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+
+/* Ranked horizontal bars. */
+.ch-ranked { display: flex; flex-direction: column; gap: 7px; }
+.ch-rank-row { display: grid; grid-template-columns: minmax(90px, 34%) 1fr auto; gap: 10px; align-items: center; }
+.ch-rank-label {
+    font-size: 12px; color: var(--text-secondary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ch-rank-track { height: 8px; background: var(--track); border-radius: 4px; overflow: hidden; }
+.ch-rank-fill { display: block; height: 100%; border-radius: 4px; }
+.ch-rank-value {
+    font-size: 12px; font-weight: 600; color: var(--text-primary);
+    font-variant-numeric: tabular-nums; min-width: 38px; text-align: right;
+}
+
+.ch-spark { display: block; }
+
+/* Every chart ships a table view, so no value is reachable only by hovering. */
+.chart-table { margin-top: 12px; }
+.chart-table summary {
+    cursor: pointer; font-size: 12px; color: var(--text-muted);
+    padding: 4px 0; user-select: none;
+}
+.chart-table summary:hover { color: var(--text-secondary); }
+.chart-data-table { margin-top: 8px; font-size: 12px; }
+.chart-data-table th { font-size: 11px; }
+
+.sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* Analytics layout */
+.analytics-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.analytics-grid .col-span-2 { grid-column: 1 / -1; }
+@media (max-width: 900px) {
+    .analytics-grid { grid-template-columns: 1fr; }
+}
+
+/* Stat tile: value, optional delta, optional sparkline. */
+.stat-spark { margin-top: 10px; }
+.stat-delta { font-size: 12px; font-weight: 600; margin-top: 2px; }
+.stat-delta.up { color: var(--green); }
+.stat-delta.down { color: var(--red); }
+.stat-delta.flat { color: var(--text-muted); }
+
+/* ==========================================================================
+   Motion
+   --------------------------------------------------------------------------
+   Every animation here is an entrance or a state change - nothing loops, and
+   nothing moves while the reader is trying to read it. Motion runs once, then
+   the interface is still.
+   Durations are short (200-700ms) because a chart that takes two seconds to
+   assemble is a chart you cannot glance at.
+   ========================================================================== */
+
+/* The line draws itself. pathLength="100" is set on the path so the dash
+   maths is the same whatever the real geometry is. */
+/* Note the resting state of all three of these is VISIBLE, and the hidden
+   state lives only inside the keyframe.
+   The obvious way to write a draw-on animation is a hidden base style plus
+   `forwards` - but then the animation is load-bearing: if it never runs, or
+   is interrupted, the data is simply not on screen. (Caught exactly that way:
+   with the tab backgrounded, animations freeze at time 0 and every line and
+   bar was invisible.) Written this way the chart is fully drawn by default and
+   the animation only borrows it for a moment on the way in. */
+.ch-line {
+    stroke-dasharray: 100;
+    animation: ch-draw 700ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+@keyframes ch-draw { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
+
+.ch-area { animation: ch-fade 500ms ease-out 250ms; }
+@keyframes ch-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* Markers and their labels land after the line has arrived under them. */
+.ch-dot {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: ch-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1) 620ms backwards;
+}
+@keyframes ch-pop { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: scale(1); } }
+
+/* Columns grow from the baseline - the axis the value is measured from.
+   transform-box:fill-box makes the origin the mark's own box, so "bottom"
+   means the bar's baseline rather than the SVG's. */
+.ch-bar {
+    transform-box: fill-box;
+    transform-origin: bottom;
+    animation: ch-grow 460ms cubic-bezier(0.4, 0, 0.2, 1) backwards;
+    animation-delay: calc(var(--i, 0) * 40ms);
+}
+@keyframes ch-grow { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+
+/* Stacked segments wipe outward from the start of the bar. */
+.ch-seg {
+    animation: ch-wipe 520ms cubic-bezier(0.4, 0, 0.2, 1) backwards;
+    animation-delay: calc(var(--i, 0) * 90ms);
+    transition: filter var(--transition-fast);
+}
+@keyframes ch-wipe { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.ch-seg { transform-origin: left center; }
+
+/* Ranked bars run out to their value. The target rides --w so the keyframe
+   can start from zero without JavaScript measuring anything. */
+.ch-rank-fill {
+    width: var(--w, 0%);
+    animation: ch-run 560ms cubic-bezier(0.4, 0, 0.2, 1) backwards;
+    animation-delay: calc(var(--i, 0) * 45ms);
+}
+@keyframes ch-run { from { width: 0; } to { width: var(--w, 0%); } }
+
+/* Cards and tiles rise in, staggered, so a dashboard assembles rather than
+   snapping into place all at once. */
+.stat-card, .analytics-grid > .card {
+    animation: ch-rise 380ms cubic-bezier(0.4, 0, 0.2, 1) backwards;
+}
+.stats-grid > .stat-card:nth-child(1) { animation-delay: 0ms; }
+.stats-grid > .stat-card:nth-child(2) { animation-delay: 60ms; }
+.stats-grid > .stat-card:nth-child(3) { animation-delay: 120ms; }
+.stats-grid > .stat-card:nth-child(4) { animation-delay: 180ms; }
+.analytics-grid > .card:nth-child(1) { animation-delay: 120ms; }
+.analytics-grid > .card:nth-child(2) { animation-delay: 180ms; }
+.analytics-grid > .card:nth-child(3) { animation-delay: 240ms; }
+.analytics-grid > .card:nth-child(4) { animation-delay: 300ms; }
+.analytics-grid > .card:nth-child(5) { animation-delay: 360ms; }
+@keyframes ch-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+/* Interface polish: things that respond to the pointer say so. */
+.stat-card { transition: box-shadow var(--transition-fast), transform var(--transition-fast); }
+.stat-card:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); }
+.ch-rank-row { transition: background var(--transition-fast); border-radius: var(--radius-sm); }
+.ch-rank-row:hover { background: var(--row-hover); }
+.ch-tip { animation: ch-tip-in 120ms ease-out; }
+@keyframes ch-tip-in { from { opacity: 0; transform: translate(-50%, -95%); } to { opacity: 1; transform: translate(-50%, -100%); } }
+.nav-item { transition: background var(--transition-fast), color var(--transition-fast); }
+
+/* Route changes fade in rather than snapping.
+   No `backwards` fill here, deliberately. The animation has no delay, so
+   backwards buys nothing - but it DOES pin the element at the keyframe's
+   opacity:0 whenever the animation is not advancing, which is what happens in
+   a backgrounded tab. That blanked the entire page content while a refetch was
+   in flight. Same rule as the chart marks: the resting state must be the
+   visible one. */
+#app-root > * { animation: ch-fade 220ms ease-out; }
+
+/* Someone who has asked the system for less motion gets none of it. The
+   information is identical either way - the animation was never carrying any
+   of it. */
+@media (prefers-reduced-motion: reduce) {
+    .ch-line, .ch-area, .ch-dot, .ch-bar, .ch-seg, .ch-rank-fill,
+    .stat-card, .analytics-grid > .card, .ch-tip, #app-root > * {
+        animation: none !important;
+        transition: none !important;
+    }
+    .ch-rank-fill { width: var(--w, 0%); }
+    .stat-card:hover { transform: none; }
+}
+
+/* Filter row: one row, above everything it scopes. */
+.filter-row {
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end;
+    margin-bottom: 16px;
+}
+.filter-field { display: flex; flex-direction: column; gap: 4px; }
+.filter-field > span { font-size: 11px; font-weight: 500; color: var(--text-muted); }
+.filter-field .form-select { min-width: 170px; height: 34px; padding: 0 10px; font-size: 13px; }
+
+/* Refetch holds the previous render instead of flashing a skeleton. */
+#analytics-body { transition: opacity var(--transition-fast); }
+#analytics-body.is-refetching { opacity: 0.45; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) {
+    #analytics-body { transition: none; }
+}
+
+/* ==========================================================================
+   Graphics polish
+   ========================================================================== */
+
+/* Curves and strokes render on sub-pixel geometry, so let the browser
+   antialias them properly rather than snapping to the pixel grid. */
+.ch-svg path, .ch-svg circle, .ch-spark path { shape-rendering: geometricPrecision; }
+/* Axis and gridlines are the opposite case: they are horizontal hairlines and
+   look soft unless snapped. */
+.ch-svg line { shape-rendering: crispEdges; }
+.ch-cross { shape-rendering: crispEdges; transition: opacity 120ms ease-out; }
+
+/* Focus and context: while the pointer is on one mark, the rest recede. The
+   hovered mark keeps its colour - nothing is hidden, the others just stop
+   competing for attention. */
+.ch-focusing .ch-hit { transition: opacity 140ms ease-out, filter 140ms ease-out; }
+.ch-focusing .ch-hit:not(.ch-active) { opacity: 0.45; }
+.ch-hit { transition: opacity 140ms ease-out, filter 140ms ease-out; }
+
+/* The tooltip glides between marks instead of teleporting. */
+.ch-tip {
+    transition: left 140ms cubic-bezier(0.4, 0, 0.2, 1),
+                top 140ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Radial meter. */
+.ch-meter { position: relative; display: inline-block; }
+.ch-meter-text {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 2px; pointer-events: none;
+}
+.ch-meter-value {
+    font-size: 27px; font-weight: 600; color: var(--text-primary);
+    line-height: 1; letter-spacing: -0.02em;
+    font-variant-numeric: proportional-nums;
+}
+.ch-meter-value small { font-size: 14px; font-weight: 600; color: var(--text-muted); margin-left: 1px; }
+.ch-meter-caption { font-size: 11px; color: var(--text-muted); }
+/* Resting state is the true value; the animation sweeps up to it. */
+.ch-meter-fill {
+    stroke-dashoffset: var(--dash, 0);
+    animation: ch-sweep 900ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes ch-sweep { from { stroke-dashoffset: var(--circ); } to { stroke-dashoffset: var(--dash); } }
+
+/* A shimmer while data is on its way - a shape in the right place, rather
+   than a spinner that says nothing about what is coming. */
+.ch-skeleton {
+    background: linear-gradient(90deg,
+        var(--bg-elevated) 25%, var(--bg-input) 37%, var(--bg-elevated) 63%);
+    background-size: 400% 100%;
+    animation: ch-shimmer 1.4s ease-in-out infinite;
+    border-radius: var(--radius-md);
+}
+@keyframes ch-shimmer { from { background-position: 100% 50%; } to { background-position: 0 50%; } }
+
+@media (prefers-reduced-motion: reduce) {
+    .ch-meter-fill, .ch-skeleton { animation: none !important; }
+    .ch-tip, .ch-hit, .ch-cross { transition: none !important; }
+    .ch-skeleton { background: var(--bg-elevated); }
+}
+
+.meter-row { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
+.meter-copy { flex: 1; min-width: 220px; }
+.meter-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }

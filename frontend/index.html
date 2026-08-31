@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#f5f6f8">
+    <title>FaceMark - Attendance System</title>
+
+    <!-- Installable on Android and iOS. iOS ignores the manifest for the home
+         screen icon and title, so those are repeated as apple-* meta tags. -->
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="FaceMark">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <!-- Login gate: shown until /api/auth/me resolves a live session -->
+    <div id="login-gate" class="login-gate hidden">
+      <div class="login-card">
+        <div class="login-brand">
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="logo-icon"><path d="M3 8.5V5a2 2 0 0 1 2-2h3.5"/><path d="M15.5 3H19a2 2 0 0 1 2 2v3.5"/><path d="M21 15.5V19a2 2 0 0 1-2 2h-3.5"/><path d="M8.5 21H5a2 2 0 0 1-2-2v-3.5"/><circle cx="12" cy="10.2" r="2.6"/><path d="M7.7 17.6a4.6 4.6 0 0 1 8.6 0"/></svg>
+          <div>
+            <div class="login-title">FaceMark</div>
+            <div class="login-sub">Khelo India centre attendance</div>
+          </div>
+        </div>
+        <form id="login-form">
+          <div class="form-group">
+            <label class="form-label" for="login-username">Username</label>
+            <input id="login-username" class="form-input" autocomplete="username" autocapitalize="none" spellcheck="false">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="login-password">Password</label>
+            <input id="login-password" type="password" class="form-input" autocomplete="current-password">
+          </div>
+          <div id="login-error" class="login-error hidden"></div>
+          <button type="submit" id="login-submit" class="btn btn-primary w-full">Sign in</button>
+        </form>
+        <div class="login-foot">
+          Coaches see only their own centre. Super admins see every centre,
+          all accounts and centre management.
+        </div>
+      </div>
+    </div>
+
+    <div class="app-layout hidden" id="app-shell">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="logo-icon"><path d="M3 8.5V5a2 2 0 0 1 2-2h3.5"/><path d="M15.5 3H19a2 2 0 0 1 2 2v3.5"/><path d="M21 15.5V19a2 2 0 0 1-2 2h-3.5"/><path d="M8.5 21H5a2 2 0 0 1-2-2v-3.5"/><circle cx="12" cy="10.2" r="2.6"/><path d="M7.7 17.6a4.6 4.6 0 0 1 8.6 0"/></svg>
+                <span class="logo-text">FaceMark</span>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="#/dashboard" class="nav-item" data-route="/dashboard">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"></rect><rect x="14" y="3" width="7" height="5" rx="1"></rect><rect x="14" y="12" width="7" height="9" rx="1"></rect><rect x="3" y="16" width="7" height="5" rx="1"></rect></svg>
+                    Dashboard
+                </a>
+                <a href="#/mark" class="nav-item" data-route="/mark">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                    Mark Attendance
+                </a>
+                <a href="#/students" class="nav-item" data-route="/students">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+                    Students
+                </a>
+                <a href="#/centres" class="nav-item" data-route="/centres">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+                    Centres
+                </a>
+                <a href="#/users" class="nav-item" data-route="/users" data-role-only="super_admin">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 11h-6"></path></svg>
+                    Accounts
+                </a>
+                <a href="#/analytics" class="nav-item" data-route="/analytics">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+                    Analytics
+                </a>
+                <a href="#/records" class="nav-item" data-route="/records">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                    Records
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-chip" id="user-chip"></div>
+                <div class="user-chip-actions">
+                    <button class="btn btn-secondary" style="flex:1;min-height:32px;font-size:12px"
+                            onclick="openPasswordModal()">Password</button>
+                    <button class="btn btn-secondary" style="flex:1;min-height:32px;font-size:12px"
+                            onclick="doLogout()">Sign out</button>
+                </div>
+                <button class="btn btn-secondary hidden" id="install-btn"
+                        style="width:100%;min-height:32px;font-size:12px;margin-top:8px"
+                        onclick="installApp()">Install app</button>
+                <div class="status-indicator" style="margin-top:12px">
+                    <span class="status-dot"></span>
+                    <span class="status-text" id="api-status-text">System Online</span>
+                </div>
+            </div>
+        </aside>
+        <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="top-header">
+                <div class="mobile-header">
+                    <button class="btn-icon hamburger-btn" id="hamburger-btn" aria-label="Menu">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+                    </button>
+                    <div class="header-title" id="page-title">Dashboard</div>
+                </div>
+                <div class="header-actions" id="header-actions">
+                    <!-- Dynamic based on page -->
+                </div>
+            </header>
+            
+            <div class="page-container" id="app-root">
+                <!-- Page content injected here -->
+            </div>
+        </main>
+        <nav class="bottom-nav" id="bottom-nav">
+            <a href="#/dashboard" class="bottom-nav-item" data-route="/dashboard">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"></rect><rect x="14" y="3" width="7" height="5" rx="1"></rect><rect x="14" y="12" width="7" height="9" rx="1"></rect><rect x="3" y="16" width="7" height="5" rx="1"></rect></svg>
+                <span>Dashboard</span>
+            </a>
+            <a href="#/mark" class="bottom-nav-item" data-route="/mark">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                <span>Capture</span>
+            </a>
+            <a href="#/students" class="bottom-nav-item" data-route="/students">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+                <span>Students</span>
+            </a>
+            <a href="#/records" class="bottom-nav-item" data-route="/records">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                <span>Records</span>
+            </a>
+        </nav>
+    </div>
+
+    <!-- Modals -->
+    <div id="modal-container" class="modal-overlay hidden">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 id="modal-title" class="modal-title">Modal Title</h3>
+                <button type="button" class="btn-icon modal-close" onclick="closeModal()">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+            <div class="modal-body" id="modal-body">
+                <!-- Content injected here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Page Templates -->
+    <template id="tpl-dashboard">
+        <div class="dashboard-page">
+            <div class="stats-grid" id="dashboard-stats">
+                <!-- Stats loaded here -->
+            </div>
+            <div class="card" style="margin-bottom:16px">
+                <div class="card-header">
+                    <h3 class="card-title">Athletes present per session</h3>
+                    <a href="#/analytics" class="text-xs" style="color:var(--accent);font-weight:600">All analytics</a>
+                </div>
+                <div class="card-body" id="dashboard-trend">
+                    <div class="text-sm text-muted">Loading...</div>
+                </div>
+            </div>
+            <div class="dashboard-layout">
+                <div class="dashboard-main">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3 class="card-title">Recent Activity</h3>
+                        </div>
+                        <div class="card-body p-0">
+                            <div class="activity-list" id="dashboard-recent">
+                                <!-- Activity loaded here -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="dashboard-side">
+                    
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <template id="tpl-mark">
+        <div class="mark-page">
+            </div>
+
+            <!-- Centre + geo status. A coach is pinned server-side to their own
+                 centre, so this selector is only meaningful for a super admin. -->
+            <div class="card mb-6" data-role-only="super_admin">
+                <div class="card-body" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+                    <div>
+                        <div class="card-title">Marking for centre</div>
+                        <div class="text-sm text-muted">Only this centre's students are marked present. Faces are still matched against every centre, so anyone from elsewhere is named rather than shown as unknown.</div>
+                    </div>
+                    <select id="mark-centre" class="form-input" style="max-width:300px;margin-left:auto">
+                        <option value="">No centre selected</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="mark-layout">
+                <!-- Left Panel -->
+                <div class="mark-controls">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3 class="card-title">Upload Group Photo</h3>
+                        </div>
+                        <div class="card-body">
+                            <form id="mark-form">
+                                <div class="capture-tabs">
+                                    <button type="button" class="tab-btn active" data-target="upload"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Upload</button>
+                                    <button type="button" class="tab-btn" data-target="camera"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>Camera</button>
+                                </div>
+                                
+                                <div class="tab-panel active" data-tab="upload">
+                                    <div class="dropzone" id="mark-dropzone">
+                                        <input type="file" id="mark-file" accept="image/*" class="hidden-input">
+                                        <div class="dropzone-content" id="mark-dropzone-content">
+                                            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-muted"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                                            <div class="mt-2 text-sm" style="font-weight: 500; color: var(--text-primary);">Click to upload or drag & drop</div>
+                                            <div class="text-xs text-muted mt-1">Supports JPG, PNG group photos</div>
+                                        </div>
+                                        <div class="image-preview-container hidden" id="mark-preview-container">
+                                            <img id="mark-preview" src="" alt="Preview" class="image-preview">
+                                            <button type="button" class="btn-clear-image" id="mark-clear-btn" aria-label="Clear image" title="Remove photo">
+                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="tab-panel" data-tab="camera">
+                                    <div class="camera-container" id="camera-container">
+                                        <video id="camera-video" class="camera-video" autoplay playsinline muted></video>
+                                        <canvas id="camera-overlay" class="camera-overlay"></canvas>
+                                        <div class="camera-guides">
+                                            <div class="guide-circle"></div>
+                                        </div>
+                                        <div class="camera-quality-badge" id="camera-quality">Ready</div>
+                                        <div class="camera-controls">
+                                            <button type="button" class="camera-flash-btn" id="camera-flash" aria-label="Flash">
+                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                                            </button>
+                                            <button type="button" class="camera-shutter" id="camera-shutter" aria-label="Take photo">
+                                                <div class="shutter-inner"></div>
+                                            </button>
+                                            <button type="button" class="camera-switch-btn" id="camera-switch" aria-label="Switch camera">
+                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"></polyline><polyline points="23 20 23 14 17 14"></polyline><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"></path></svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <input type="hidden" id="mark-source" name="source" value="upload">
+                                <button type="submit" class="btn btn-primary w-full mt-6" id="btn-process" disabled style="height: 42px; font-size: 14px; font-weight: 600;">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+                                    Take Attendance
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Right Panel -->
+                <div class="mark-results">
+                    <div class="card h-full flex flex-col">
+                        <div class="card-header flex-between">
+                            <h3 class="card-title">Attendance Results</h3>
+                        </div>
+                        <div class="card-body flex-1 overflow-auto" id="mark-results-container">
+                            <div class="empty-state">
+                                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-muted"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                                <div class="empty-state-text" style="font-size: 14px; font-weight: 500; color: var(--text-secondary); margin-top: 14px;">Ready to mark attendance</div>
+                                <div class="text-xs text-muted mt-1">Upload a group photo, or use the camera to take one now</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <template id="tpl-students">
+        <div class="students-page">
+            <div class="toolbar flex-between mb-6">
+                <div class="search-box">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <input type="text" id="student-search" placeholder="Search students..." class="form-input search-input">
+                </div>
+            </div>
+            <div class="students-grid" id="students-grid">
+                <!-- Students loaded here -->
+            </div>
+        </div>
+    </template>
+
+    <template id="tpl-records">
+        <div class="records-page">
+            <div class="toolbar flex-between mb-6">
+                <input type="date" id="records-date" class="form-input w-auto">
+                <button type="button" class="btn btn-secondary" id="btn-export">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    Export CSV
+                </button>
+            </div>
+            <div class="card">
+                <div class="card-body p-0">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Person</th>
+                                <th>Roll No</th>
+                                <th>Role</th>
+                                <th>Confidence</th>
+                                <th>Location</th>
+                                <th>Centre</th>
+                                <th>Time</th>
+                            </tr>
+                        </thead>
+                        <tbody id="records-table-body">
+                            <!-- Records loaded here -->
+                        </tbody>
+                    </table>
+                    <div id="records-empty" class="empty-state py-12 hidden">
+                        <div class="empty-state-text">No records found for this date</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+
+    <!-- ===== Centres ===== -->
+    <template id="tpl-centres">
+      <div class="card mb-6"><div class="card-body">
+        <div class="centre-search-bar">
+          <div class="search-box flex-1">
+            <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input id="centre-search" class="form-input search-input" oninput="onCentreSearch()"
+                   placeholder="Search by name, code, state, district, address, sport or in-charge...">
+          </div>
+          <select id="centre-state-filter" class="form-input" style="max-width:190px" onchange="runCentreSearch()">
+            <option value="">All states</option></select>
+          <select id="centre-sport-filter" class="form-input" style="max-width:190px" onchange="runCentreSearch()">
+            <option value="">All sports</option></select>
+        </div>
+        <div class="text-sm text-muted mt-2" id="centre-count"></div>
+      </div></div>
+      <div id="centres-root"></div>
+    </template>
+
+    <!-- ===== Analytics ===== -->
+
+    <!-- ===== Performance ===== -->
+
+    <!-- ===== Users ===== -->
+    <template id="tpl-users">
+      <div id="users-root"></div>
+    </template>
+
+    <script src="/static/js/icons.js"></script>
+    <script src="/static/js/charts.js"></script>
+    <script src="/static/js/auth.js"></script>
+    <script src="/static/js/pages.js"></script>
+    <script src="/static/js/app.js"></script>
+
+    <script>
+    // Registration is deliberately after load: a service worker installing
+    // during startup competes with the app's own first requests.
+    //
+    // A home-screen PWA icon is not a browser tab a user habitually refreshes.
+    // Without an explicit update path, a fix shipped to the server can sit
+    // unused indefinitely in an already-installed app - the exact way "works
+    // in the browser, not in the installed app" bugs get reported days after
+    // the underlying issue was already fixed. skipWaiting()/clients.claim() in
+    // sw.js make a new worker take over immediately once found; this reloads
+    // the page ONCE when that happens, so the takeover actually reaches code
+    // already running in memory rather than only affecting the next tab.
+    if ('serviceWorker' in navigator) {
+        // sw.js calls self.skipWaiting() unconditionally, so a new worker never
+        // sits in "waiting" - it activates and claims every open client almost
+        // immediately. What is missing without this listener is the reload: an
+        // already-open page keeps running the OLD app.js from memory even after
+        // the new worker takes over, because JS that has already executed does
+        // not re-run itself. This reloads once when that handover happens.
+        let reloaded = false;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (reloaded) return;      // controllerchange can fire more than once
+            reloaded = true;
+            location.reload();
+        });
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/sw.js').catch(() => { /* still works uninstalled */ });
+        });
+    }
+
+    // Android fires beforeinstallprompt and lets us show our own button. iOS
+    // never fires it and has no API - there, Safari's Share > Add to Home
+    // Screen is the only route, so we tell the user that instead of showing a
+    // button that cannot work.
+    let deferredInstall = null;
+    window.addEventListener('beforeinstallprompt', e => {
+        e.preventDefault();
+        deferredInstall = e;
+        const b = document.getElementById('install-btn');
+        if (b) b.classList.remove('hidden');
+    });
+    window.addEventListener('appinstalled', () => {
+        deferredInstall = null;
+        const b = document.getElementById('install-btn');
+        if (b) b.classList.add('hidden');
+    });
+    async function installApp() {
+        const isStandalone = window.matchMedia('(display-mode: standalone)').matches
+                             || window.navigator.standalone === true;
+        if (isStandalone) { showToast('Already installed', 'You are using the installed app.', 'info'); return; }
+        if (deferredInstall) {
+            deferredInstall.prompt();
+            await deferredInstall.userChoice;
+            deferredInstall = null;
+            return;
+        }
+        const iOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        showToast('Add to Home Screen',
+                  iOS ? 'Tap the Share button in Safari, then "Add to Home Screen".'
+                      : 'Open your browser menu and choose "Install app" or "Add to Home screen".',
+                  'info');
+    }
+    </script>
+</body>
+</html>

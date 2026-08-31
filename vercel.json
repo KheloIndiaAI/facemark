@@ -1,0 +1,29 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "outputDirectory": "frontend",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://cincinnati-totals-european-context.trycloudflare.com/api/:path*"
+    },
+    {
+      "source": "/static/:path*",
+      "destination": "/:path*"
+    },
+    {
+      "source": "/((?!api/|static/|css/|js/).*)",
+      "destination": "/index.html"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(css|js)/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=600"
+        }
+      ]
+    }
+  ]
+}

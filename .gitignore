@@ -1,0 +1,65 @@
+# --- Model weights -----------------------------------------------------------
+# ~1 GB total, and three files exceed GitHub's hard 100 MB per-file limit.
+# scripts/download_models.py fetches them during the Docker build instead.
+data/models/
+
+# --- Runtime data ------------------------------------------------------------
+# Enrolment photos, group uploads, face crops and the SQLite database are all
+# user data. On Render these live on the mounted persistent disk, not in git.
+data/uploads/
+data/students/
+data/temp_crops/
+data/*.db
+data/*.db.bak
+data/*.sqlite
+data/*.sqlite3
+
+# --- Python ------------------------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Local backups and scratch -----------------------------------------------
+.backup_baseline/
+.backup_pre_removal/
+samples/generated_groups/
+samples/groups/
+samples/individuals/
+samples/test_suite/
+
+# --- Editors / OS ------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Secrets -----------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Node (Vercel CLI) -------------------------------------------------------
+node_modules/
+.vercel
+
+# Editor/tool backups
+*.bak
+
+# Real athlete photographs used for testing. Biometric data of minors must not
+# be committed - the test harness reads them from data/testset/ locally.
+data/testset/
+
+# Roster imports carry real names, NSRS ids and face crops of athletes, most of
+# them minors. Same rule as data/testset/ - it stays on disk, never in git.
+data/roster_import/
+
+# --- Server scratch logs -----------------------------------------------------
+server.log
+server.err

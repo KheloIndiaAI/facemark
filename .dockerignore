@@ -1,0 +1,28 @@
+# Keep the build context small - it is uploaded to the builder in full.
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# Models are downloaded inside the build, never copied from the host.
+data/models/
+
+# Runtime data belongs on the mounted disk.
+data/uploads/
+data/students/
+data/temp_crops/
+data/*.db
+data/*.db.bak
+
+.backup_baseline/
+.backup_pre_removal/
+samples/
+.git/
+.github/
+.vercel/
+node_modules/
+*.md
+!README.md
+.env
+.env.*

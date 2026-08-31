@@ -1,0 +1,147 @@
+{
+  "students": [
+    {
+      "id": "CS-2024-001",
+      "name": "Ricardo Richards",
+      "enrollment": "data/students/enroll_CS-2024-001.jpg"
+    },
+    {
+      "id": "CS-2024-002",
+      "name": "Jenny Turner",
+      "enrollment": "data/students/enroll_CS-2024-002.jpg"
+    },
+    {
+      "id": "CS-2024-003",
+      "name": "Scott Campbell",
+      "enrollment": "data/students/enroll_CS-2024-003.jpg"
+    },
+    {
+      "id": "CS-2024-004",
+      "name": "Enrique Daniels",
+      "enrollment": "data/students/enroll_CS-2024-004.jpg"
+    },
+    {
+      "id": "CS-2024-005",
+      "name": "Brandon Holmes",
+      "enrollment": "data/students/enroll_CS-2024-005.jpg"
+    },
+    {
+      "id": "CS-2024-006",
+      "name": "Addison Armstrong",
+      "enrollment": "data/students/enroll_CS-2024-006.jpg"
+    },
+    {
+      "id": "CS-2024-007",
+      "name": "Jerome Williams",
+      "enrollment": "data/students/enroll_CS-2024-007.jpg"
+    },
+    {
+      "id": "CS-2024-008",
+      "name": "Milton Hill",
+      "enrollment": "data/students/enroll_CS-2024-008.jpg"
+    },
+    {
+      "id": "CS-2024-009",
+      "name": "Pallavi Anchan",
+      "enrollment": "data/students/enroll_CS-2024-009.jpg"
+    },
+    {
+      "id": "CS-2024-010",
+      "name": "Hugh Williams",
+      "enrollment": "data/students/enroll_CS-2024-010.jpg"
+    },
+    {
+      "id": "CS-2024-011",
+      "name": "Greg Miles",
+      "enrollment": "data/students/enroll_CS-2024-011.jpg"
+    },
+    {
+      "id": "CS-2024-012",
+      "name": "Sumana Nagane",
+      "enrollment": "data/students/enroll_CS-2024-012.jpg"
+    },
+    {
+      "id": "CS-2024-101",
+      "name": "Aarav Sharma",
+      "enrollment": "data/students/enroll_CS-2024-101.jpg"
+    },
+    {
+      "id": "CS-2024-102",
+      "name": "Priya Patel",
+      "enrollment": "data/students/enroll_CS-2024-102.jpg"
+    },
+    {
+      "id": "CS-2024-103",
+      "name": "Rohan Kumar",
+      "enrollment": "data/students/enroll_CS-2024-103.jpg"
+    },
+    {
+      "id": "CS-2024-104",
+      "name": "Ananya Singh",
+      "enrollment": "data/students/enroll_CS-2024-104.jpg"
+    },
+    {
+      "id": "CS-2024-105",
+      "name": "Vikram Mehta",
+      "enrollment": "data/students/enroll_CS-2024-105.jpg"
+    }
+  ],
+  "group_photos": [
+    {
+      "file": "samples/groups/group_1.jpg",
+      "expected_ids": [
+        "CS-2024-002",
+        "CS-2024-003",
+        "CS-2024-001",
+        "CS-2024-005"
+      ]
+    },
+    {
+      "file": "samples/groups/group_2.jpg",
+      "expected_ids": [
+        "CS-2024-012",
+        "CS-2024-010",
+        "CS-2024-004",
+        "CS-2024-003"
+      ]
+    },
+    {
+      "file": "samples/groups/group_3.jpg",
+      "expected_ids": [
+        "CS-2024-011",
+        "CS-2024-006",
+        "CS-2024-002",
+        "CS-2024-012"
+      ]
+    },
+    {
+      "file": "samples/groups/group_4.jpg",
+      "expected_ids": [
+        "CS-2024-009",
+        "CS-2024-008",
+        "CS-2024-011",
+        "CS-2024-010",
+        "CS-2024-012",
+        "CS-2024-002"
+      ]
+    },
+    {
+      "file": "samples/test_suite/1_full_group_5_students.jpg",
+      "expected_ids": [
+        "CS-2024-101",
+        "CS-2024-102",
+        "CS-2024-103",
+        "CS-2024-104",
+        "CS-2024-105"
+      ]
+    },
+    {
+      "file": "samples/test_suite/2_subgroup_3_students.jpg",
+      "expected_ids": [
+        "CS-2024-101",
+        "CS-2024-103",
+        "CS-2024-105"
+      ]
+    }
+  ]
+}
