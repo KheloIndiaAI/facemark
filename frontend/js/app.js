@@ -237,6 +237,83 @@ class CameraCapture {
         });
     }
     
+    // Safari records MP4/H.264, Chrome and Firefox WebM/VP8-9. Both decode
+    // server-side through the same FFmpeg backend, so the first type this
+    // browser supports wins rather than forcing one and failing on the other.
+    static pickMimeType() {
+        if (!window.MediaRecorder) return null;
+        const candidates = [
+            'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm',
+            'video/mp4;codecs=avc1', 'video/mp4',
+        ];
+        for (const t of candidates) {
+            try { if (MediaRecorder.isTypeSupported(t)) return t; } catch { /* older browsers throw */ }
+        }
+        return '';
+    }
+
+    /** Record a short clip from the live stream.
+     *
+     * The clip is what proves the subject is a person rather than a photograph:
+     * a picture on a screen is flat, so everything in it moves as one plane,
+     * and the server measures that. A still frame cannot show it.
+     *
+     * @param {number} ms      how long to record
+     * @param {function} onTick called with 0..1 progress, for the UI ring
+     */
+    async recordClip(ms = 2000, onTick = null) {
+        if (!this.isActive || !this.stream) return null;
+        if (!window.MediaRecorder) {
+            showToast('Recording unavailable',
+                      'This browser cannot record video. Update it, or open the app in Chrome or Safari.',
+                      'error');
+            return null;
+        }
+        const mime = CameraCapture.pickMimeType();
+        let rec;
+        try {
+            rec = mime ? new MediaRecorder(this.stream, { mimeType: mime })
+                       : new MediaRecorder(this.stream);
+        } catch (err) {
+            showToast('Recording unavailable', 'The camera stream could not be recorded.', 'error');
+            return null;
+        }
+
+        const chunks = [];
+        rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+        const stopped = new Promise(resolve => { rec.onstop = resolve; });
+
+        if (navigator.vibrate) navigator.vibrate(40);
+        rec.start();
+
+        const t0 = Date.now();
+        // A timer rather than requestAnimationFrame: rAF is paused when the tab
+        // is not visible, which would leave a recording running with a frozen
+        // progress ring and no way to end it.
+        await new Promise(resolve => {
+            const tick = setInterval(() => {
+                const p = Math.min(1, (Date.now() - t0) / ms);
+                if (onTick) onTick(p);
+                if (p >= 1) { clearInterval(tick); resolve(); }
+            }, 50);
+        });
+
+        try { rec.stop(); } catch { /* already stopped */ }
+        await stopped;
+
+        if (!chunks.length) {
+            showToast('Nothing recorded', 'The camera produced no video. Try again.', 'error');
+            return null;
+        }
+        const type = (mime || 'video/webm').split(';')[0];
+        const ext = type.includes('mp4') ? 'mp4' : 'webm';
+        const blob = new Blob(chunks, { type });
+        const file = new File([blob], `clip_${Date.now()}.${ext}`, { type });
+        file.source = `camera_${this.facingMode}`;
+        file.isClip = true;
+        return file;
+    }
+
     _startQualityMonitor() {
         if (this.qualityTimer) clearInterval(this.qualityTimer);
         
@@ -633,125 +710,178 @@ async function populateMarkCentres() {
 
 function initMarkPage() {
     populateMarkCentres();
-    const fileInput = document.getElementById('mark-file');
-    const dropzone = document.getElementById('mark-dropzone');
-    const previewContainer = document.getElementById('mark-preview-container');
-    const previewImg = document.getElementById('mark-preview');
-    const dropContent = document.getElementById('mark-dropzone-content');
-    const clearBtn = document.getElementById('mark-clear-btn');
-    const retakeBtn = document.getElementById('mark-retake-btn');
-    const processBtn = document.getElementById('btn-process');
-    const form = document.getElementById('mark-form');
 
-    // Camera & Tabs
-    const tabBtns = document.querySelectorAll('.tab-btn');
-    const tabPanels = document.querySelectorAll('.tab-panel');
-    const sourceInput = document.getElementById('mark-source');
+    const camContainer = document.getElementById('camera-container');
+    const clipReview   = document.getElementById('clip-review');
+    const clipPreview  = document.getElementById('clip-preview');
+    const retakeBtn    = document.getElementById('mark-retake-btn');
+    const shutterBtn   = document.getElementById('camera-shutter');
+    const ringFill     = document.getElementById('rec-ring-fill');
+    const recHint      = document.getElementById('rec-hint');
+    const processBtn   = document.getElementById('btn-process');
+    const form         = document.getElementById('mark-form');
+    if (!form || !camContainer) return;
 
-    if (tabBtns.length > 0) {
-        currentCameraCapture = new CameraCapture(
-            document.getElementById('camera-video'),
-            document.getElementById('camera-overlay'),
-            document.getElementById('camera-quality')
-        );
-        // A group is photographed across the room, so attendance starts on the
-        // rear camera; registration photographs the person holding the device
-        // and keeps the front one. The switch button overrides either.
-        currentCameraCapture.facingMode = 'environment';
+    let clipUrl = null;              // object URL for the preview
+    let recording = false;
 
-        tabBtns.forEach(btn => {
-            btn.addEventListener('click', async () => {
-                tabBtns.forEach(b => b.classList.remove('active'));
-                tabPanels.forEach(p => p.classList.remove('active'));
-                btn.classList.add('active');
-                
-                const target = btn.getAttribute('data-target');
-                const panel = document.querySelector(`.tab-panel[data-tab="${target}"]`);
-                if (panel) panel.classList.add('active');
-                if (sourceInput) sourceInput.value = target;
+    currentCameraCapture = new CameraCapture(
+        document.getElementById('camera-video'),
+        document.getElementById('camera-overlay'),
+        document.getElementById('camera-quality')
+    );
+    // A group is photographed across the room, so attendance starts on the rear
+    // camera. The switch button overrides it.
+    currentCameraCapture.facingMode = 'environment';
+    currentCameraCapture.start();
 
-                if (target === 'camera') {
-                    await currentCameraCapture.start();
-                } else {
-                    currentCameraCapture.stop();
-                }
-            });
-        });
+    const switchBtn = document.getElementById('camera-switch');
+    const flashBtn  = document.getElementById('camera-flash');
+    if (switchBtn) switchBtn.addEventListener('click', () => currentCameraCapture.switchCamera());
+    if (flashBtn)  flashBtn.addEventListener('click', () => currentCameraCapture.toggleFlash());
 
-        const switchBtn = document.getElementById('camera-switch');
-        const flashBtn = document.getElementById('camera-flash');
-        const shutterBtn = document.getElementById('camera-shutter');
-        
-        if (switchBtn) switchBtn.addEventListener('click', () => currentCameraCapture.switchCamera());
-        if (flashBtn) flashBtn.addEventListener('click', () => currentCameraCapture.toggleFlash());
-        if (shutterBtn) shutterBtn.addEventListener('click', async () => {
-            const file = await currentCameraCapture.capture();
-            if (file) {
-                // Review happens on the upload tab, which also stops the stream:
-                // leaving the camera live behind a still frame burns battery and
-                // keeps the indicator light on for no reason.
-                tabBtns[0].click();
-                handleFile(file);
-                if (retakeBtn) retakeBtn.classList.remove('hidden');
-            }
-        });
+    const RING = 126;                // circumference of the progress ring
+    function setRing(p) {
+        if (ringFill) ringFill.style.strokeDashoffset = String(RING * (1 - p));
     }
 
-    // File Handling
-    function handleFile(file) {
-        if (!file || !file.type.startsWith('image/')) return;
-        currentMarkFile = file;
-        
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            previewImg.src = e.target.result;
-            dropContent.classList.add('hidden');
-            previewContainer.classList.remove('hidden');
-            processBtn.disabled = false;
-        };
-        reader.readAsDataURL(file);
-    }
-
-    fileInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
-    
-    dropzone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        dropzone.classList.add('dragover');
-    });
-    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
-    dropzone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropzone.classList.remove('dragover');
-        handleFile(e.dataTransfer.files[0]);
-    });
-
-    clearBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
+    function showCamera() {
+        if (clipUrl) { URL.revokeObjectURL(clipUrl); clipUrl = null; }
         currentMarkFile = null;
-        fileInput.value = '';
-        previewImg.src = '';
-        dropContent.classList.remove('hidden');
-        previewContainer.classList.add('hidden');
+        clipReview.classList.add('hidden');
+        camContainer.classList.remove('hidden');
         processBtn.disabled = true;
-        if (retakeBtn) retakeBtn.classList.add('hidden');
+        setRing(0);
+        if (recHint) recHint.classList.remove('hidden');
+        if (!currentCameraCapture.isActive) currentCameraCapture.start();
+    }
+
+    if (shutterBtn) shutterBtn.addEventListener('click', async () => {
+        if (recording) return;
+        recording = true;
+        shutterBtn.classList.add('recording');
+        if (recHint) recHint.textContent = 'Recording - move the phone slightly';
+
+        const file = await currentCameraCapture.recordClip(2000, setRing);
+
+        shutterBtn.classList.remove('recording');
+        recording = false;
+        setRing(0);
+        if (recHint) recHint.textContent = 'Hold steady, then move the phone slightly while recording';
+        if (!file) return;
+
+        currentMarkFile = file;
+        // Review the clip with the camera stopped: leaving the stream live
+        // behind a paused recording drains the battery and keeps the indicator
+        // light on for no reason.
+        currentCameraCapture.stop();
+        clipUrl = URL.createObjectURL(file);
+        clipPreview.src = clipUrl;
+        clipPreview.play().catch(() => {});
+        camContainer.classList.add('hidden');
+        clipReview.classList.remove('hidden');
+        processBtn.disabled = false;
     });
 
-    // Retake: discard the frame and go straight back to a live camera. Going
-    // through clearBtn and the tab button rather than duplicating their work
-    // keeps the file, the preview, the source field and the stream in step -
-    // the previous flow left the captured photo sitting on the upload tab with
-    // only a small unlabelled X to remove it, which read as "stuck".
-    if (retakeBtn) {
-        retakeBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            clearBtn.click();
-            const cameraTab = Array.from(tabBtns)
-                .find(b => b.getAttribute('data-target') === 'camera');
-            if (cameraTab) cameraTab.click();
-        });
-    }
+    if (retakeBtn) retakeBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        showCamera();
+    });
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!currentMarkFile) return;
+        processBtn.disabled = true;
+
+        const resultsContainer = document.getElementById('mark-results-container');
+        resultsContainer.innerHTML = `
+            <div style="padding: 40px 20px; background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); text-align: center;">
+                <div style="margin-bottom: 24px;">
+                    <svg class="spin" style="width: 32px; height: 32px; color: var(--accent); display: inline-block; animation: spin 1s linear infinite;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-opacity="0.25"></circle>
+                        <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-linecap="round"></path>
+                    </svg>
+                </div>
+                <div style="font-size: 14px; font-weight: 500; color: var(--text-primary); margin-bottom: 16px;" id="progress-text">Uploading the clip...</div>
+                <div style="width: 100%; height: 6px; background: var(--bg-elevated); border-radius: 3px; overflow: hidden; margin-bottom: 12px;">
+                    <div id="progress-bar" style="width: 0%; height: 100%; background: var(--accent); transition: width 0.3s ease;"></div>
+                </div>
+            </div>
+            <style>@keyframes spin { 100% { transform: rotate(360deg); } }</style>
+        `;
+
+        let progress = 0;
+        const progressEl = document.getElementById('progress-bar');
+        const textEl = document.getElementById('progress-text');
+        const phases = [
+            {p: 5,  t: "Uploading the clip..."},
+            {p: 30, t: "Checking the clip is a live person..."},
+            {p: 60, t: "Detecting faces..."},
+            {p: 80, t: "Matching against the roster..."},
+            {p: 92, t: "Saving attendance..."},
+        ];
+        let phaseIdx = 0;
+        const progressTimer = setInterval(() => {
+            if (phaseIdx < phases.length && progress >= phases[phaseIdx].p) {
+                textEl.textContent = phases[phaseIdx].t;
+                phaseIdx++;
+            }
+            if (progress < 96) {
+                progress += Math.random() * 1.5;
+                progressEl.style.width = Math.min(progress, 96) + '%';
+            }
+        }, 200);
+
+        const formData = new FormData();
+        formData.append('video', currentMarkFile);
+        formData.append('detection_mode', 'fused');
+
+        // Geo marking: attach the device fix if permission was granted. A
+        // refusal is not an error - the capture records as `no_fix` rather than
+        // blocking attendance.
+        const fix = await captureLocation();
+        if (fix) {
+            formData.append('latitude', fix.latitude);
+            formData.append('longitude', fix.longitude);
+            formData.append('accuracy_m', fix.accuracy);
+        }
+        if (session.user && session.user.centre_id) {
+            formData.append('centre_id', session.user.centre_id);
+        } else {
+            const cs = document.getElementById('mark-centre');
+            if (cs && cs.value) formData.append('centre_id', cs.value);
+        }
+        formData.append('source', currentMarkFile.source || 'video');
+
+        try {
+            const data = await api.postForm('/api/attendance/process-video', formData);
+            clearInterval(progressTimer);
+            progressEl.style.width = '100%';
+            textEl.textContent = "Done";
+
+            setTimeout(() => {
+                if (data.ok === false) {
+                    // Refused. The frames the server judged are shown alongside
+                    // the reason: a rejection nobody can inspect is one nobody
+                    // can appeal, and a coach needs to see what the camera saw.
+                    resultsContainer.innerHTML = livenessBanner(data.liveness, data.message)
+                        + `<div class="empty-state" style="padding-top:8px">
+                             <div class="text-xs text-muted">No attendance was recorded for this clip.</div>
+                           </div>`;
+                    showToast('Not accepted', data.message || 'The clip was refused', 'error');
+                    return;
+                }
+                renderMarkResults(data);
+                showToast('Success', `${data.recognized_count} student(s) marked present`, 'success');
+            }, 300);
+        } catch (err) {
+            clearInterval(progressTimer);
+            resultsContainer.innerHTML =
+                `<div style="color: var(--red);">Could not process the clip. Check the console.</div>`;
+        } finally {
+            processBtn.disabled = false;
+        }
+    });
 
     // Records, collapsed at the foot of the page.
     const recToggle = document.getElementById('btn-toggle-records');
@@ -776,103 +906,33 @@ function initMarkPage() {
             recToggle.setAttribute('aria-expanded', 'true');
         });
     }
-
-    // Submit
-    form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        if (!currentMarkFile) return;
-
-        processBtn.disabled = true;
-        
-        // --- Heavy Processing Progress Bar UI ---
-        const resultsContainer = document.getElementById('mark-results-container');
-        resultsContainer.innerHTML = `
-            <div style="padding: 40px 20px; background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); text-align: center;">
-                <div style="margin-bottom: 24px;">
-                    <svg class="spin" style="width: 32px; height: 32px; color: var(--accent); display: inline-block; animation: spin 1s linear infinite;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-opacity="0.25"></circle>
-                        <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-linecap="round"></path>
-                    </svg>
-                </div>
-                <div style="font-size: 14px; font-weight: 500; color: var(--text-primary); margin-bottom: 16px;" id="progress-text">Initializing AI Engine...</div>
-                <div style="width: 100%; height: 6px; background: var(--bg-elevated); border-radius: 3px; overflow: hidden; margin-bottom: 12px;">
-                    <div id="progress-bar" style="width: 0%; height: 100%; background: var(--accent); transition: width 0.3s ease;"></div>
-                </div>
-                <div style="font-size: 12px; color: var(--text-muted); id="progress-eta">Analyzing heavy crowd photo... estimating time</div>
-            </div>
-            <style>@keyframes spin { 100% { transform: rotate(360deg); } }</style>
-        `;
-
-        let progress = 0;
-        const progressEl = document.getElementById('progress-bar');
-        const textEl = document.getElementById('progress-text');
-        
-        // Every phase here once named a component that no longer exists -
-        // YOLO11, SCRFD, AdaFace, ArcFace, cascade verification, age-aware
-        // matching - all removed with the licence migration or at the
-        // customer's request. Naming the pipeline was never useful to the
-        // person waiting; naming the STAGE is.
-        const phases = [
-            {p: 5,  t: "Uploading photo..."},
-            {p: 35, t: "Detecting faces..."},
-            {p: 65, t: "Matching against the roster..."},
-            {p: 90, t: "Saving attendance..."}
-        ];
-        
-        let phaseIdx = 0;
-        const progressTimer = setInterval(() => {
-            if (phaseIdx < phases.length && progress >= phases[phaseIdx].p) {
-                textEl.textContent = phases[phaseIdx].t;
-                phaseIdx++;
-            }
-            if (progress < 96) {
-                progress += Math.random() * 1.5; // Simulate progress climbing slowly
-                progressEl.style.width = Math.min(progress, 96) + '%';
-            }
-        }, 200);
-
-        const formData = new FormData();
-        formData.append('photo', currentMarkFile);
-        formData.append('detection_mode', 'fused');
-
-        // Geo marking: attach the device fix if the user granted permission.
-        // A refusal or timeout is not an error - the capture is simply recorded
-        // as `no_fix` rather than blocking attendance.
-        const fix = await captureLocation();
-        if (fix) {
-            formData.append('latitude', fix.latitude);
-            formData.append('longitude', fix.longitude);
-            formData.append('accuracy_m', fix.accuracy);
-        }
-        if (session.user && session.user.centre_id) {
-            formData.append('centre_id', session.user.centre_id);
-        } else {
-            const cs = document.getElementById('mark-centre');
-            if (cs && cs.value) formData.append('centre_id', cs.value);
-        }
-        if (currentMarkFile.source) {
-            formData.append('source', currentMarkFile.source);
-        } else if (document.getElementById('mark-source')) {
-            formData.append('source', document.getElementById('mark-source').value);
-        }
-
-        try {
-            const data = await api.postForm('/api/attendance/process', formData);
-            clearInterval(progressTimer);
-            progressEl.style.width = '100%';
-            textEl.textContent = "Done!";
-            setTimeout(() => {
-                renderMarkResults(data);
-                showToast('Success', `${data.recognized_count} student(s) marked present`, 'success');
-            }, 300);
-        } catch (err) {
-            clearInterval(progressTimer);
-            resultsContainer.innerHTML = `<div style="color: var(--red);">Error processing image. Check console.</div>`;
-        } finally {
-            processBtn.disabled = false;
-        }
-    });
 }
+
+/** The liveness verdict, with the frames it was decided from.
+ *
+ * "inconclusive" is deliberately not styled as a failure: it means the clip
+ * carried no depth information either way, usually because nothing moved, and
+ * telling someone they were rejected when they were not is its own bug.
+ */
+function livenessBanner(l, message) {
+    if (!l) return '';
+    const kind = l.verdict === 'screen' ? 'bad'
+               : l.verdict === 'live'   ? 'good' : 'warn';
+    const title = l.verdict === 'screen' ? 'This looks like a screen, not a person'
+                : l.verdict === 'live'   ? 'Live capture confirmed'
+                : l.verdict === 'no_face' ? 'No face in the clip'
+                : 'Could not confirm this was live';
+    const frames = (l.frame_urls || []).map(u =>
+        `<img src="${Charts.esc(u)}" alt="Frame from the clip">`).join('');
+    return `
+        <div class="liveness-banner ${kind}">
+            <div class="liveness-title">${Charts.esc(title)}</div>
+            <div class="text-sm">${Charts.esc(message || l.reason || '')}</div>
+            ${frames ? `<div class="liveness-frames">${frames}</div>
+                        <div class="text-xs text-muted mt-1">Frames the check was made from</div>` : ''}
+        </div>`;
+}
+
 
 function geoBanner(geo) {
     if (!geo) return '';
@@ -899,8 +959,11 @@ function geoBanner(geo) {
 function renderMarkResults(data) {
     const container = document.getElementById('mark-results-container');
     const totalSec = (data.timings.total_ms / 1000).toFixed(1);
-    
-    let html = `
+
+    // Shown on success too, not only on refusal. A coach should be able to see
+    // that the liveness check ran and passed - a guard that is invisible when
+    // it works is one nobody trusts when it fires.
+    let html = livenessBanner(data.liveness) + `
         <!-- Sticky Quick Jump Slider Bar -->
         <div style="position: sticky; top: 0; z-index: 20; background: var(--bg-surface); padding-bottom: 12px; margin-bottom: 16px; border-bottom: 1px solid var(--border-subtle); display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
             <button type="button" class="btn btn-secondary" style="height: 30px; font-size: 12px; padding: 0 10px;" onclick="document.getElementById('sec-summary').scrollIntoView({behavior:'smooth'})">

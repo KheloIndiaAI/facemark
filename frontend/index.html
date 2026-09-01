@@ -220,62 +220,51 @@
                 <div class="mark-controls">
                     <div class="card">
                         <div class="card-header">
-                            <h3 class="card-title">Upload Group Photo</h3>
+                            <h3 class="card-title">Record attendance clip</h3>
                         </div>
                         <div class="card-body">
                             <form id="mark-form">
-                                <div class="capture-tabs">
-                                    <button type="button" class="tab-btn active" data-target="upload"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Upload</button>
-                                    <button type="button" class="tab-btn" data-target="camera"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>Camera</button>
-                                </div>
-                                
-                                <div class="tab-panel active" data-tab="upload">
-                                    <div class="dropzone" id="mark-dropzone">
-                                        <input type="file" id="mark-file" accept="image/*" class="hidden-input">
-                                        <div class="dropzone-content" id="mark-dropzone-content">
-                                            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-muted"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-                                            <div class="mt-2 text-sm" style="font-weight: 500; color: var(--text-primary);">Click to upload or drag & drop</div>
-                                            <div class="text-xs text-muted mt-1">Supports JPG, PNG group photos</div>
-                                        </div>
-                                        <div class="image-preview-container hidden" id="mark-preview-container">
-                                            <img id="mark-preview" src="" alt="Preview" class="image-preview">
-                                            <button type="button" class="btn-clear-image" id="mark-clear-btn" aria-label="Clear image" title="Remove photo">
-                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                                            </button>
-                                            <!-- Shown only for camera captures. The X above clears the
-                                                 photo but leaves you on the upload tab, which is the wrong
-                                                 place to stand if you meant to take another one. -->
-                                            <button type="button" class="btn-retake hidden" id="mark-retake-btn">
-                                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-3px;margin-right:5px"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
-                                                Retake
-                                            </button>
-                                        </div>
+                                <!-- Live capture only. A still photograph can be a
+                                     photograph OF a photograph, and nothing in a single
+                                     frame reliably tells the two apart. A short clip can:
+                                     a picture on a screen is flat, so everything in it
+                                     moves as one plane, which the server measures.
+                                     The gallery upload is gone for that reason. -->
+                                <div class="camera-container" id="camera-container">
+                                    <video id="camera-video" class="camera-video" autoplay playsinline muted></video>
+                                    <canvas id="camera-overlay" class="camera-overlay"></canvas>
+                                    <div class="camera-guides">
+                                        <div class="guide-circle"></div>
+                                    </div>
+                                    <div class="camera-quality-badge" id="camera-quality">Ready</div>
+                                    <div class="rec-hint" id="rec-hint">Hold steady, then move the phone slightly while recording</div>
+                                    <div class="camera-controls">
+                                        <button type="button" class="camera-flash-btn" id="camera-flash" aria-label="Flash">
+                                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                                        </button>
+                                        <button type="button" class="camera-shutter" id="camera-shutter" aria-label="Record a 2 second clip">
+                                            <svg class="rec-ring" viewBox="0 0 44 44" aria-hidden="true">
+                                                <circle class="rec-ring-track" cx="22" cy="22" r="20"></circle>
+                                                <circle class="rec-ring-fill" id="rec-ring-fill" cx="22" cy="22" r="20"></circle>
+                                            </svg>
+                                            <div class="shutter-inner"></div>
+                                        </button>
+                                        <button type="button" class="camera-switch-btn" id="camera-switch" aria-label="Switch camera">
+                                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"></polyline><polyline points="23 20 23 14 17 14"></polyline><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"></path></svg>
+                                        </button>
                                     </div>
                                 </div>
 
-                                <div class="tab-panel" data-tab="camera">
-                                    <div class="camera-container" id="camera-container">
-                                        <video id="camera-video" class="camera-video" autoplay playsinline muted></video>
-                                        <canvas id="camera-overlay" class="camera-overlay"></canvas>
-                                        <div class="camera-guides">
-                                            <div class="guide-circle"></div>
-                                        </div>
-                                        <div class="camera-quality-badge" id="camera-quality">Ready</div>
-                                        <div class="camera-controls">
-                                            <button type="button" class="camera-flash-btn" id="camera-flash" aria-label="Flash">
-                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-                                            </button>
-                                            <button type="button" class="camera-shutter" id="camera-shutter" aria-label="Take photo">
-                                                <div class="shutter-inner"></div>
-                                            </button>
-                                            <button type="button" class="camera-switch-btn" id="camera-switch" aria-label="Switch camera">
-                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"></polyline><polyline points="23 20 23 14 17 14"></polyline><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"></path></svg>
-                                            </button>
-                                        </div>
-                                    </div>
+                                <!-- The recorded clip, for review before it is submitted. -->
+                                <div class="clip-review hidden" id="clip-review">
+                                    <video id="clip-preview" class="camera-video" playsinline muted loop autoplay></video>
+                                    <button type="button" class="btn-retake" id="mark-retake-btn">
+                                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-3px;margin-right:5px"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
+                                        Record again
+                                    </button>
                                 </div>
-                                
-                                <input type="hidden" id="mark-source" name="source" value="upload">
+
+                                <input type="hidden" id="mark-source" name="source" value="camera">
                                 <button type="submit" class="btn btn-primary w-full mt-6" id="btn-process" disabled style="height: 42px; font-size: 14px; font-weight: 600;">
                                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
                                     Take Attendance

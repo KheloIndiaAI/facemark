@@ -343,6 +343,36 @@ a:hover { color: var(--accent-hover); }
 .camera-shutter:active .shutter-inner { background: #e5e7eb; }
 .camera-switch-btn, .camera-flash-btn { width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,0.2); border: none; color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; backdrop-filter: blur(4px); }
 
+/* Recording: a ring that fills over the two seconds, so the wait is legible
+   rather than a button that simply stops responding. */
+.camera-shutter { position: relative; }
+.rec-ring { position: absolute; inset: -6px; width: calc(100% + 12px); height: calc(100% + 12px); transform: rotate(-90deg); pointer-events: none; }
+.rec-ring-track { fill: none; stroke: rgba(255,255,255,0.25); stroke-width: 3; }
+.rec-ring-fill { fill: none; stroke: #ef4444; stroke-width: 3; stroke-linecap: round;
+                 stroke-dasharray: 126; stroke-dashoffset: 126; transition: stroke-dashoffset .08s linear; }
+.camera-shutter.recording .shutter-inner { background: #ef4444; border-radius: 22%; transform: scale(0.62); }
+.shutter-inner { transition: background var(--transition-fast), border-radius var(--transition-fast), transform var(--transition-fast); }
+
+.rec-hint { position: absolute; bottom: 96px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.55); color: #fff; padding: 6px 14px; border-radius: 999px;
+            font-size: 12px; font-weight: 500; backdrop-filter: blur(4px); max-width: 88%;
+            text-align: center; line-height: 1.35; }
+
+.clip-review { position: relative; width: 100%; aspect-ratio: 3/4; background: #000;
+               border-radius: var(--radius-md); overflow: hidden; }
+@media (min-width: 769px) {
+    .clip-review { max-width: 400px; margin-left: auto; margin-right: auto; }
+}
+
+/* Liveness outcome, shown with the frames the decision was made from. */
+.liveness-banner { border-radius: var(--radius-md); padding: 14px 16px; margin-bottom: 16px; border: 1px solid; }
+.liveness-banner.bad  { background: var(--red-bg, #fef2f2); border-color: #fca5a5; }
+.liveness-banner.warn { background: #fffbeb; border-color: #fcd34d; }
+.liveness-banner.good { background: #ecfdf5; border-color: #6ee7b7; }
+.liveness-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.liveness-frames { display: flex; gap: 6px; overflow-x: auto; margin-top: 12px; padding-bottom: 4px; }
+.liveness-frames img { height: 64px; border-radius: var(--radius-sm); flex: 0 0 auto; }
+
 .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 32px 16px; text-align: center; color: var(--text-muted); }
 .empty-state-text { margin-top: 12px; font-size: 14px; }
 
