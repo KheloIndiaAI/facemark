@@ -1146,6 +1146,129 @@ async def enroll_multiview(
     }
 
 
+@app.post("/api/students/register-video")
+async def register_student_from_video(
+    request: Request,
+    video: UploadFile = File(...),
+    name: str = Form(...),
+    roll_no: str = Form(...),
+    role: str = Form("athlete"),
+    centre_id: Optional[int] = Form(None),
+    gender: Optional[str] = Form(None),
+    sport: Optional[str] = Form(None),
+    phone: Optional[str] = Form(None),
+    user: dict = Depends(auth.current_user),
+):
+    """Register a new person from one short clip.
+
+    ORDER MATTERS HERE. The liveness check runs before any row is written.
+    Doing it the other way - create the student, then check - would leave a
+    half-registered person behind whenever a clip was refused: a roster entry
+    with no templates, which can never be recognised and which nobody is
+    prompted to clean up. Nothing is created unless the clip passes.
+
+    Registration is also the moment where a wrong identity becomes permanent. A
+    template built from a photograph held up to the camera lets that photograph
+    mark its subject present from then on, and no later check undoes it.
+    """
+    data = await video.read()
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    result = liveness.analyse(data, get_detector())
+    liveness_payload = result.to_dict()
+
+    if not result.is_live:
+        log.warning(
+            "Registration clip refused for '%s': %s (depth=%.5f motion=%.5f)",
+            roll_no, result.verdict, result.depth_score, result.motion,
+        )
+        return {"ok": False, "liveness": liveness_payload, "message": result.reason}
+
+    # The sharpest frame becomes the profile photo and the first template: face
+    # size and focus drive accuracy more than anything else measured here, and
+    # the first frame is often caught before the camera has settled.
+    if result.best_frame is None and not result.frames:
+        # A "live" verdict with no frames should be impossible now that the
+        # disabled path decodes too, but indexing [0] on an empty list here was
+        # a 500 once already, and this route writes roster rows about minors.
+        return {"ok": False, "liveness": liveness_payload,
+                "message": "Could not read any frames from the clip - record again"}
+    best = result.best_frame if result.best_frame is not None else result.frames[0]
+    templates, face, info = _enroll_photo_templates(best, "id")
+    if face is None:
+        return {
+            "ok": False,
+            "liveness": liveness_payload,
+            "message": "No usable face in the clip - move closer and record again",
+        }
+
+    ts = utils.timestamp()
+    photo_name = utils.save_image(best, "students", f"student_{ts}.jpg")
+
+    if role not in ("athlete", "coach"):
+        role = "athlete"
+    target_centre = auth.scope_centre(user, centre_id) or user.get("centre_id")
+    try:
+        student_id = database.add_student(
+            name.strip(), roll_no.strip(), photo_name, templates,
+            role=role, centre_id=target_centre, gender=gender,
+            sport=sport, phone=phone,
+        )
+    except database.IntegrityError:
+        raise HTTPException(409, f"Roll number '{roll_no}' is already registered")
+
+    database.save_photo_record(
+        file_path=photo_name,
+        photo_type="enrollment_id",
+        student_id=student_id,
+        file_size=len(data),
+        resolution=f"{best.shape[1]}x{best.shape[0]}",
+        device_info=request.headers.get("user-agent"),
+        faces_detected=info.get("faces_found", 0),
+    )
+
+    # The remaining frames go through the multi-view path, which applies the
+    # duplicate-embedding gate - so near-identical frames are skipped rather
+    # than filling the gallery with copies of one instant.
+    extra_uploads: List[_MemoryUpload] = []
+    for i, frame in enumerate(result.frames):
+        if frame is best:
+            continue
+        ok, buf = cv2.imencode(".jpg", frame,
+                               [cv2.IMWRITE_JPEG_QUALITY, config.CAMERA_PHOTO_QUALITY])
+        if ok:
+            extra_uploads.append(_MemoryUpload(buf.tobytes(), f"frame{i}_.jpg"))
+
+    extra = {}
+    if extra_uploads:
+        try:
+            extra = await enroll_multiview(
+                request=request, student_id=student_id, frames=extra_uploads, user=user,
+            )
+        except HTTPException as e:
+            # The person exists with a usable template already; extra views
+            # failing is a degraded result, not a failed registration.
+            log.warning("Extra views failed for new student %s: %s", student_id, e.detail)
+
+    log.info("Registered %s (%s) id=%s from clip, %d + %d template(s)",
+             name, roll_no, student_id, len(templates), extra.get("templates_added", 0))
+
+    return {
+        "ok": True,
+        "liveness": liveness_payload,
+        "student": {
+            "id": student_id,
+            "name": name.strip(),
+            "roll_no": roll_no.strip(),
+            "photo_url": f"/api/photos/{photo_name}",
+            **info,
+        },
+        "templates": len(templates) + extra.get("templates_added", 0),
+        "poses_captured": extra.get("poses_captured", []),
+    }
+
+
 @app.post("/api/students/{student_id}/enroll-video")
 async def enroll_from_video(
     request: Request,

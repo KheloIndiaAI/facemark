@@ -206,7 +206,27 @@ def _depth_from_parallax(
 def analyse(data: bytes, detector) -> LivenessResult:
     """Judge a short clip. Never raises for bad input - it returns a verdict."""
     if not config.LIVENESS_ENABLED:
-        return LivenessResult("live", "Liveness checking is disabled")
+        # Disabled means "skip the judgement", NOT "skip the decoding". Every
+        # caller goes on to use result.frames and result.best_frame - the
+        # attendance route encodes best_frame, registration indexes frames[0] -
+        # so returning "live" with an empty result made flipping this flag off
+        # crash all three video endpoints with a 500. The kill switch has to
+        # leave the pipeline usable, or it is a self-destruct switch.
+        frames, _ = sample_frames(data)
+        if not frames:
+            return LivenessResult(
+                "inconclusive",
+                "Could not read any frames from this clip - is it a video?",
+            )
+        result = LivenessResult(
+            "live", "Liveness checking is disabled",
+            frames_used=len(frames), frames=frames,
+        )
+        result.best_frame = max(
+            frames,
+            key=lambda f: cv2.Laplacian(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var(),
+        )
+        return result
 
     if len(data) > config.LIVENESS_MAX_BYTES:
         return LivenessResult(

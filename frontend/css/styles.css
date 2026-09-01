@@ -241,6 +241,24 @@ a:hover { color: var(--accent-hover); }
     border-radius: var(--radius-md); color: var(--text-primary); font-family: inherit; font-size: 16px; /* prevent iOS zoom */
     transition: border-color var(--transition-fast);
 }
+/* .form-select was referenced by the register and account forms and never
+   defined, so every dropdown rendered as an unstyled native control beside
+   styled inputs. Matches .form-input, with room for the arrow. */
+.form-select {
+    width: 100%; max-width: 100%; height: 44px;
+    padding: 0 32px 0 12px;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    color: var(--text-primary); font-family: inherit; font-size: 16px;
+    transition: border-color var(--transition-fast);
+    appearance: none; -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none' stroke='%236b7280' stroke-width='2'%3E%3Cpath d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    text-overflow: ellipsis;
+}
+.form-select:focus { outline: none; border-color: var(--border-focus); }
 .form-input:focus { outline: none; border-color: var(--border-focus); }
 .form-input::placeholder { color: var(--text-muted); }
 .search-box { position: relative; width: 100%; }
@@ -832,7 +850,15 @@ a:hover { color: var(--accent-hover); }
     background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;
 }
 
-.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* minmax(0, 1fr), not 1fr. A grid column's min-width defaults to auto, so it
+   cannot shrink below its content - and the centre <select> carries options
+   like "Khelo India State Centre of Excellence (Weightlifting)". That one long
+   option blew its column out and squeezed "Roll number" down to an unusable
+   sliver, with the modal scrolling sideways. minmax(0,...) lets both columns
+   shrink; the select then truncates instead of dictating the layout. */
+.form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.form-row > .form-group { min-width: 0; }
+.form-row select { max-width: 100%; }
 
 @media (max-width: 768px) {
     .form-row { grid-template-columns: 1fr; }
@@ -866,13 +892,8 @@ a:hover { color: var(--accent-hover); }
     position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
     height: 96%; aspect-ratio: 1; pointer-events: none;
 }
-.mv-seg {
-    fill: rgba(255,255,255,0.28);
-    transition: fill 160ms ease-out;
-}
 /* Lit segments are green AND noticeably brighter, so the state does not rest
    on colour alone. */
-.mv-seg.lit { fill: var(--green); }
 
 /* Darkens everything outside the face circle, which is what makes people
    centre themselves without being told to. */

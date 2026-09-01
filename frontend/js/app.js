@@ -1234,19 +1234,17 @@ function drawStudents(students) {
                             title="Add another photo (recent selfie or ID)">
                         ${Icon('upload', 12)}Add photo
                     </button>
-                    <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;"
-                            data-multiview data-student-id="${s.id}" data-student-name="${Charts.esc(s.name)}"
-                            title="Scan the face from several angles with the camera - the strongest way to improve recognition">
-                        ${Icon('camera', 12)}Register face
-                    </button>
-                    <!-- dataset + a delegated listener rather than another
-                         interpolated onclick: a name containing a quote breaks
-                         out of the handler above, and this button should not
-                         widen that surface. -->
+                    <!-- One button, not two. "Register face" and "Record clip"
+                         did the same job by different means; the clip is the
+                         one that also proves a real person is present, so the
+                         head-circle scan is gone and this keeps the familiar
+                         label. dataset + a delegated listener, never an
+                         interpolated onclick - a name containing a quote breaks
+                         out of a handler string. -->
                     <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;"
                             data-clip-enrol data-student-id="${s.id}" data-student-name="${Charts.esc(s.name)}"
-                            title="Record a two second clip - checks the subject is a real person, and captures several views at once">
-                        ${Icon('camera', 12)}Record clip
+                            title="Record a two second clip - captures several views and checks a real person is present">
+                        ${Icon('camera', 12)}Register face
                     </button>
                 </div>
             </div>
@@ -1340,17 +1338,10 @@ function openModal(title, contentHTML, footerHTML) {
 }
 
 function closeModal() {
-    // The modal's X and every "Cancel" call this, not closeFaceScan(), so a
-    // face scan closed with the X left its 250ms capture interval running and
-    // its MediaStream open - camera light on, frames still posting, until the
-    // page was reloaded. Cleaning up here covers every close path at once.
-    if (typeof mvState !== 'undefined' && mvState) {
-        try {
-            if (mvState.timer) clearInterval(mvState.timer);
-            if (mvState.stream) mvState.stream.getTracks().forEach(t => t.stop());
-        } catch { /* best effort - closing must never throw */ }
-        mvState = null;
-    }
+    // Any camera running inside the modal cleans itself up: openClipCapture
+    // watches this element's class and tears its stream down when it hides, so
+    // the X, Escape and every Cancel are all covered without this function
+    // knowing what the modal happens to contain.
     document.getElementById('modal-container').classList.add('hidden');
 }
 
@@ -1376,6 +1367,7 @@ const REG_GUIDELINES = [
     'Remove cap, sunglasses and mask',
     'Hold the device at arm\'s length, at eye level',
     'Only the person being registered should be in frame',
+    'Move your head a little while recording - that is what shows a real person is present, not a photograph',
 ];
 
 let regDetails = null;
@@ -1420,7 +1412,7 @@ async function openRegisterModal() {
             </div>
 
             <div class="notice notice-blue" style="margin-top:4px">
-                <strong>Before you scan the face</strong>
+                <strong>Before you record</strong>
                 <ul style="margin:6px 0 0 18px;padding:0;font-size:12px;line-height:1.7">
                     ${REG_GUIDELINES.map(g => `<li>${Charts.esc(g)}</li>`).join('')}
                 </ul>
@@ -1429,7 +1421,7 @@ async function openRegisterModal() {
 
     openModal('Register person', html, `
         <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-        <button type="button" class="btn btn-primary" onclick="regContinue()">Continue to face scan</button>`);
+        <button type="button" class="btn btn-primary" onclick="regContinue()">Continue to recording</button>`);
 }
 
 function regContinue() {
@@ -1442,111 +1434,57 @@ function regContinue() {
         role:      document.getElementById('reg-role').value,
         sport:     document.getElementById('reg-sport').value.trim(),
     };
-    // The scan is the same component used to re-register an existing person;
-    // only what happens with the frames at the end differs.
-    openFaceScan({
-        title: `Scan face - ${regDetails.name}`,
-        onComplete: regSubmit,
+    // Same capture component as re-registering an existing person; only what
+    // happens with the clip at the end differs.
+    openClipCapture({
+        title: `Record clip - ${regDetails.name}`,
+        intro: "Look at the camera and move your head a little while recording. "
+             + "Two seconds is enough.",
+        onClip: regSubmit,
     });
 }
 
-async function regSubmit(frames) {
-    const btn = document.getElementById('mv-save');
-    if (btn) { btn.disabled = true; btn.textContent = 'Registering...'; }
+async function regSubmit(file, ui) {
+    ui.status('Checking the clip and registering...');
+
+    // ONE request, deliberately. The old flow created the person from the first
+    // frame and then added the rest, so a failure part-way left a roster entry
+    // with no usable templates - someone who can never be recognised and whom
+    // nobody is prompted to fix. The server now checks liveness before writing
+    // anything and creates the person only if the clip passes.
+    const fd = new FormData();
+    fd.append('video', file);
+    fd.append('name', regDetails.name);
+    fd.append('roll_no', regDetails.roll_no);
+    fd.append('centre_id', regDetails.centre_id);
+    fd.append('role', regDetails.role);
+    if (regDetails.sport) fd.append('sport', regDetails.sport);
+
     try {
-        // The straight-ahead frame becomes the person's profile photo and their
-        // first template; the rest are added as additional views.
-        const fd = new FormData();
-        fd.append('photo', frames[0].blob, 'face.jpg');
-        fd.append('name', regDetails.name);
-        fd.append('roll_no', regDetails.roll_no);
-        fd.append('centre_id', regDetails.centre_id);
-        fd.append('role', regDetails.role);
-        if (regDetails.sport) fd.append('sport', regDetails.sport);
-
-        const data = await api.postForm('/api/students', fd);
-        const student = data.student || {};
-
-        let added = 0;
-        if (frames.length > 1 && student.id) {
-            const fd2 = new FormData();
-            frames.slice(1).forEach((f, i) => fd2.append('frames', f.blob, `${f.key}_${i}.jpg`));
-            try {
-                const r2 = await api.postForm(`/api/students/${student.id}/enroll-multiview`, fd2);
-                added = r2.templates_added || 0;
-            } catch {
-                // The person exists and is usable from the frontal view; losing
-                // the extra angles is worth reporting but not worth failing on.
-                showToast('Registered, but not all views saved',
-                          'The extra angles could not be stored. Use "Register face" on their card to retry.',
-                          'error');
-            }
+        const r = await api.postForm('/api/students/register-video', fd);
+        if (r.ok === false) {
+            ui.status(livenessBanner(r.liveness, r.message), true);
+            showToast('Not registered', r.message || 'The clip was refused', 'error');
+            await ui.resume();
+            return;
         }
-        closeFaceScan();
-        showToast('Registered', `${regDetails.name} enrolled with ${1 + added} view${1 + added === 1 ? '' : 's'}`, 'success');
+        const n = r.templates || 1;
+        const poses = (r.poses_captured || []).join(', ');
+        ui.close();
+        showToast('Registered',
+                  `${regDetails.name} enrolled with ${n} template${n === 1 ? '' : 's'}`
+                  + (poses ? ` (${poses})` : ''),
+                  'success');
         if (state.currentRoute === '/students') renderStudents();
     } catch (err) {
-        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+        // A duplicate roll number is a 409 the person can act on, so it must not
+        // be swallowed into a generic failure.
+        const msg = (err && err.message) ? err.message : 'Could not register. Try again.';
+        ui.status(msg);
+        await ui.resume();
     }
 }
 
-// --- Add photo to existing student ---
-window.openAddPhotoModal = function(studentId, name) {
-    const html = `
-        <form id="add-photo-form">
-            <p style="margin-bottom: 14px; color: var(--text-secondary); font-size: 13px;">
-                Add a photo for <strong>${name}</strong>. The system stores it as an extra
-                biometric template - great for refreshing an old Aadhaar enrollment.
-            </p>
-            <div class="form-group">
-                <label class="form-label">Photo</label>
-                <input type="file" id="addp-file" accept="image/*" class="form-input" required style="padding: 6px;">
-            </div>
-            <div class="form-group">
-                <label class="form-label">Photo Type</label>
-                <select id="addp-source" class="form-input">
-                    <option value="live" selected>Recent / live photo</option>
-                    <option value="id">ID card photo (Aadhaar)</option>
-                </select>
-            </div>
-        </form>
-    `;
-    const footer = `
-        <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-        <button type="button" class="btn btn-primary" onclick="submitAddPhoto(${studentId})">Add Photo</button>
-    `;
-    openModal('Add Photo', html, footer);
-};
-
-window.submitAddPhoto = async function(studentId) {
-    const form = document.getElementById('add-photo-form');
-    if (!form.checkValidity()) {
-        form.reportValidity();
-        return;
-    }
-    const file = document.getElementById('addp-file').files[0];
-    const source = document.getElementById('addp-source').value;
-
-    const fd = new FormData();
-    fd.append('photo', file);
-    fd.append('source', source);
-
-    try {
-        const btn = document.querySelector('.modal-footer .btn-primary');
-        btn.disabled = true;
-        btn.textContent = 'Adding...';
-        const data = await api.postForm(`/api/students/${studentId}/photos`, fd);
-        showToast('Success', `${data.templates_added} template(s) added`, 'success');
-        closeModal();
-        renderStudents();
-    } catch (err) {
-        const btn = document.querySelector('.modal-footer .btn-primary');
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = 'Add Photo';
-        }
-    }
-};
 
 function confirmDeleteStudent(id, name) {
     // Escaped here as well as in the attribute: .dataset DECODES the entity on
@@ -1697,126 +1635,81 @@ async function submitAssign(faceUrl, studentId) {
 }
 
 
-/* --------------------------------------------------------------------------
-   Guided enrolment, phone style.
-
-   Not a sequence of named poses. The athlete is given one instruction - move
-   your head slowly in a circle - and a ring of segments around the preview
-   lights up as each angle is covered. The capture ends when enough of the ring
-   is lit, which is a statement about pose COVERAGE rather than about how many
-   buttons were pressed.
-
-   The ring is a map, not decoration. Each frame's pose is converted to a point
-   (dy, dp) relative to the athlete's own straight-ahead reading; its angle
-   around the circle selects a segment and its radius says whether the head has
-   turned far enough for that segment to count.
-   -------------------------------------------------------------------------- */
-
-const MV_SEGMENTS = 24;          // ring resolution - what the athlete sees
-const MV_CAPTURE_SECTORS = 8;    // how many frames are actually kept
-const MV_REQUIRED = 18;          // segments needed to finish (of MV_SEGMENTS)
-// 18/24 = 75%. Google's Pixel 4 face-unlock patent (US12183117B2) documents
-// this exact figure - enrolment completes at 75% of pose buckets filled, not
-// 100% - because requiring every angle fails people with limited neck
-// mobility or an off-axis camera, for no measurable accuracy gain. Verified
-// independently of this codebase; this file already used 75% before that was
-// known to match a shipped system.
-// Lighting the ring is feedback; the frames are the product. Finishing on ring
-// coverage alone ended the capture with three usable views, because encoding a
-// frame takes about a second and the sweep outran it.
-const MV_MIN_CAPTURES = 5;       // distinct sectors that must be on disk
-const MV_POLL_MS = 250;
-
-// Frames are stored at this width rather than the full sensor resolution. A
-// selfie face still lands near 200px here, well above the 90px the enrolment
-// endpoint requires, and the upload is smaller over mobile data. Note this did
-// NOT speed up encoding in testing - 960px and 1280px both measured about a
-// second - so the roughly one-second capture is fixed overhead, not pixels,
-// and the sweep is designed to keep running through it.
-const MV_CAPTURE_WIDTH = 960;
-
-// Yaw travels further than pitch on a real head, so the raw angles are scaled
-// before being read as a circle. Without this the "circle" is a flat ellipse
-// and the top and bottom segments are unreachable.
-const MV_YAW_SCALE = 18.0;
-const MV_PITCH_SCALE = 12.0;
-const MV_MIN_RADIUS = 0.55;      // how far the head must turn for a segment to count
-
-let mvState = null;
-
-// Re-scan an existing person: the frames go straight to their profile.
-// One delegated listener for every per-student action, rather than a handler
-// per card: the grid is rebuilt on each render, so per-card listeners would
-// accumulate, and interpolating a name into an onclick is the injection route
-// the audit found.
 document.addEventListener('click', (e) => {
     if (!e.target.closest) return;
     const btn = e.target.closest(
-        '[data-clip-enrol], [data-add-photo], [data-multiview], [data-delete-student]');
+        '[data-clip-enrol], [data-add-photo], [data-delete-student]');
     if (!btn) return;
     e.preventDefault();
     const id = btn.dataset.studentId;
     const name = btn.dataset.studentName || '';
-    if (btn.hasAttribute('data-clip-enrol')) openClipEnrol(id, name);
-    else if (btn.hasAttribute('data-add-photo')) openAddPhotoModal(id, name);
+    if (btn.hasAttribute('data-add-photo')) openAddPhotoModal(id, name);
     else if (btn.hasAttribute('data-delete-student')) confirmDeleteStudent(id, name);
-    else openMultiViewEnrol(id, name);
+    else openClipEnrol(id, name);
 });
 
-/** Enrol from a two-second clip, with live tracking while you frame the shot.
+/** Record a short clip with live face tracking, and hand it to a caller.
  *
- * Recording blind and reporting a verdict afterwards is the wrong shape: the
- * person holding the phone cannot tell whether the face is being seen at all
- * until it is too late to fix. So this polls /api/enroll/pose-check while the
+ * Shared by both enrolment paths - registering a new person, and re-registering
+ * an existing one - because the capture is identical and only what happens with
+ * the clip differs. It replaces the 24-segment "move your head in a circle"
+ * ceremony: two seconds of ordinary movement produces the same several views
+ * without asking a child to perform a sequence on cue, and unlike a set of
+ * stills it carries the parallax that proves the subject is a person rather
+ * than a photograph held to the lens.
+ *
+ * Recording blind and reporting a verdict afterwards was the wrong shape: the
+ * person holding the phone could not tell whether the face was being seen at
+ * all until it was too late. So this polls /api/enroll/pose-check while the
  * modal is open, draws the detected box over the video, and says what to change
- * - the same live loop openFaceScan already uses, which is why no new model is
- * needed in a frontend that has no build step.
+ * - the same live loop the old scan used, so no new model and no build step.
  *
- * Enrolment is also the one moment where a wrong identity becomes permanent: a
- * template built from a photograph held to the camera lets that photograph mark
- * its subject present from then on. The clip is checked for liveness server-side
- * before a single template is stored.
+ * opts: { title, intro, onClip(file, ui) }
+ *   ui.status(textOrHtml, isHtml)  report progress or a refusal
+ *   ui.resume()                    return to a live camera for another attempt
+ *   ui.close()                     finish and close the modal
  */
-async function openClipEnrol(studentId, studentName) {
-    openModal(`Record clip - ${studentName}`, `
-        <div class="camera-container" id="clip-enrol-camera">
-            <video id="clip-enrol-video" class="camera-video" autoplay playsinline muted></video>
-            <canvas id="clip-enrol-overlay" class="camera-overlay"></canvas>
-            <div class="rec-hint" id="clip-enrol-hint">Looking for a face...</div>
+async function openClipCapture(opts) {
+    openModal(opts.title || 'Record clip', `
+        <div class="camera-container" id="clip-cap-camera">
+            <video id="clip-cap-video" class="camera-video" autoplay playsinline muted></video>
+            <canvas id="clip-cap-overlay" class="camera-overlay"></canvas>
+            <div class="rec-hint" id="clip-cap-hint">Looking for a face...</div>
             <div class="camera-controls" style="justify-content:center">
-                <button type="button" class="camera-shutter" id="clip-enrol-shutter"
+                <button type="button" class="camera-shutter" id="clip-cap-shutter"
                         aria-label="Record two seconds" disabled>
                     <svg class="rec-ring" viewBox="0 0 44 44" aria-hidden="true">
                         <circle class="rec-ring-track" cx="22" cy="22" r="20"></circle>
-                        <circle class="rec-ring-fill" id="clip-enrol-ring" cx="22" cy="22" r="20"></circle>
+                        <circle class="rec-ring-fill" id="clip-cap-ring" cx="22" cy="22" r="20"></circle>
                     </svg>
                     <div class="shutter-inner"></div>
                 </button>
             </div>
         </div>
-        <div id="clip-enrol-status" class="text-sm text-muted mt-3">
-            Hold the phone at arm's length. Recording starts when a face is framed.
+        <div id="clip-cap-status" class="text-sm text-muted mt-3">
+            ${Charts.esc(opts.intro || "Hold the phone at arm's length. Two seconds is enough.")}
         </div>`);
 
-    const video   = document.getElementById('clip-enrol-video');
-    const overlay = document.getElementById('clip-enrol-overlay');
-    const hint    = document.getElementById('clip-enrol-hint');
-    const shutter = document.getElementById('clip-enrol-shutter');
-    const ring    = document.getElementById('clip-enrol-ring');
-    const status  = document.getElementById('clip-enrol-status');
+    const video   = document.getElementById('clip-cap-video');
+    const overlay = document.getElementById('clip-cap-overlay');
+    const hint    = document.getElementById('clip-cap-hint');
+    const shutter = document.getElementById('clip-cap-shutter');
+    const ring    = document.getElementById('clip-cap-ring');
+    const status  = document.getElementById('clip-cap-status');
 
     const cam = new CameraCapture(video, null, null);
     cam.facingMode = 'user';                 // enrolment photographs the holder
     if (await cam.start() === false) { closeModal(); return; }
 
-    const state = { busy: false, timer: null, box: null, good: false, recording: false, alive: true };
+    const state = { busy: false, timer: null, box: null, good: false,
+                    recording: false, alive: true, fails: 0, closed: false };
     const setRing = p => { if (ring) ring.style.strokeDashoffset = String(126 * (1 - p)); };
 
     // Stop everything however the modal closes - X, Escape, or a route change.
-    // A stream left running behind a closed dialog keeps the camera light on
-    // and drains the battery, which is the bug the audit found in face-scan.
+    // A stream left running behind a closed dialog keeps the camera light on.
     const teardown = () => {
         state.alive = false;
+        state.closed = true;          // one-way: nothing may restart after this
         if (state.timer) clearInterval(state.timer);
         try { cam.stop(); } catch { /* already stopped */ }
     };
@@ -1828,13 +1721,10 @@ async function openClipEnrol(studentId, studentName) {
 
     function draw() {
         if (!state.alive || !video.videoWidth) return;
-        // Match the canvas to the element's rendered size, not the stream's:
-        // object-fit: cover crops the video, so drawing in stream coordinates
-        // would put the box in the wrong place on any non-matching aspect.
         const r = video.getBoundingClientRect();
         // A zero rect happens transiently - the modal mid-open, or a
-        // backgrounded tab. Sizing the canvas to it would blank the overlay and
-        // it would stay blank until the next resize, so keep the last good size.
+        // backgrounded tab. Sizing to it would blank the overlay until the next
+        // resize, so keep the last good size instead.
         if (r.width < 1 || r.height < 1) return;
         if (overlay.width !== Math.round(r.width) || overlay.height !== Math.round(r.height)) {
             overlay.width = Math.round(r.width);
@@ -1844,27 +1734,25 @@ async function openClipEnrol(studentId, studentName) {
         ctx.clearRect(0, 0, overlay.width, overlay.height);
         if (!state.box) return;
 
-        // pose-check was sent a 480px-wide frame, so its box is in those
-        // coordinates. Scale to the drawn video, accounting for the cover crop.
+        // pose-check was sent a 480px-wide frame, so the box is in those
+        // coordinates. Scale to the drawn video, allowing for the cover crop.
         const sw = video.videoWidth, sh = video.videoHeight;
         const scale = Math.max(overlay.width / sw, overlay.height / sh);
         const dx = (overlay.width - sw * scale) / 2;
         const dy = (overlay.height - sh * scale) / 2;
-        const k = sw / 480;                       // analysis frame -> stream
+        const k = sw / 480;
         let [x1, y1, x2, y2] = state.box.map(v => v * k);
-        // The preview is mirrored for the front camera, so the box must be too
-        // or it tracks the wrong way as the head moves.
+        // The preview is mirrored for the front camera, so the box must be too,
+        // or it tracks the opposite way as the head moves.
         if (cam.facingMode === 'user') { const t = x1; x1 = sw - x2; x2 = sw - t; }
 
         const X = x1 * scale + dx, Y = y1 * scale + dy;
         const W = (x2 - x1) * scale, H = (y2 - y1) * scale;
-        const col = state.good ? '#22c55e' : '#f59e0b';
-        ctx.strokeStyle = col;
+        ctx.strokeStyle = state.good ? '#22c55e' : '#f59e0b';
         ctx.lineWidth = 3;
         ctx.beginPath();
         if (ctx.roundRect) ctx.roundRect(X, Y, W, H, 10); else ctx.rect(X, Y, W, H);
         ctx.stroke();
-        // Corner ticks read as "tracking" rather than "a rectangle is drawn".
         ctx.lineWidth = 5;
         const c = Math.min(22, W / 4);
         [[X, Y, 1, 1], [X + W, Y, -1, 1], [X, Y + H, 1, -1], [X + W, Y + H, -1, -1]]
@@ -1899,9 +1787,9 @@ async function openClipEnrol(studentId, studentName) {
             if (!state.alive) return;
 
             state.box = r.box || null;
-            // "ok" here means correctly posed AND framed. For a clip, pose does
-            // not matter - the recording captures several angles by itself - so
-            // only framing and image quality gate the button.
+            // "ok" means correctly posed AND framed. Pose does not matter for a
+            // clip - the recording captures several angles by itself - so only
+            // framing and image quality gate the button.
             state.good = !!r.box && (r.ok || r.reason === 'pose');
             hint.textContent = state.good
                 ? (state.recording ? 'Recording - keep moving slightly' : 'Face found - tap to record')
@@ -1910,11 +1798,9 @@ async function openClipEnrol(studentId, studentName) {
             state.fails = 0;
             draw();
         } catch {
-            // A single dropped frame is not worth reporting - the next one
-            // follows. A run of them is: an expired session made this poll 401
-            // three times a second indefinitely, which shows in the server log
-            // as a flood and never recovers on its own.
-            state.fails = (state.fails || 0) + 1;
+            // One dropped frame is not worth reporting. A run of them is: an
+            // expired session made this 401 three times a second indefinitely.
+            state.fails += 1;
             if (state.fails >= 5) {
                 if (state.timer) clearInterval(state.timer);
                 hint.textContent = 'Lost connection - close and try again';
@@ -1925,6 +1811,31 @@ async function openClipEnrol(studentId, studentName) {
         }
     }
 
+    const ui = {
+        status(text, isHtml) {
+            if (isHtml) status.innerHTML = text; else status.textContent = text;
+        },
+        async resume() {
+            // Refuse once the modal has been closed. onClip callbacks await a
+            // server round trip and then call this on a refusal, so the close
+            // can land WHILE that request is in flight - and by then teardown
+            // has run and disconnected the observer, so nothing would ever stop
+            // the camera or the 350ms poll again. Without this guard, closing
+            // the dialog mid-upload left the camera light on and pose-check
+            // firing three times a second for the life of the page.
+            if (state.closed || modal.classList.contains('hidden')) return false;
+            if (await cam.start() === false) return false;
+            if (state.closed) { try { cam.stop(); } catch {} return false; }  // closed while starting
+            state.alive = true;
+            state.fails = 0;
+            if (state.timer) clearInterval(state.timer);
+            state.timer = setInterval(tick, 350);
+            shutter.disabled = false;
+            return true;
+        },
+        close() { teardown(); closeModal(); },
+    };
+
     state.timer = setInterval(tick, 350);
     tick();
 
@@ -1933,277 +1844,47 @@ async function openClipEnrol(studentId, studentName) {
         state.recording = true;
         shutter.disabled = true;
         shutter.classList.add('recording');
-        status.textContent = 'Recording two seconds - move your head slightly.';
+        ui.status('Recording two seconds - move your head slightly.');
 
         const file = await cam.recordClip(2000, setRing);
 
         shutter.classList.remove('recording');
         setRing(0);
         state.recording = false;
-        if (!file) { shutter.disabled = false; status.textContent = 'Nothing was recorded. Try again.'; return; }
+        if (!file) { shutter.disabled = false; ui.status('Nothing was recorded. Try again.'); return; }
 
         if (state.timer) clearInterval(state.timer);
         try { cam.stop(); } catch { /* already stopped */ }
-        status.textContent = 'Checking the clip and building templates...';
+        await opts.onClip(file, ui);
+    });
+}
 
-        const fd = new FormData();
-        fd.append('video', file);
-        try {
-            const r = await api.postForm(`/api/students/${studentId}/enroll-video`, fd);
-            if (r.ok === false) {
-                status.innerHTML = livenessBanner(r.liveness, r.message);
-                showToast('Not accepted', r.message || 'The clip was refused', 'error');
-                // Back to a live camera so the next attempt is one tap away.
-                if (await cam.start() !== false) {
-                    state.alive = true;
-                    state.timer = setInterval(tick, 350);
-                    shutter.disabled = false;
+/** Re-register an existing person from a clip. */
+async function openClipEnrol(studentId, studentName) {
+    await openClipCapture({
+        title: `Record clip - ${studentName}`,
+        intro: "Look at the camera and move your head a little while recording.",
+        onClip: async (file, ui) => {
+            ui.status('Checking the clip and building templates...');
+            const fd = new FormData();
+            fd.append('video', file);
+            try {
+                const r = await api.postForm(`/api/students/${studentId}/enroll-video`, fd);
+                if (r.ok === false) {
+                    ui.status(livenessBanner(r.liveness, r.message), true);
+                    showToast('Not accepted', r.message || 'The clip was refused', 'error');
+                    await ui.resume();
+                    return;
                 }
-                return;
+                const poses = (r.poses_captured || []).join(', ') || 'one view';
+                showToast('Face registered', `${r.templates_added} template(s) from ${poses}`, 'success');
+                ui.close();
+                renderStudents();
+            } catch {
+                ui.status('Could not reach the server. Try again.');
+                await ui.resume();
             }
-            const poses = (r.poses_captured || []).join(', ') || 'one view';
-            showToast('Face registered',
-                      `${r.templates_added} template(s) from ${poses}`, 'success');
-            closeModal();
-            renderStudents();
-        } catch (err) {
-            status.textContent = 'Could not reach the server. Try again.';
-            shutter.disabled = false;
-        }
+        },
     });
 }
 
-async function openMultiViewEnrol(studentId, studentName) {
-    openFaceScan({
-        title: `Register face - ${studentName}`,
-        onComplete: frames => mvSaveToProfile(studentId, frames),
-    });
-}
-
-async function mvSaveToProfile(studentId, frames) {
-    const btn = document.getElementById('mv-save');
-    if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
-    const fd = new FormData();
-    frames.forEach((f, i) => fd.append('frames', f.blob, `${f.key}_${i}.jpg`));
-    try {
-        const r = await api.postForm(`/api/students/${studentId}/enroll-multiview`, fd);
-        closeFaceScan();
-        showToast(r.sufficient ? 'Face registered' : 'Only partly captured',
-                  r.message, r.sufficient ? 'success' : 'error');
-        if (state.currentRoute === '/students') renderStudents();
-    } catch {
-        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
-    }
-}
-
-async function openFaceScan(opts) {
-    const seg = [];
-    for (let i = 0; i < MV_SEGMENTS; i++) {
-        const a0 = (i / MV_SEGMENTS) * 2 * Math.PI - Math.PI / 2;
-        const a1 = ((i + 0.82) / MV_SEGMENTS) * 2 * Math.PI - Math.PI / 2;
-        const r0 = 44, r1 = 49;
-        const p = (r, a) => `${(50 + r * Math.cos(a)).toFixed(2)},${(50 + r * Math.sin(a)).toFixed(2)}`;
-        seg.push(`<path class="mv-seg" data-i="${i}" d="M${p(r0,a0)} L${p(r1,a0)} A${r1},${r1} 0 0,1 ${p(r1,a1)} L${p(r0,a1)} A${r0},${r0} 0 0,0 ${p(r0,a0)} Z"/>`);
-    }
-    openModal(opts.title || 'Scan face', `
-        <div class="mv-stage">
-            <video id="mv-video" autoplay playsinline muted></video>
-            <div class="mv-mask"></div>
-            <svg class="mv-ringsvg" viewBox="0 0 100 100">${seg.join('')}</svg>
-            <div class="mv-flash" id="mv-flash"></div>
-            <div class="mv-step" id="mv-step">Starting camera...</div>
-        </div>
-        <div class="mv-count"><span id="mv-pct">0</span>% complete</div>
-        <div id="mv-hint" class="text-sm text-muted" style="text-align:center;margin-top:6px"></div>
-        <canvas id="mv-canvas" class="hidden"></canvas>`,
-        `<button class="btn btn-secondary" onclick="closeFaceScan()">Cancel</button>
-         <button class="btn btn-primary hidden" id="mv-save" onclick="mvSubmit()">Save</button>`);
-
-    mvState = {
-        onComplete: opts.onComplete, stream: null, timer: null, busy: false,
-        capturing: false, phase: 'centre', baseYaw: null, basePitch: null,
-        centreHold: 0, covered: new Set(), capturedSectors: new Set(), frames: [],
-    };
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        mvSay('Camera unavailable', window.isSecureContext
-            ? 'This browser does not support camera capture.'
-            : 'The camera only works over HTTPS. Open the https:// address instead.');
-        return;
-    }
-    try {
-        mvState.stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } },
-            audio: false,
-        });
-        const v = document.getElementById('mv-video');
-        v.srcObject = mvState.stream;
-        await v.play();
-
-        // See waitForVideoFrame's definition: getUserMedia resolving does not
-        // mean the video is rendering. A stalled stream here left the athlete
-        // staring at "Starting camera..." forever with no error and no picture.
-        const gotFrame = await waitForVideoFrame(v);
-        if (!gotFrame) {
-            mvState.stream.getTracks().forEach(t => t.stop());
-            mvState.stream = null;
-            mvSay('Camera unavailable',
-                  'The camera started but no picture appeared.' + standaloneCameraHint());
-            return;
-        }
-
-        mvSay('Look straight at the camera', 'Fill the circle with your face');
-        mvState.timer = setInterval(mvTick, MV_POLL_MS);
-    } catch (e) {
-        mvSay('Camera unavailable', CameraCapture.explain(e));
-    }
-}
-
-function mvSay(step, hint) {
-    const s = document.getElementById('mv-step');
-    const h = document.getElementById('mv-hint');
-    if (s) s.textContent = step;
-    if (h && hint !== undefined) h.textContent = hint;
-}
-
-function mvGrab(maxW) {
-    const v = document.getElementById('mv-video');
-    const c = document.getElementById('mv-canvas');
-    if (!v || !c || !v.videoWidth) return null;
-    const scale = maxW ? Math.min(1, maxW / v.videoWidth) : 1;
-    c.width = Math.round(v.videoWidth * scale);
-    c.height = Math.round(v.videoHeight * scale);
-    // The preview is mirrored for comfort; the stored frame must not be, or
-    // every template is a mirror image of the person.
-    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
-    return c;
-}
-
-async function mvTick() {
-    if (!mvState || mvState.busy || mvState.phase === 'done') return;
-    const c = mvGrab(480);
-    if (!c) return;
-    mvState.busy = true;
-    try {
-        const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.8));
-        const fd = new FormData();
-        fd.append('frame', blob, 'f.jpg');
-        fd.append('step', mvState.phase === 'centre' ? 'centre' : 'sweep');
-        if (mvState.baseYaw !== null) {
-            fd.append('base_yaw', mvState.baseYaw);
-            fd.append('base_pitch', mvState.basePitch);
-        }
-        mvApplyFeedback(await api.postForm('/api/enroll/pose-check', fd));
-    } catch { /* a dropped frame is not worth reporting - the next one follows */ }
-    finally { mvState.busy = false; }
-}
-
-function mvApplyFeedback(r) {
-    // Deliberately NOT gated on mvState.capturing. Encoding a full-resolution
-    // frame takes around a second, and the athlete keeps turning throughout;
-    // dropping those readings threw away most of the sweep and left the ring
-    // stuck around a third lit. Only the capture itself is serialised.
-    if (!mvState || mvState.phase === 'done') return;
-
-    // Framing and lighting failures are reported whatever the phase - a
-    // correctly-turned head that is too dark to use is still not usable.
-    if (!r.ok && r.reason !== 'pose') { mvSay(r.message || 'Adjust position'); return; }
-
-    if (mvState.phase === 'centre') {
-        if (!r.ok) { mvState.centreHold = 0; mvSay(r.message || 'Look straight at the camera'); return; }
-        mvState.centreHold += 1;
-        if (mvState.centreHold >= 3) {
-            mvState.baseYaw = r.yaw;
-            mvState.basePitch = r.pitch;
-            mvState.phase = 'sweep';
-            mvSay('Slowly move your head in a circle', 'Keep your eyes on the screen');
-            mvCapture('centre');
-        }
-        return;
-    }
-
-    // Sweep: place this pose on the ring.
-    const x = (r.delta_yaw || 0) / MV_YAW_SCALE;
-    const y = (r.delta_pitch || 0) / MV_PITCH_SCALE;
-    const radius = Math.hypot(x, y);
-    if (radius < MV_MIN_RADIUS) { mvSay('Slowly move your head in a circle'); return; }
-
-    // Screen x is mirrored relative to the athlete, so a leftward turn should
-    // light the segment on the side they see themselves move toward.
-    let ang = Math.atan2(y, -x) + Math.PI / 2;
-    if (ang < 0) ang += 2 * Math.PI;
-    const idx = Math.floor((ang / (2 * Math.PI)) * MV_SEGMENTS) % MV_SEGMENTS;
-
-    if (!mvState.covered.has(idx)) {
-        mvState.covered.add(idx);
-        const el = document.querySelector(`.mv-seg[data-i="${idx}"]`);
-        if (el) el.classList.add('lit');
-        mvSetPct();
-    }
-
-    // Only a handful of frames are kept. One per sector is enough: neighbouring
-    // segments differ by a few degrees and would store near-duplicate templates.
-    // A sector is only marked captured once a frame for it actually started
-    // encoding. Marking it on the attempt would silently lose the sector when
-    // the encoder was busy.
-    const sector = Math.floor((ang / (2 * Math.PI)) * MV_CAPTURE_SECTORS) % MV_CAPTURE_SECTORS;
-    if (!mvState.capturedSectors.has(sector) && mvCapture('s' + sector)) {
-        mvState.capturedSectors.add(sector);
-    }
-
-    if (mvState.covered.size >= MV_REQUIRED && mvState.capturedSectors.size >= MV_MIN_CAPTURES) {
-        mvFinish();
-    } else if (mvState.covered.size >= MV_REQUIRED) {
-        mvSay('Almost there - keep turning', 'Collecting a few more views');
-    }
-}
-
-function mvSetPct() {
-    const pct = Math.round(100 * Math.min(1, mvState.covered.size / MV_REQUIRED));
-    const el = document.getElementById('mv-pct');
-    if (el) el.textContent = pct;
-}
-
-// Returns true when a frame actually began encoding, so the caller knows
-// whether to record that angle as captured.
-function mvCapture(key) {
-    if (!mvState || mvState.capturing) return false;
-    const c = mvGrab(MV_CAPTURE_WIDTH);
-    if (!c) return false;
-    mvState.capturing = true;
-    const flash = document.getElementById('mv-flash');
-    if (flash) { flash.classList.remove('fire'); void flash.offsetWidth; flash.classList.add('fire'); }
-    c.toBlob(b => {
-        if (!mvState) return;                       // cancelled while encoding
-        mvState.frames.push({ key, blob: b });
-        mvState.capturing = false;
-    }, 'image/jpeg', 0.95);
-    return true;
-}
-
-function mvFinish() {
-    mvState.phase = 'done';
-    if (mvState.timer) { clearInterval(mvState.timer); mvState.timer = null; }
-    // A frame may still be encoding; counting now would under-report it.
-    const settle = () => mvSay('Face registered', `${mvState.frames.length} views captured`);
-    mvSay('Face registered', 'Finishing...');
-    if (mvState.capturing) setTimeout(settle, 1200); else settle();
-    const save = document.getElementById('mv-save');
-    if (save) save.classList.remove('hidden');
-    document.querySelectorAll('.mv-seg').forEach(s => s.classList.add('lit'));
-    mvSetPct();
-}
-
-async function mvSubmit() {
-    const frames = mvState.frames;
-    const onComplete = mvState.onComplete;
-    if (onComplete) await onComplete(frames);
-}
-
-function closeFaceScan() {
-    if (mvState) {
-        if (mvState.timer) clearInterval(mvState.timer);
-        if (mvState.stream) mvState.stream.getTracks().forEach(t => t.stop());
-    }
-    mvState = null;
-    closeModal();
-}
