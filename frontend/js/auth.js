@@ -59,7 +59,11 @@ async function doLogin(ev) {
         hideLogin();
         applyRoleChrome();
         await initApp();
-        window.location.hash = '#/dashboard';
+        // Signing in lands on Mark Attendance, the job the app is opened to do.
+        // Set here as well as in the router: this assignment overrides whatever
+        // default handleRoute() would have picked, so changing one without the
+        // other silently keeps the old landing page.
+        window.location.hash = '#/mark';
         handleRoute();
         showToast('Welcome', `Signed in as ${data.user.full_name}`, 'success');
     } catch {

@@ -262,16 +262,19 @@ function initRouter() {
 let currentCameraCapture = null;
 
 function handleRoute() {
-    let hash = window.location.hash.slice(1) || '/dashboard';
-    
+    // Mark Attendance is the landing page: taking the register is the job the
+    // app exists for and the one people open it to do. The dashboard reports on
+    // work already done, which is a second question, not the first.
+    let hash = window.location.hash.slice(1) || '/mark';
+
     // Stop camera if navigating away
     if (currentCameraCapture) {
         currentCameraCapture.stop();
         currentCameraCapture = null;
     }
-    
+
     // Default route
-    if (hash === '/') hash = '/dashboard';
+    if (hash === '/') hash = '/mark';
     
     state.currentRoute = hash;
     
@@ -331,15 +334,13 @@ function handleRoute() {
         root.appendChild(tpl);
         renderStudents();
     }
-    else if (hash === '/analytics') {
-        title.textContent = 'Analytics';
-        renderAnalytics();
-    }
-    else if (hash === '/records') {
-        title.textContent = 'Records';
-        const tpl = document.getElementById('tpl-records').content.cloneNode(true);
-        root.appendChild(tpl);
-        initRecordsPage();
+    else if (hash === '/analytics' || hash === '/records') {
+        // Analytics was removed; Records moved to the foot of Mark Attendance.
+        // Redirected rather than left to fall through, so an old bookmark, an
+        // installed PWA shortcut or a back button lands somewhere useful
+        // instead of bouncing through the unknown-route branch.
+        window.location.hash = '#/mark';
+        return;
     }
     else if (hash === '/centres') {
         title.textContent = 'Khelo India Centres';
@@ -361,8 +362,8 @@ function handleRoute() {
     }
     else {
         // Unknown route - e.g. a bookmark to a page that no longer exists.
-        // Fall back to the dashboard rather than leaving the shell blank.
-        window.location.hash = '#/dashboard';
+        // Fall back to the landing page rather than leaving the shell blank.
+        window.location.hash = '#/mark';
     }
 }
 
@@ -409,6 +410,17 @@ const api = {
 
 // --- Application Init ---
 /* Resolve a device location, resolving null rather than rejecting. */
+// Local calendar date as YYYY-MM-DD.
+//
+// NOT toISOString().split('T')[0], which is the UTC date: in IST that is
+// yesterday between midnight and 05:30, so an early-morning session - which is
+// most of them here - would open the register on the wrong day and show it
+// empty.
+function localISODate(d = new Date()) {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 function captureLocation() {
     return new Promise(resolve => {
         if (!navigator.geolocation) return resolve(null);
@@ -537,8 +549,32 @@ async function renderDashboard() {
             Charts.initChartInteraction(document.getElementById('app-root'));
         }
 
+        // Last 7 calendar days, not the last 7 sessions. A week with four
+        // sessions must show three empty days: collapsing it to four bars would
+        // draw an unbroken week and hide exactly the gap worth seeing.
+        const weekBox = document.getElementById('dashboard-week');
+        if (weekBox) {
+            const byDate = new Map(trend.map(d => [d.date, d.present]));
+            const week = [];
+            for (let i = 6; i >= 0; i--) {
+                const dt = new Date();
+                dt.setDate(dt.getDate() - i);
+                const iso = localISODate(dt);
+                week.push({
+                    label: iso,
+                    short: dt.toLocaleDateString(undefined, { weekday: 'short' }),
+                    value: byDate.get(iso) || 0,
+                });
+            }
+            weekBox.innerHTML =
+                Charts.barChart(week, { height: 180, empty: 'No attendance in the last 7 days' })
+                + Charts.tableView(['Date', 'Present'],
+                    week.map(d => [d.label, d.value]), 'Attendance, last 7 days');
+            Charts.initChartInteraction(document.getElementById('app-root'));
+        }
+
         // Render Recent Activity
-        const recentHtml = stats.recent.length === 0 ? 
+        const recentHtml = stats.recent.length === 0 ?
             '<div class="p-4 text-center text-muted">No recent activity</div>' :
             stats.recent.map(r => `
                 <div class="activity-item">
@@ -603,6 +639,7 @@ function initMarkPage() {
     const previewImg = document.getElementById('mark-preview');
     const dropContent = document.getElementById('mark-dropzone-content');
     const clearBtn = document.getElementById('mark-clear-btn');
+    const retakeBtn = document.getElementById('mark-retake-btn');
     const processBtn = document.getElementById('btn-process');
     const form = document.getElementById('mark-form');
 
@@ -650,9 +687,12 @@ function initMarkPage() {
         if (shutterBtn) shutterBtn.addEventListener('click', async () => {
             const file = await currentCameraCapture.capture();
             if (file) {
-                // switch to upload tab
+                // Review happens on the upload tab, which also stops the stream:
+                // leaving the camera live behind a still frame burns battery and
+                // keeps the indicator light on for no reason.
                 tabBtns[0].click();
                 handleFile(file);
+                if (retakeBtn) retakeBtn.classList.remove('hidden');
             }
         });
     }
@@ -694,7 +734,48 @@ function initMarkPage() {
         dropContent.classList.remove('hidden');
         previewContainer.classList.add('hidden');
         processBtn.disabled = true;
+        if (retakeBtn) retakeBtn.classList.add('hidden');
     });
+
+    // Retake: discard the frame and go straight back to a live camera. Going
+    // through clearBtn and the tab button rather than duplicating their work
+    // keeps the file, the preview, the source field and the stream in step -
+    // the previous flow left the captured photo sitting on the upload tab with
+    // only a small unlabelled X to remove it, which read as "stuck".
+    if (retakeBtn) {
+        retakeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            clearBtn.click();
+            const cameraTab = Array.from(tabBtns)
+                .find(b => b.getAttribute('data-target') === 'camera');
+            if (cameraTab) cameraTab.click();
+        });
+    }
+
+    // Records, collapsed at the foot of the page.
+    const recToggle = document.getElementById('btn-toggle-records');
+    const recBody = document.getElementById('mark-records-body');
+    if (recToggle && recBody) {
+        recToggle.addEventListener('click', () => {
+            if (!recBody.classList.contains('hidden')) {
+                recBody.classList.add('hidden');
+                recToggle.setAttribute('aria-expanded', 'false');
+                return;
+            }
+            // Built on first open rather than at page load: the register is a
+            // follow-up question, and fetching it up front would delay the
+            // camera for a request most sessions never make.
+            if (!recBody.dataset.ready) {
+                recBody.appendChild(
+                    document.getElementById('tpl-records').content.cloneNode(true));
+                recBody.dataset.ready = '1';
+                initRecordsPage();
+            }
+            recBody.classList.remove('hidden');
+            recToggle.setAttribute('aria-expanded', 'true');
+        });
+    }
 
     // Submit
     form.addEventListener('submit', async (e) => {
@@ -1051,7 +1132,8 @@ function drawStudents(students) {
 // --- Records Page ---
 async function initRecordsPage() {
     const dateInput = document.getElementById('records-date');
-    const today = new Date().toISOString().split('T')[0];
+    if (!dateInput) return;
+    const today = localISODate();
     dateInput.value = today;
 
     dateInput.addEventListener('change', () => loadRecords(dateInput.value));
@@ -1100,7 +1182,7 @@ async function loadRecords(dateStr) {
                         <span class="font-medium">${Charts.esc(r.name)}</span>
                     </div>
                 </td>
-                <td class="font-mono" data-label="Roll No">${Charts.esc(r.roll_no)}</td>
+                <td class="font-mono" data-label="ID number">${Charts.esc(r.roll_no)}</td>
                 <td data-label="Role">${r.role === 'coach' ? '<span class="badge badge-blue">Coach</span>'
                                          : '<span class="badge badge-green">Athlete</span>'}</td>
                 <td class="font-mono" data-label="Confidence">${(r.confidence * 100).toFixed(1)}%</td>
@@ -1744,269 +1826,4 @@ function closeFaceScan() {
     }
     mvState = null;
     closeModal();
-}
-
-/* --------------------------------------------------------------------------
-   Analytics page.
-
-   Form was chosen per chart from the data's job, not from what looks busiest:
-
-     attendance over time   -> area, one series (the headline; it is a trend)
-     geo verification       -> horizontal stacked bar, STATUS colours
-                               (inside/no fix/outside genuinely encode good,
-                               warning and bad - this is the one place those
-                               colours belong)
-     centres                -> columns, magnitude across a handful of items
-     match confidence       -> columns over ordered buckets, sequential ramp
-                               (a distribution, so more-is-darker carries the
-                               axis a second time)
-     attendance by athlete  -> ranked horizontal bars, worst first, because
-                               long names do not fit under a column and the
-                               reader wants "who is missing sessions"
-
-   The four tiles above are a KPI row, not charts: a single current number is
-   a stat tile, never a one-bar bar chart.
-   -------------------------------------------------------------------------- */
-
-// Filters live in ONE row above everything they scope, so every chart, tile
-// and table on the page always describes the same slice of data. A filter
-// inside a single card would let two cards disagree while both looked current.
-const analyticsFilter = { days: 60, centre: '' };
-
-async function renderAnalytics(isRefetch) {
-    const root = document.getElementById('app-root');
-    const body = document.getElementById('analytics-body');
-
-    if (!isRefetch || !body) {
-        root.innerHTML = `
-            <div class="filter-row">
-                <div class="ch-skeleton" style="width:180px;height:52px"></div>
-                <div class="ch-skeleton" style="width:180px;height:52px"></div>
-            </div>
-            <div class="stats-grid" style="margin-bottom:16px">
-                ${'<div class="ch-skeleton" style="height:104px"></div>'.repeat(4)}
-            </div>
-            <div class="analytics-grid">
-                <div class="ch-skeleton col-span-2" style="height:300px"></div>
-                <div class="ch-skeleton" style="height:190px"></div>
-                <div class="ch-skeleton" style="height:190px"></div>
-            </div>`;
-    } else {
-        // Hold the previous render at reduced opacity rather than tearing it
-        // down for a skeleton - no layout jump, and the numbers stay readable
-        // while the new ones are on their way.
-        body.classList.add('is-refetching');
-    }
-
-    const qs = `days=${analyticsFilter.days}` +
-               (analyticsFilter.centre ? `&centre_id=${encodeURIComponent(analyticsFilter.centre)}` : '');
-    let a, centres = [];
-    try {
-        [a, centres] = await Promise.all([
-            api.get(`/api/analytics?${qs}`),
-            api.get('/api/centres').then(r => r.centres).catch(() => []),
-        ]);
-    } catch {
-        root.innerHTML = `<div class="empty-state py-12">Could not load analytics.</div>`;
-        return;
-    }
-
-    const trend = a.trend || [];
-    const present = trend.map(d => d.present);
-    const latest = present.length ? present[present.length - 1] : 0;
-    const prev = present.length > 1 ? present[present.length - 2] : null;
-    const avg = present.length ? present.reduce((x, y) => x + y, 0) / present.length : 0;
-    const rate = a.enrolled ? (avg / a.enrolled) * 100 : 0;
-    const best = present.length ? Math.max(...present) : 0;
-
-    const shortDate = (iso) => {
-        const [, m, d] = (iso || '').split('-');
-        return m && d ? `${d}/${m}` : iso;
-    };
-
-    // Delta on the headline tile: signed, against a named period, and coloured
-    // by direction because for attendance up is unambiguously good.
-    let deltaHtml = '';
-    if (prev !== null) {
-        const diff = latest - prev;
-        const cls = diff > 0 ? 'up' : diff < 0 ? 'down' : 'flat';
-        // "0 vs previous session" reads like a missing value; say it in words.
-        const text = diff === 0 ? 'No change from previous session'
-                                : `${diff > 0 ? '+' : ''}${diff} vs previous session`;
-        deltaHtml = `<div class="stat-delta ${cls}">${text}</div>`;
-    }
-
-    const geo = a.geo || {};
-    const geoSegments = [
-        { label: 'At the centre', value: geo.inside || 0, color: Charts.status.good },
-        { label: 'No location fix', value: geo.no_fix || 0, color: Charts.status.warn },
-        { label: 'Outside the fence', value: geo.outside || 0, color: Charts.status.bad },
-        { label: 'Unverified', value: geo.unverified || 0, color: Charts.status.none },
-    ].filter(s => s.value);
-
-    const centreData = (a.by_centre || []).map(c => ({
-        label: c.name, short: c.code, value: c.present,
-    }));
-
-    // Buckets are an ordered scale, so they take the sequential ramp: the
-    // darker the column the higher the confidence it represents.
-    const conf = a.confidence || [];
-    const confData = conf.map((c, i) => ({
-        label: `${(c.bucket * 100).toFixed(0)}-${(c.bucket * 100 + 5).toFixed(0)}% similarity`,
-        short: (c.bucket * 100).toFixed(0),
-        value: c.count,
-        color: Charts.sequential[Math.min(
-            Charts.sequential.length - 1,
-            Math.floor((i / Math.max(1, conf.length - 1)) * (Charts.sequential.length - 1))
-        )],
-    }));
-
-    // Worst attendance first - that is the list a coach acts on. Capped at 12
-    // so the card stays readable; the table view holds the rest.
-    const perAthlete = a.per_athlete || [];
-    const worst = perAthlete.slice(0, 12).map(p => ({
-        label: p.name, value: p.rate, unit: '%',
-    }));
-
-    const isSuper = (session.user || {}).role === 'super_admin';
-    root.innerHTML = `
-        <div class="filter-row">
-            <label class="filter-field">
-                <span>Period</span>
-                <select id="an-days" class="form-select">
-                    <option value="7">Last 7 sessions</option>
-                    <option value="30">Last 30 sessions</option>
-                    <option value="60">Last 60 sessions</option>
-                    <option value="365">All sessions</option>
-                </select>
-            </label>
-            ${isSuper ? `<label class="filter-field">
-                <span>Centre</span>
-                <select id="an-centre" class="form-select">
-                    <option value="">All centres</option>
-                    ${centres.map(c => `<option value="${c.id}">${Charts.esc(c.name)}</option>`).join('')}
-                </select>
-            </label>` : ''}
-        </div>
-        <div id="analytics-body">
-        <div class="stats-grid" style="margin-bottom:16px">
-            <div class="stat-card">
-                <div class="stat-header"><span>Latest session</span></div>
-                <div class="stat-value">${latest}</div>
-                ${deltaHtml}
-                <div class="stat-spark">${Charts.sparkline(present.slice(-14))}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-header"><span>Average per session</span></div>
-                <div class="stat-value">${avg.toFixed(1)}</div>
-                <div class="stat-delta flat">across ${a.sessions} session${a.sessions === 1 ? '' : 's'}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-header"><span>Best turnout</span></div>
-                <div class="stat-value">${best}</div>
-                <div class="stat-delta flat">of ${a.enrolled} enrolled</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-header"><span>Sessions recorded</span></div>
-                <div class="stat-value">${a.sessions}</div>
-            </div>
-        </div>
-
-        <div class="card" style="margin-bottom:16px">
-            <div class="card-body meter-row">
-                ${Charts.radialMeter(rate, { caption: 'of enrolled athletes', label: 'Average turnout' })}
-                <div class="meter-copy">
-                    <div class="meter-title">Average turnout</div>
-                    <p class="text-sm text-muted" style="margin:6px 0 0">
-                        On a typical session ${avg.toFixed(1)} of ${a.enrolled} enrolled athletes
-                        were recognised. The ring is that share; the sessions below are how it
-                        moved over time.
-                    </p>
-                </div>
-            </div>
-        </div>
-
-        <div class="analytics-grid">
-            <div class="card col-span-2">
-                <div class="card-header">
-                    <h3 class="card-title">Athletes present per session</h3>
-                    <span class="text-xs text-muted">${a.enrolled} enrolled</span>
-                </div>
-                <div class="card-body">
-                    ${Charts.areaChart(
-                        trend.map(d => ({ label: d.date, short: shortDate(d.date), value: d.present })),
-                        { unit: '', height: 250 }
-                    )}
-                    ${Charts.tableView(['Date', 'Present'],
-                        trend.map(d => [d.date, d.present]), 'Athletes present per session')}
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header"><h3 class="card-title">Location verification</h3></div>
-                <div class="card-body">
-                    ${Charts.stackedBar(geoSegments, { height: 30 })}
-                    ${Charts.tableView(['Status', 'Records'],
-                        geoSegments.map(s => [s.label, s.value]), 'Location verification of attendance records')}
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header"><h3 class="card-title">Records by centre</h3></div>
-                <div class="card-body">
-                    ${Charts.barChart(centreData, { height: 220 })}
-                    ${Charts.tableView(['Centre', 'Records', 'Athletes'],
-                        (a.by_centre || []).map(c => [c.name, c.present, c.athletes]), 'Attendance records by centre')}
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header">
-                    <h3 class="card-title">Match confidence</h3>
-                    <span class="text-xs text-muted">similarity %</span>
-                </div>
-                <div class="card-body">
-                    <div class="text-xs text-muted" style="margin-bottom:8px">
-                        Where matches cluster. Bars close to the threshold are the ones
-                        that will start being missed as athletes grow.
-                    </div>
-                    ${Charts.barChart(confData, { height: 220 })}
-                    ${Charts.tableView(['Similarity', 'Matches'],
-                        conf.map(c => [`${(c.bucket * 100).toFixed(0)}%`, c.count]), 'Distribution of match confidence')}
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header">
-                    <h3 class="card-title">Lowest attendance</h3>
-                    <span class="text-xs text-muted">% of sessions</span>
-                </div>
-                <div class="card-body">
-                    ${Charts.rankedBars(worst, { unit: '%' })}
-                    ${Charts.tableView(['Athlete', 'Roll no', 'Sessions', 'Rate %'],
-                        perAthlete.map(p => [p.name, p.roll_no, p.present, p.rate]), 'Attendance rate by athlete')}
-                </div>
-            </div>
-        </div>
-        </div>`;
-
-    const daysSel = document.getElementById('an-days');
-    if (daysSel) {
-        daysSel.value = String(analyticsFilter.days);
-        daysSel.addEventListener('change', () => {
-            analyticsFilter.days = +daysSel.value;
-            renderAnalytics(true);
-        });
-    }
-    const centreSel = document.getElementById('an-centre');
-    if (centreSel) {
-        centreSel.value = analyticsFilter.centre;
-        centreSel.addEventListener('change', () => {
-            analyticsFilter.centre = centreSel.value;
-            renderAnalytics(true);
-        });
-    }
-
-    Charts.initChartInteraction(root);
-    Charts.countUp(root);
 }

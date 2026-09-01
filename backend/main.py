@@ -723,6 +723,10 @@ async def process_attendance(
         "coaches_present": sum(1 for r in recognized if r.get("role") == "coach"),
         "unknown_count": len(unknown),
         "filtered_faces": getattr(detector, "last_filtered_printed", 0),
+        # Surfaced separately from the poster count: a printed face in frame is
+        # an accident, a screen held up to the camera is someone trying to mark
+        # an absent athlete present, and the operator should be told.
+        "filtered_screen": getattr(detector, "last_filtered_screen", 0),
         "photo_quality": _photo_quality(faces, img),
         # A person attends exactly one centre. Matching against every centre's
         # roster at once invites cross-centre false positives, so say so plainly
@@ -1187,6 +1191,24 @@ def student_history(student_id: int, user: dict = Depends(auth.current_user)):
     }
 
 
+_MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+
+
+def _export_date(iso: str) -> str:
+    """'2026-09-01' -> '01 SEP 2026'.
+
+    An ISO date has no letters to capitalise, so "date in caps" is rendered as
+    a spelled-out month. This also removes the day/month ambiguity that bites a
+    register read in India when a spreadsheet reinterprets 01-09 as 9 January.
+    """
+    try:
+        y, m, d = str(iso).split("-")
+        return f"{int(d):02d} {_MONTHS[int(m) - 1]} {y}"
+    except (ValueError, IndexError, TypeError):
+        return str(iso or "")
+
+
 @app.get("/api/attendance/export")
 def export_attendance(
     day: Optional[str] = None,
@@ -1197,16 +1219,17 @@ def export_attendance(
     records = database.attendance_for_day(day, auth.scope_centre(user, centre_id))
     buf = io.StringIO()
     writer = csv.writer(buf)
-    # `confidence` matches what the UI displays; `raw_similarity` is the underlying
-    # cosine score, kept for auditing and threshold tuning.
-    writer.writerow(["roll_no", "name", "date", "confidence", "raw_similarity", "marked_at"])
+    # `confidence` is the figure the UI shows. The raw cosine score is no longer
+    # exported: it was only ever useful for threshold tuning, and in a register
+    # handed to an administrator two different "scores" per row invite the wrong
+    # one being read as the answer.
+    writer.writerow(["ID number", "Name", "Date", "Confidence", "Marked at"])
     for r in records:
         writer.writerow([
             r["roll_no"],
-            r["name"],
-            r["date"],
+            (r["name"] or "").upper(),
+            _export_date(r["date"]),
             round(utils.similarity_to_confidence(r["confidence"], config.MATCH_THRESHOLD), 4),
-            round(float(r["confidence"]), 4),
             r["marked_at"],
         ])
     buf.seek(0)
@@ -1360,9 +1383,38 @@ def get_stats(user: dict = Depends(auth.current_user)):
     return s
 
 
+class NoCacheStatic(StaticFiles):
+    """Serve the frontend with revalidation instead of heuristic caching.
+
+    StaticFiles sends an ETag and Last-Modified but NO Cache-Control. With no
+    explicit policy a browser falls back to heuristic freshness - typically a
+    tenth of the file's age - and will happily reuse app.js for hours without
+    asking the server whether it changed. That is how a deployed frontend fails
+    to reach someone who already has the page open: the old UI keeps running
+    against the new API, disagreeing with it silently.
+
+    `no-cache` does not mean "do not store"; it means "revalidate before use".
+    The ETag is still doing the work - an unchanged file comes back as a 304
+    with no body - so this costs one conditional request, not a re-download.
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers.setdefault("Cache-Control", "no-cache")
+        return response
+
+
+def _no_cache(response: FileResponse) -> FileResponse:
+    """Same policy for the hand-served root documents."""
+    response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
 @app.get("/")
 def index():
-    return FileResponse(config.FRONTEND_DIR / "index.html")
+    # The shell must revalidate too, or a stale index.html keeps pointing at
+    # scripts the deployment no longer ships.
+    return _no_cache(FileResponse(config.FRONTEND_DIR / "index.html"))
 
 
 # PWA files must be served from the site root, not from /static. A service
@@ -1381,9 +1433,12 @@ def favicon():
 
 @app.get("/manifest.webmanifest", include_in_schema=False)
 def manifest():
-    return FileResponse(config.FRONTEND_DIR / "manifest.webmanifest",
-                        media_type="application/manifest+json")
+    return _no_cache(FileResponse(config.FRONTEND_DIR / "manifest.webmanifest",
+                                  media_type="application/manifest+json"))
 
 
+# Icons keep the default caching: they are immutable in practice, and a shortcut
+# icon served from cache is not a correctness problem. Code is different, so
+# /static revalidates - see NoCacheStatic.
 app.mount("/icons", StaticFiles(directory=config.FRONTEND_DIR / "icons"), name="icons")
-app.mount("/static", StaticFiles(directory=config.FRONTEND_DIR), name="static")
+app.mount("/static", NoCacheStatic(directory=config.FRONTEND_DIR), name="static")

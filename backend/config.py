@@ -227,6 +227,54 @@ PRINT_MAX_SATURATION = 70.0    # real faces here measured 95-147
 PRINT_MIN_BRIGHTNESS = 170.0   # real faces here measured 74-167
 PRINT_MAX_SAT_STDDEV = 35.0    # real faces here measured 39-57
 
+# --- Screen / replay rejection ----------------------------------------------
+# A face displayed on a phone or laptop screen is detected exactly as a real
+# one, so holding up a photograph of an absent athlete marks them present. That
+# is attendance fraud that leaves no trace anywhere in the record - the row
+# looks identical to an honest one.
+#
+# Re-photographing a screen leaves two traces a live face does not:
+#
+#   moire    the camera's sensor grid beats against the screen's pixel grid,
+#            adding a near-periodic interference pattern. Real skin and fabric
+#            are broadband - their spectrum falls off smoothly - so periodic
+#            energy shows up as isolated spikes that natural texture lacks.
+#   framing  the lit screen sits inside a dark bezel, so the ring around the
+#            face is markedly darker than the face. A real room rarely frames
+#            someone that way.
+#
+# BOTH must hold, following looks_printed()'s rule: each alone describes plenty
+# of real faces - a striped shirt carries periodic energy, a spotlit face
+# outshines its surroundings - so requiring agreement is what keeps a genuine
+# athlete from being refused attendance.
+#
+# Measured over 267 real faces from this deployment's own photographs (192
+# group photos and enrolment portraits, faces >= 60px):
+#
+#             median    p99     max
+#   moire      22.74   30.50   30.50
+#   bezel       0.83    1.13    1.47
+#
+# 38.0 sits 24% above the highest moire peak any real face produced, and only
+# ONE of the 267 cleared the bezel condition at all - that face scored 19.45 on
+# moire, less than half the threshold. So no face in the existing corpus is
+# rejected by this test, which is the property that matters: a genuine athlete
+# refused attendance is a worse failure than a spoof that gets through.
+#
+# WHAT IS NOT MEASURED, and must be before this is trusted: whether a phone held
+# up in the room actually EXCEEDS 38. Moire depends on the screen's pixel pitch,
+# the distance and the angle, and can be weak or absent at some combinations.
+# The false-reject side is calibrated; the true-catch side is not, and cannot be
+# from stored photographs. Take a few spoof photos on the devices in use and run
+#     python -m scripts.calibrate_screen_reject --real DIR --screen DIR
+# then set these from the printed separation. Watch `filtered_screen` in the
+# attendance response meanwhile - a count that never moves means this is not
+# firing, not that nobody is trying.
+REJECT_SCREEN_FACES = True
+SCREEN_MAX_MOIRE_PEAK = 38.0     # real faces here measured 5.06 - 30.50
+SCREEN_MIN_BEZEL_RATIO = 1.35    # real faces here measured 0.43 - 1.47
+SCREEN_MIN_FACE_PX = 60          # below this the spectrum is too coarse to judge
+
 # --- Stage-2 cascade verification -------------------------------------------
 # Disabled: it re-scored a GFPGAN-restored crop, and GFPGAN is gone. Measured
 # separately, restoring query faces made accuracy worse anyway (12/13 against

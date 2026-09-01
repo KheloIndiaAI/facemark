@@ -107,6 +107,89 @@ def looks_printed(img_bgr: np.ndarray, box) -> bool:
     )
 
 
+def moire_peakiness(gray: np.ndarray) -> float:
+    """How spiky the mid-band spectrum is - the signature of a photographed screen.
+
+    Skin, hair and fabric are broadband: their Fourier magnitude falls off
+    smoothly, so the strongest mid-frequency component sits close to the average
+    one. Photographing a screen adds interference between two pixel grids, which
+    is near-periodic and therefore concentrates into isolated spikes. The
+    max-to-mean ratio over an annulus separates the two without needing to know
+    the pattern's orientation or period.
+
+    Returns 0.0 when the crop is too small to have a meaningful spectrum.
+    """
+    if gray.size == 0 or min(gray.shape[:2]) < 16:
+        return 0.0
+    g = cv2.resize(gray, (128, 128)).astype(np.float32)
+    g -= g.mean()
+    # Without a window the crop's own straight edges leak a bright cross through
+    # the spectrum and every face looks periodic.
+    w = np.outer(np.hanning(128), np.hanning(128))
+    spec = np.abs(np.fft.fftshift(np.fft.fft2(g * w)))
+    yy, xx = np.mgrid[0:128, 0:128]
+    radius = np.hypot(yy - 64, xx - 64) / 64.0
+    # Below 0.30 is face structure; above 0.85 is sensor noise near Nyquist.
+    band = spec[(radius > 0.30) & (radius < 0.85)]
+    if band.size == 0:
+        return 0.0
+    mean = float(band.mean())
+    return float(band.max() / mean) if mean > 1e-6 else 0.0
+
+
+def bezel_ratio(img_bgr: np.ndarray, box) -> float:
+    """Face brightness divided by the brightness of the ring around it.
+
+    A screen held up in a room is a bright rectangle inside a dark bezel, so the
+    surround is much darker than the face. Returns 1.0 when there is no room
+    around the box to measure, which cannot trigger a rejection.
+    """
+    h, w = img_bgr.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in box]
+    fw, fh = x2 - x1, y2 - y1
+    if fw <= 0 or fh <= 0:
+        return 1.0
+    # A half-face-width margin: wide enough to clear the screen edge when a
+    # phone is held at arm's length, narrow enough to stay inside the frame.
+    mx, my = int(fw * 0.5), int(fh * 0.5)
+    ox1, oy1 = max(0, x1 - mx), max(0, y1 - my)
+    ox2, oy2 = min(w, x2 + mx), min(h, y2 + my)
+    outer = img_bgr[oy1:oy2, ox1:ox2]
+    inner = img_bgr[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+    if outer.size == 0 or inner.size == 0 or outer.size <= inner.size:
+        return 1.0
+    outer_sum = float(outer.sum())
+    inner_sum = float(inner.sum())
+    ring_px = outer.size - inner.size
+    ring_mean = (outer_sum - inner_sum) / ring_px
+    face_mean = inner_sum / inner.size
+    return float(face_mean / ring_mean) if ring_mean > 1.0 else 1.0
+
+
+def looks_like_screen(img_bgr: np.ndarray, box) -> bool:
+    """True when a detection looks like a face displayed on a screen.
+
+    Both conditions must agree - see the calibration note in config.py. This
+    blocks the simplest attendance fraud there is: holding up a phone showing an
+    absent athlete's photograph.
+    """
+    if not getattr(config, "REJECT_SCREEN_FACES", False):
+        return False
+    x1, y1, x2, y2 = [max(0, int(v)) for v in box]
+    if min(x2 - x1, y2 - y1) < config.SCREEN_MIN_FACE_PX:
+        # A small face carries too little spectrum to judge, and guessing here
+        # would reject distant athletes in a genuine group photo.
+        return False
+    crop = img_bgr[y1:y2, x1:x2]
+    if crop.size == 0:
+        return False
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    return bool(
+        moire_peakiness(gray) > config.SCREEN_MAX_MOIRE_PEAK
+        and bezel_ratio(img_bgr, box) > config.SCREEN_MIN_BEZEL_RATIO
+    )
+
+
 class FaceQualityAssessor:
     """Blur, exposure and pose for one detection."""
 
@@ -170,6 +253,7 @@ class FaceDetector:
         self._lock = threading.Lock()
         self.mode = (mode or config.DETECTION_MODE).lower()
         self.last_filtered_printed = 0
+        self.last_filtered_screen = 0
         self._model_path = config.MODELS_DIR / config.YUNET_MODEL
         if not self._model_path.exists():
             raise FileNotFoundError(
@@ -207,6 +291,7 @@ class FaceDetector:
 
         faces: List[Face] = []
         printed = 0
+        screens = 0
         for row in (rows if rows is not None else []):
             x, y, bw, bh = float(row[0]), float(row[1]), float(row[2]), float(row[3])
             if min(bw, bh) < config.MIN_FACE_SIZE:
@@ -217,6 +302,9 @@ class FaceDetector:
             box = (x, y, x + bw, y + bh)
             if looks_printed(img_bgr, box):
                 printed += 1
+                continue
+            if looks_like_screen(img_bgr, box):
+                screens += 1
                 continue
             f = Face(
                 box=box,
@@ -230,7 +318,16 @@ class FaceDetector:
 
         if printed:
             log.info("Filtered %d printed/poster face(s) from the photo.", printed)
+        if screens:
+            # Logged at warning level, unlike the poster filter: a poster in
+            # frame is an accident, but a screen held up to the camera is
+            # someone attempting to mark an absent athlete present.
+            log.warning(
+                "Rejected %d face(s) that look like a photograph shown on a screen.",
+                screens,
+            )
         self.last_filtered_printed = printed
+        self.last_filtered_screen = screens
         faces.sort(key=lambda f: f.box[0])
         return faces
 
