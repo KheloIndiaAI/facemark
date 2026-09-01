@@ -39,11 +39,15 @@ services:
         value: /app/data/models      # baked into the image, not the disk
       - key: DETECTION_MODE
         value: fused
-      - key: ORT_THREADS
-        value: "2"
-      # Set to your Vercel URL, e.g. https://facemark.vercel.app
-      # Only needed if the browser calls the API directly; the Vercel rewrite
-      # proxies /api so requests normally arrive same-origin.
+      # ORT_THREADS is read by nothing: onnxruntime was removed with the licence
+      # migration and OpenCV's DNN module runs the models now. Kept out of the
+      # environment rather than left to imply a tuning knob that does not exist.
+      #
+      # CORS_ORIGINS: the origin the browser loads the app from, only needed when
+      # it calls the API cross-site. This backend serves its own frontend, so
+      # requests normally arrive same-origin and this can stay unset. A wildcard
+      # is NOT valid here - session auth rides a credentialed cookie, which
+      # browsers refuse alongside "*".
       - key: CORS_ORIGINS
         sync: false
       - key: COOKIE_SECURE

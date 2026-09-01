@@ -316,16 +316,42 @@ class CameraCapture {
 
     _startQualityMonitor() {
         if (this.qualityTimer) clearInterval(this.qualityTimer);
-        
+        if (!this.qualityBadge) return;
+
+        // This used to write "Good Lighting" every second regardless of the
+        // frame, with a comment admitting it was a placeholder. In a product
+        // whose whole job is telling a coach when a photo cannot be trusted, an
+        // indicator that always says "good" is worse than none - it is a
+        // confident wrong answer. It now measures the frame.
+        const probe = document.createElement('canvas');
+        probe.width = 64; probe.height = 48;
+        const pctx = probe.getContext('2d', { willReadFrequently: true });
+
         this.qualityTimer = setInterval(() => {
             if (!this.isActive || !this.video.videoWidth) return;
-            
-            // Very basic quality heuristic - just simulate for now or leave as 'Ready'
-            // In a real app we'd draw to an offscreen canvas and calculate brightness/blur
-            if (this.qualityBadge) {
-                this.qualityBadge.textContent = 'Good Lighting';
-                this.qualityBadge.style.color = '#34d399'; // green
+            let mean = 0, spread = 0;
+            try {
+                pctx.drawImage(this.video, 0, 0, probe.width, probe.height);
+                const d = pctx.getImageData(0, 0, probe.width, probe.height).data;
+                let sum = 0, sumSq = 0, n = 0;
+                // Luma, sampled: enough to tell dark from blown out.
+                for (let i = 0; i < d.length; i += 16) {
+                    const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+                    sum += y; sumSq += y * y; n++;
+                }
+                mean = sum / n;
+                spread = Math.sqrt(Math.max(0, sumSq / n - mean * mean));
+            } catch {
+                return;                       // a tainted or not-yet-ready frame
             }
+
+            let label, colour;
+            if (mean < 45)        { label = 'Too dark';        colour = '#f87171'; }
+            else if (mean > 215)  { label = 'Too bright';      colour = '#f87171'; }
+            else if (spread < 18) { label = 'Low contrast';    colour = '#fbbf24'; }
+            else                  { label = 'Lighting OK';     colour = '#34d399'; }
+            this.qualityBadge.textContent = label;
+            this.qualityBadge.style.color = colour;
         }, 1000);
     }
 }
@@ -522,10 +548,23 @@ async function boot() {
     await initApp();
 }
 
+let _appInitialised = false;
+
 async function initApp() {
+    // Called from BOTH boot() and doLogin(), so signing out and back in used to
+    // install a second health interval and a second hashchange listener - the
+    // router then re-rendered every navigation twice, and it compounded on
+    // every re-login. The work below is one-time setup; only the routing needs
+    // to happen again, so that is all that runs on a repeat call.
+    if (_appInitialised) {
+        handleRoute();
+        return;
+    }
+    _appInitialised = true;
+
     checkHealth();
     setInterval(checkHealth, 30000); // Check health every 30s
-    
+
     // Mobile Nav
     const hamburger = document.getElementById('hamburger-btn');
     const sidebar = document.querySelector('.sidebar');
@@ -810,27 +849,27 @@ function initMarkPage() {
             <style>@keyframes spin { 100% { transform: rotate(360deg); } }</style>
         `;
 
-        let progress = 0;
+        // The bar is INDETERMINATE, not a percentage. The old one was a random
+        // walk that crept to 96% and parked there, so on a slow request it
+        // showed a number that meant nothing and implied the work was nearly
+        // done for minutes. The client cannot know the server's progress, so it
+        // says what stage is expected and animates without claiming a figure.
         const progressEl = document.getElementById('progress-bar');
         const textEl = document.getElementById('progress-text');
+        progressEl.style.width = '35%';
+        progressEl.style.animation = 'indeterminate 1.4s ease-in-out infinite';
+
         const phases = [
-            {p: 5,  t: "Uploading the clip..."},
-            {p: 30, t: "Checking the clip is a live person..."},
-            {p: 60, t: "Detecting faces..."},
-            {p: 80, t: "Matching against the roster..."},
-            {p: 92, t: "Saving attendance..."},
+            "Uploading the clip...",
+            "Checking the clip is a live person...",
+            "Detecting faces...",
+            "Matching against the roster...",
+            "Saving attendance...",
         ];
         let phaseIdx = 0;
         const progressTimer = setInterval(() => {
-            if (phaseIdx < phases.length && progress >= phases[phaseIdx].p) {
-                textEl.textContent = phases[phaseIdx].t;
-                phaseIdx++;
-            }
-            if (progress < 96) {
-                progress += Math.random() * 1.5;
-                progressEl.style.width = Math.min(progress, 96) + '%';
-            }
-        }, 200);
+            if (phaseIdx < phases.length) textEl.textContent = phases[phaseIdx++];
+        }, 900);
 
         const formData = new FormData();
         formData.append('video', currentMarkFile);
@@ -856,6 +895,7 @@ function initMarkPage() {
         try {
             const data = await api.postForm('/api/attendance/process-video', formData);
             clearInterval(progressTimer);
+            progressEl.style.animation = '';      // stop animating, settle full
             progressEl.style.width = '100%';
             textEl.textContent = "Done";
 
@@ -1165,11 +1205,15 @@ function drawStudents(students) {
             `<span class="badge ${nTmpl >= 6 ? 'badge-green' : 'badge-blue'}" style="font-size: 10px;" title="Face templates stored for this person">${nTmpl} template${nTmpl === 1 ? '' : 's'}</span>` : '';
         return `
         <div class="student-card">
-            <button class="btn-icon btn-delete-student" onclick="confirmDeleteStudent('${s.id}', '${s.name}')" title="Delete">
+            <!-- This handler interpolated s.name with NO escaping at all, so a
+                 person named  ');alert(1);//  ran code on this page for every
+                 coach who opened it. dataset removes the JS-string context. -->
+            <button class="btn-icon btn-delete-student" title="Delete"
+                    data-delete-student data-student-id="${s.id}" data-student-name="${Charts.esc(s.name)}">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
             </button>
             <div class="student-photo-wrap">
-                <img src="${s.photo_url}" class="student-photo" alt="${s.name}">
+                <img src="${s.photo_url}" class="student-photo" alt="${Charts.esc(s.name)}">
             </div>
             <div class="student-info">
                 <div class="student-name">${s.name}</div>
@@ -1179,10 +1223,20 @@ function drawStudents(students) {
                 </div>
                 <div class="student-meta" style="margin-top: 6px; gap: 6px; display: flex; flex-wrap: wrap; align-items: center;">
                     ${tmplBadge}
-                    <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;" onclick="openAddPhotoModal('${s.id}', '${s.name.replace(/'/g, "\\'")}')" title="Add another photo (recent selfie or ID)">
+                    <!-- dataset + delegated listeners, never an interpolated
+                         handler. Backslash-escaping a quote does not work here:
+                         the HTML parser decodes the attribute BEFORE the JS is
+                         parsed, so a name containing a quote still breaks out.
+                         Passing the value as data and reading it with .dataset
+                         removes the JS-string context altogether. -->
+                    <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;"
+                            data-add-photo data-student-id="${s.id}" data-student-name="${Charts.esc(s.name)}"
+                            title="Add another photo (recent selfie or ID)">
                         ${Icon('upload', 12)}Add photo
                     </button>
-                    <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;" onclick="openMultiViewEnrol('${s.id}', '${s.name.replace(/'/g, "\\'")}')" title="Scan the face from several angles with the camera - the strongest way to improve recognition">
+                    <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;"
+                            data-multiview data-student-id="${s.id}" data-student-name="${Charts.esc(s.name)}"
+                            title="Scan the face from several angles with the camera - the strongest way to improve recognition">
                         ${Icon('camera', 12)}Register face
                     </button>
                     <!-- dataset + a delegated listener rather than another
@@ -1286,6 +1340,17 @@ function openModal(title, contentHTML, footerHTML) {
 }
 
 function closeModal() {
+    // The modal's X and every "Cancel" call this, not closeFaceScan(), so a
+    // face scan closed with the X left its 250ms capture interval running and
+    // its MediaStream open - camera light on, frames still posting, until the
+    // page was reloaded. Cleaning up here covers every close path at once.
+    if (typeof mvState !== 'undefined' && mvState) {
+        try {
+            if (mvState.timer) clearInterval(mvState.timer);
+            if (mvState.stream) mvState.stream.getTracks().forEach(t => t.stop());
+        } catch { /* best effort - closing must never throw */ }
+        mvState = null;
+    }
     document.getElementById('modal-container').classList.add('hidden');
 }
 
@@ -1484,7 +1549,10 @@ window.submitAddPhoto = async function(studentId) {
 };
 
 function confirmDeleteStudent(id, name) {
-    const html = `<p>Are you sure you want to delete <strong>${name}</strong>? This action cannot be undone and will not remove past attendance records, but will prevent future recognition.</p>`;
+    // Escaped here as well as in the attribute: .dataset DECODES the entity on
+    // read, so `name` arrives as the raw string and interpolating it into
+    // innerHTML would put the injection straight back.
+    const html = `<p>Are you sure you want to delete <strong>${Charts.esc(name)}</strong>? This action cannot be undone and will not remove past attendance records, but will prevent future recognition.</p>`;
     const footer = `
         <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
         <button type="button" class="btn btn-danger" onclick="executeDeleteStudent('${id}')">Delete</button>
@@ -1514,14 +1582,22 @@ function showToast(title, message, type = 'info') {
     else if (type === 'error') icon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-red"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>`;
     else icon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-blue"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`;
 
-    toast.innerHTML = `
-        ${icon}
-        <div class="toast-content">
-            <div class="toast-title">${title}</div>
-            <div class="toast-message">${message}</div>
-        </div>
-    `;
-    
+    // The icon is a fixed literal chosen above, so it can be markup. The title
+    // and message are NOT: several callers pass server-controlled strings -
+    // a student's name, an error from the API - and innerHTML on those is a
+    // script-injection route through anything that can set a name.
+    toast.innerHTML = icon;
+    const content = document.createElement('div');
+    content.className = 'toast-content';
+    const t = document.createElement('div');
+    t.className = 'toast-title';
+    t.textContent = title == null ? '' : String(title);
+    const m = document.createElement('div');
+    m.className = 'toast-message';
+    m.textContent = message == null ? '' : String(message);
+    content.append(t, m);
+    toast.appendChild(content);
+
     container.appendChild(toast);
     
     setTimeout(() => {
@@ -1669,13 +1745,22 @@ const MV_MIN_RADIUS = 0.55;      // how far the head must turn for a segment to 
 let mvState = null;
 
 // Re-scan an existing person: the frames go straight to their profile.
-// One delegated listener rather than a handler per card: the student grid is
-// rebuilt on every render, and per-card listeners would accumulate.
+// One delegated listener for every per-student action, rather than a handler
+// per card: the grid is rebuilt on each render, so per-card listeners would
+// accumulate, and interpolating a name into an onclick is the injection route
+// the audit found.
 document.addEventListener('click', (e) => {
-    const btn = e.target.closest && e.target.closest('[data-clip-enrol]');
+    if (!e.target.closest) return;
+    const btn = e.target.closest(
+        '[data-clip-enrol], [data-add-photo], [data-multiview], [data-delete-student]');
     if (!btn) return;
     e.preventDefault();
-    openClipEnrol(btn.dataset.studentId, btn.dataset.studentName || '');
+    const id = btn.dataset.studentId;
+    const name = btn.dataset.studentName || '';
+    if (btn.hasAttribute('data-clip-enrol')) openClipEnrol(id, name);
+    else if (btn.hasAttribute('data-add-photo')) openAddPhotoModal(id, name);
+    else if (btn.hasAttribute('data-delete-student')) confirmDeleteStudent(id, name);
+    else openMultiViewEnrol(id, name);
 });
 
 /** Enrol from a two-second clip, with live tracking while you frame the shot.
@@ -1822,9 +1907,19 @@ async function openClipEnrol(studentId, studentName) {
                 ? (state.recording ? 'Recording - keep moving slightly' : 'Face found - tap to record')
                 : (r.message || 'No face detected');
             if (!state.recording) shutter.disabled = !state.good;
+            state.fails = 0;
             draw();
         } catch {
-            /* a dropped frame is not worth reporting - the next one follows */
+            // A single dropped frame is not worth reporting - the next one
+            // follows. A run of them is: an expired session made this poll 401
+            // three times a second indefinitely, which shows in the server log
+            // as a flood and never recovers on its own.
+            state.fails = (state.fails || 0) + 1;
+            if (state.fails >= 5) {
+                if (state.timer) clearInterval(state.timer);
+                hint.textContent = 'Lost connection - close and try again';
+                shutter.disabled = true;
+            }
         } finally {
             state.busy = false;
         }

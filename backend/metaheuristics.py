@@ -22,6 +22,19 @@ import numpy as np
 
 log = logging.getLogger("metaheuristics")
 
+# Warn once, not per photo: a missing scipy would otherwise fill the log with
+# the same line for every face in every upload.
+_WARNED_NO_SCIPY = False
+
+
+def assignment_solver_name() -> str:
+    """Which solver is actually in use, for the startup banner and /api/health."""
+    try:
+        import scipy  # noqa: F401
+        return "hungarian (scipy)"
+    except ImportError:
+        return "GREEDY FALLBACK - scipy missing, results differ from benchmarks"
+
 # Cost assigned to (face, student) pairs that fall below their threshold. Large
 # enough that the solver only ever picks one when nothing else is available.
 _BLOCKED_COST = 1e6
@@ -179,7 +192,24 @@ def solve_optimal_assignment(
         row_ind, col_ind = linear_sum_assignment(cost_matrix)
         return row_ind, col_ind
     except ImportError:
-        # Standalone Python Hungarian implementation if scipy not present
+        # The fallback below is a greedy sort-by-cost loop, NOT the Hungarian
+        # algorithm: it takes the cheapest available pair repeatedly and never
+        # revises, so it can return a strictly worse total than the optimum.
+        #
+        # This used to happen silently, which meant a deployment could run a
+        # different matcher from the one every published measurement used and
+        # give no sign of it. scipy is a hard requirement now; the warning
+        # exists so that if it is ever missing again, the logs say so once
+        # rather than the accuracy quietly drifting.
+        global _WARNED_NO_SCIPY
+        if not _WARNED_NO_SCIPY:
+            _WARNED_NO_SCIPY = True
+            log.warning(
+                "scipy is not installed - falling back to a GREEDY assignment, "
+                "which is not the Hungarian algorithm and is not what this "
+                "system's accuracy figures were measured with. "
+                "Install it with: pip install scipy"
+            )
         return _hungarian_pure_python(cost_matrix)
 
 

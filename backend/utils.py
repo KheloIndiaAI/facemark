@@ -70,7 +70,13 @@ def crop_face(img_bgr: np.ndarray, face: Face, pad: float = 0.25) -> np.ndarray:
 def similarity_to_confidence(sim: float, threshold: float = 0.40) -> float:
     """Calibrate raw cosine similarity into human-readable recognition confidence (0.0 - 1.0).
 
-    In 512D ArcFace feature space:
+    Calibrated in 512-d ArcFace space, which is NOT what it now receives:
+    SFace produces 128-d embeddings with a different score distribution, so
+    these constants are inherited rather than re-fitted. The displayed
+    percentage is therefore indicative; MATCH_THRESHOLD governs the actual
+    decision and is calibrated on this system's own data.
+
+    Original fit:
       - At threshold boundary -> 75% match
       - 0.55 -> 88% match
       - 0.65 -> 95% match

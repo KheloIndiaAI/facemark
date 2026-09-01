@@ -280,8 +280,12 @@ async function renderUsersPage() {
           <td style="white-space:nowrap">
             <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
               onclick="toggleUser(${x.id}, ${!x.is_active})">${x.is_active ? 'Disable' : 'Enable'}</button>
+            <!-- dataset, not an interpolated handler. E() is HTML escaping,
+                 and this was a JavaScript string context: the HTML parser
+                 turns &#39; back into a quote before the JS is parsed, so the
+                 escape was not merely weak, it was the wrong kind. -->
             <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
-              onclick="resetUserPassword(${x.id}, '${E(x.username)}')">Reset password</button>
+              data-reset-password data-user-id="${x.id}" data-username="${E(x.username)}">Reset password</button>
           </td></tr>`).join('')}</tbody></table>
       </div></div>`;
 }
@@ -351,3 +355,12 @@ async function resetUserPassword(id, username) {
         showToast('Password reset', `${username} must sign in again`, 'success');
     } catch { /* surfaced */ }
 }
+
+// Delegated, so the users table can be re-rendered freely and no username is
+// ever interpolated into a handler string. See the note on the button.
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest && e.target.closest('[data-reset-password]');
+    if (!btn) return;
+    e.preventDefault();
+    resetUserPassword(btn.dataset.userId, btn.dataset.username || '');
+});

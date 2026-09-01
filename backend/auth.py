@@ -21,12 +21,14 @@ import hmac
 import logging
 import os
 import secrets
+import threading
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
 
-from . import database
+from . import config, database
 
 log = logging.getLogger("auth")
 
@@ -139,12 +141,86 @@ def delete_user(user_id: int) -> None:
 
 # --- sessions ----------------------------------------------------------------
 
-def login(username: str, password: str) -> Optional[dict]:
-    """Verify credentials and open a session. Returns {token, user} or None."""
+class LoginBlocked(Exception):
+    """Raised instead of returning None, so the caller can say WHY."""
+
+    def __init__(self, message: str, retry_after: int = 0):
+        super().__init__(message)
+        self.message = message
+        self.retry_after = retry_after
+
+
+# Per-address attempt times. In-process, so N workers allow N times the burst -
+# accepted deliberately, because the alternative is letting an unauthenticated
+# caller write a row per attempt.
+_ip_attempts: dict = {}
+_ip_lock = threading.Lock()
+
+
+def _ip_throttled(ip: str) -> bool:
+    """True when this address has tried too many times recently."""
+    if not ip:
+        return False
+    now = time.time()
+    cutoff = now - config.LOGIN_IP_WINDOW_SECONDS
+    with _ip_lock:
+        seen = [t for t in _ip_attempts.get(ip, ()) if t > cutoff]
+        seen.append(now)
+        _ip_attempts[ip] = seen
+        # Drop addresses that have gone quiet, or the dict grows without bound.
+        if len(_ip_attempts) > 4096:
+            for k in [k for k, v in _ip_attempts.items() if not any(t > cutoff for t in v)]:
+                _ip_attempts.pop(k, None)
+        return len(seen) > config.LOGIN_IP_MAX_ATTEMPTS
+
+
+def _note_failure(user_id: int, failures: int) -> None:
+    now = datetime.now()
+    failures += 1
+    locked = (now + timedelta(seconds=config.LOGIN_LOCKOUT_SECONDS)).isoformat(timespec="seconds") \
+        if failures >= config.LOGIN_MAX_FAILURES else None
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE users SET failed_attempts = ?, locked_until = ? WHERE id = ?",
+            (failures, locked, user_id),
+        )
+    if locked:
+        log.warning("Account %s locked after %d failed attempts", user_id, failures)
+
+
+def login(username: str, password: str, ip: str = "") -> Optional[dict]:
+    """Verify credentials and open a session. Returns {token, user} or None.
+
+    Raises LoginBlocked when throttled. Both throttle checks run BEFORE the
+    password is hashed: verification is 600,000 PBKDF2 rounds, so a guard that
+    hashed first would still burn the CPU it exists to protect.
+    """
+    if _ip_throttled(ip):
+        log.warning("Login throttled for address %s", ip)
+        raise LoginBlocked(
+            "Too many sign-in attempts from this device. Wait a few minutes.",
+            config.LOGIN_IP_WINDOW_SECONDS,
+        )
+
     user = get_user_by_username(username)
     if not user or not user["is_active"]:
         return None
+
+    locked_until = user.get("locked_until")
+    if locked_until:
+        try:
+            until = datetime.fromisoformat(locked_until)
+        except (TypeError, ValueError):
+            until = None
+        if until and until > datetime.now():
+            raise LoginBlocked(
+                "This account is temporarily locked after too many failed "
+                "attempts. Try again later, or ask an admin to reset it.",
+                int((until - datetime.now()).total_seconds()),
+            )
+
     if not verify_password(password, user["password_hash"]):
+        _note_failure(int(user["id"]), int(user.get("failed_attempts") or 0))
         return None
 
     token = secrets.token_urlsafe(TOKEN_BYTES)
@@ -158,8 +234,11 @@ def login(username: str, password: str) -> Optional[dict]:
                 now.isoformat(timespec="seconds"),
             ),
         )
+        # A success clears the throttle: the lock is there to slow an attacker,
+        # not to punish someone who mistyped twice before getting it right.
         conn.execute(
-            "UPDATE users SET last_login = ? WHERE id = ?",
+            "UPDATE users SET last_login = ?, failed_attempts = 0, locked_until = NULL "
+            "WHERE id = ?",
             (now.isoformat(timespec="seconds"), user["id"]),
         )
         conn.execute(

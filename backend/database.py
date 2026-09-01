@@ -147,6 +147,13 @@ def init_db() -> None:
             "sport": "TEXT",
             "phone": "TEXT",
         })
+        _ensure_columns(conn, "users", {
+            # Login throttling state. On the users row rather than in a new
+            # table because it is one-to-one with an account and needs to be
+            # read on the same query that fetches the password hash.
+            "failed_attempts": "INTEGER NOT NULL DEFAULT 0",
+            "locked_until": "TEXT",
+        })
         _drop_removed_tables(conn)
         _ensure_columns(conn, "attendance", {
             "centre_id": "INTEGER REFERENCES centres(id) ON DELETE SET NULL",

@@ -1277,3 +1277,30 @@ a:hover { color: var(--accent-hover); }
 .meter-row { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
 .meter-copy { flex: 1; min-width: 220px; }
 .meter-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+
+/* --- Utility classes that were used but never defined ----------------------
+   Present Today and Absent Today were marked .text-green / .text-red on the
+   dashboard and both rendered in default ink, so the colour coding the tiles
+   were designed around simply did not exist. The rest are the same story:
+   referenced from markup, absent from the stylesheet. */
+.text-green { color: var(--green, #16a34a); }
+.text-red   { color: var(--red, #dc2626); }
+.text-blue  { color: var(--accent, #2563eb); }
+.font-medium { font-weight: 500; }
+.w-auto { width: auto; }
+.toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.activity-list { display: flex; flex-direction: column; }
+.activity-list .activity-item:not(:last-child) { border-bottom: 1px solid var(--border-subtle); }
+
+/* .data-table-wrapper is styled but appears in no markup - including the rule
+   that gives the records table horizontal scroll. Applied to the table's own
+   container instead, so a wide register scrolls rather than overflowing. */
+.card-body > .data-table { min-width: 100%; }
+.card-body:has(> .data-table) { overflow-x: auto; }
+
+/* Indeterminate progress: the client cannot know the server's progress, so the
+   bar animates rather than claiming a percentage it has not measured. */
+@keyframes indeterminate {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(300%); }
+}

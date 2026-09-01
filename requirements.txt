@@ -14,6 +14,17 @@ numpy>=1.26                 # BSD-3-Clause
 Pillow>=10.3                # MIT-CMU
 requests>=2.32              # Apache-2.0
 
+# NOT optional, despite the try/except around the import in metaheuristics.py.
+# Without it the matcher silently falls back to a greedy sort-by-cost loop that
+# is NOT the Hungarian algorithm and does not produce an optimal assignment, so
+# the system runs a different matcher from the one every benchmark measured -
+# and nothing said so. The solver in use is now logged at startup.
+scipy>=1.13                 # BSD-3-Clause
+
+# The documented roster-import workflow (scripts/enroll_from_pdf.py) imports
+# this, so a clean install could not run it.
+pypdf>=4.2                  # BSD-3-Clause
+
 # PostgreSQL driver + connection pool.
 #
 # LGPL-3.0, which is a different licence class from everything above and worth

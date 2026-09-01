@@ -381,10 +381,21 @@ CAMERA_MAX_RESOLUTION = 1920      # max dimension for camera photos
 
 
 # --- Deployment -------------------------------------------------------------
-# Browser origins allowed to call the API directly. The Vercel frontend proxies
-# /api through its own domain, so requests arrive same-origin and never need
-# this; it exists for local development and any direct API consumer.
-# Comma-separated, or "*" to allow any origin.
+# Browser origins allowed to call the API directly, comma-separated.
+#
+# This backend serves its own frontend, so requests normally arrive same-origin
+# and never consult this list; it exists for local development and for a
+# frontend hosted on a different domain.
+#
+# "*" is NOT valid, whatever convenience suggests. Session auth rides a
+# credentialed cookie, and browsers reject a wildcard origin alongside
+# credentials - the request fails with no useful error, so following the old
+# advice here produced a CORS setup that looked configured and was broken.
+# List the origins explicitly.
+#
+# And if you do set this for genuine cross-site use, set COOKIE_SECURE=1 and
+# COOKIE_SAMESITE=none too. Without them the cookie is refused on a cross-site
+# request, so the login appears to succeed and every call after it returns 401.
 CORS_ORIGINS = [
     o.strip() for o in os.environ.get(
         "CORS_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000"
@@ -393,5 +404,25 @@ CORS_ORIGINS = [
 
 # Cookies must be Secure + SameSite=None to survive a cross-site request. Behind
 # the Vercel proxy the request is same-origin, so the stricter Lax default holds.
+# --- Login throttling --------------------------------------------------------
+# Two separate problems, one guard.
+#
+# Brute force: nothing limited attempts, so a weak password fell to a script.
+#
+# CPU exhaustion: verifying a password is 600,000 PBKDF2 rounds, which is
+# correct for storage and is also, with unlimited attempts, a way to saturate
+# every worker from one laptop. Both checks below run BEFORE any hashing, which
+# is the point - a guard that hashes first would still burn the CPU it exists to
+# protect.
+#
+# The per-account lock lives in the database so it is shared by every worker and
+# survives a restart. The per-address window is in-process, so N workers allow
+# N times the burst; that is a deliberate trade against giving an unauthenticated
+# caller a way to write rows.
+LOGIN_MAX_FAILURES = 8           # per account before it locks
+LOGIN_LOCKOUT_SECONDS = 900      # 15 minutes, then the count resets on success
+LOGIN_IP_MAX_ATTEMPTS = 30       # per address within the window below
+LOGIN_IP_WINDOW_SECONDS = 300
+
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") in ("1", "true", "True")
 COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax")

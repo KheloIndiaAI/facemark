@@ -27,8 +27,22 @@ router = APIRouter(prefix="/api")
 # =============================================================================
 
 @router.post("/auth/login")
-def login(response: Response, username: str = Form(...), password: str = Form(...)):
-    result = auth.login(username, password)
+def login(request: Request, response: Response,
+          username: str = Form(...), password: str = Form(...)):
+    # X-Forwarded-For first, because behind CloudFront or an ALB every request
+    # appears to come from the proxy and one throttle would cover everybody.
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    ip = fwd or (request.client.host if request.client else "")
+
+    try:
+        result = auth.login(username, password, ip=ip)
+    except auth.LoginBlocked as blocked:
+        # 429, not 401. A throttled caller is not being told their password is
+        # wrong - and an operator reading the logs needs the two distinguished.
+        raise HTTPException(
+            429, blocked.message,
+            headers={"Retry-After": str(max(1, blocked.retry_after))},
+        )
     if not result:
         # Deliberately identical for unknown user, wrong password and disabled
         # account: distinguishing them tells an attacker which usernames exist.

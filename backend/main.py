@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import (auth, centres as centres_mod, config, database, db as pgdb,
-               liveness, routes, storage, utils)
+               liveness, metaheuristics, routes, storage, utils)
 from .detector import Face, estimate_landmarks, get_detector
 from .enhancer import get_enhancer, sharpness_quality
 from .recognizer import fused_similarity_to_student, fuse_scores, get_recognizer
@@ -101,6 +101,12 @@ def startup() -> None:
 
     log.info("Detector backend: %s", get_detector().backend_label)
     log.info("Recognizer ensemble: %s", get_recognizer().label)
+    # Logged because the fallback is not the Hungarian algorithm and produces a
+    # different assignment. Running one matcher while quoting another matcher's
+    # accuracy figures is the kind of drift that is invisible until someone
+    # measures, so the log says which is live on every boot.
+    solver = metaheuristics.assignment_solver_name()
+    (log.warning if "GREEDY" in solver else log.info)("Assignment solver: %s", solver)
 
 
 def sync_all_student_templates() -> int:
@@ -447,9 +453,12 @@ async def process_attendance(
     """Process group photo for attendance.
 
     detection_mode options:
-    - fast: YOLO only (minimum latency, ~40-60ms)
-    - fused: YOLO11s + SCRFD with WBF (best recall, ~80-120ms)
-    - accurate: YOLO TTA + SCRFD with WBF (maximum recall, ~150-250ms)
+    - fast:     YuNet at a higher confidence - fewer, surer boxes
+    - fused:    YuNet at the calibrated 0.80 threshold (the default)
+    - accurate: YuNet at a lower threshold, more recall on hard photos
+
+    All three are the same detector at different confidences. YOLO and SCRFD
+    were removed with the licence migration; naming them here outlived them.
     """
     data = await photo.read()
     try:
@@ -1506,6 +1515,7 @@ def health():
         "storage": storage.backend_name(),
         "detector": det_label,
         "recognizer": rec_label,
+        "assignment_solver": metaheuristics.assignment_solver_name(),
         "restoration": "off (GFPGAN removed - licence)",
         "threshold": config.MATCH_THRESHOLD,
         "students": n_students,
