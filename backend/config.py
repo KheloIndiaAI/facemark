@@ -261,19 +261,49 @@ PRINT_MAX_SAT_STDDEV = 35.0    # real faces here measured 39-57
 # rejected by this test, which is the property that matters: a genuine athlete
 # refused attendance is a worse failure than a spoof that gets through.
 #
-# WHAT IS NOT MEASURED, and must be before this is trusted: whether a phone held
-# up in the room actually EXCEEDS 38. Moire depends on the screen's pixel pitch,
-# the distance and the angle, and can be weak or absent at some combinations.
-# The false-reject side is calibrated; the true-catch side is not, and cannot be
-# from stored photographs. Take a few spoof photos on the devices in use and run
-#     python -m scripts.calibrate_screen_reject --real DIR --screen DIR
-# then set these from the printed separation. Watch `filtered_screen` in the
-# attendance response meanwhile - a count that never moves means this is not
-# firing, not that nobody is trying.
-REJECT_SCREEN_FACES = True
+# The false-reject side was calibrated; the true-CATCH side never was, because
+# no stored photograph is a picture of a screen. That gap is what the disabling
+# note below records - the check was measured on the half that could not fail.
+#
+# DISABLED. It was demonstrated failing on a phone held up in a bright office:
+# the bezel condition assumes a lit screen inside a DARK surround, and a lit
+# room defeats it, after which the moire half cannot fire on its own. A check
+# that has never caught anything is worse than no check, because it reads as
+# protection that is not there. Liveness now comes from video parallax instead -
+# see backend/liveness.py. Kept rather than deleted because the measurements in
+# the comment above are real and worth not repeating.
+REJECT_SCREEN_FACES = False
 SCREEN_MAX_MOIRE_PEAK = 38.0     # real faces here measured 5.06 - 30.50
 SCREEN_MIN_BEZEL_RATIO = 1.35    # real faces here measured 0.43 - 1.47
 SCREEN_MIN_FACE_PX = 60          # below this the spectrum is too coarse to judge
+
+# --- Liveness from video -----------------------------------------------------
+# A photograph is a plane, and under camera motion every point on a plane maps
+# through ONE homography. A real face does not: the nose is nearer the lens than
+# the ears, so the best-fitting homography leaves a residual, and that residual
+# is depth measured from parallax rather than guessed from appearance.
+#
+# LIVENESS_MIN_DEPTH is the residual, in face-widths, below which the subject is
+# treated as flat. LIVENESS_MIN_MOTION is the guard that makes the test honest:
+# with no viewpoint change there is no parallax and therefore no evidence either
+# way, so the clip is called inconclusive rather than live. Without that guard a
+# photograph held perfectly still would sail through.
+#
+# CALIBRATION STATUS: the flat side is calibrated against synthetic clips built
+# by warping a real photograph through known homographies, which is exactly what
+# a rigid photo does and so is faithful. The LIVE side needs real recordings
+# from the devices in use and is NOT yet measured - see
+# scripts/calibrate_liveness.py. Until it is, treat the threshold as provisional.
+LIVENESS_ENABLED = True
+LIVENESS_SAMPLE_FRAMES = 12      # evenly spaced; parallax grows with separation
+LIVENESS_MIN_POINTS = 25         # fewer trackable corners than this cannot judge
+LIVENESS_MIN_MOTION = 0.004      # median displacement in face-widths
+LIVENESS_MIN_DEPTH = 0.010       # provisional - see calibration status above
+LIVENESS_MAX_BYTES = 25 * 1024 * 1024
+LIVENESS_MAX_SECONDS = 10        # anything longer is not an attendance clip
+# Frames kept per clip. They are the evidence behind a refusal, so a coach
+# can see WHY a capture was rejected rather than being told only that it was.
+LIVENESS_STORE_FRAMES = 6
 
 # --- Stage-2 cascade verification -------------------------------------------
 # Disabled: it re-scored a GFPGAN-restored crop, and GFPGAN is gone. Measured

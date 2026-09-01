@@ -30,7 +30,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, centres as centres_mod, config, database, db as pgdb, routes, storage, utils
+from . import (auth, centres as centres_mod, config, database, db as pgdb,
+               liveness, routes, storage, utils)
 from .detector import Face, estimate_landmarks, get_detector
 from .enhancer import get_enhancer, sharpness_quality
 from .recognizer import fused_similarity_to_student, fuse_scores, get_recognizer
@@ -758,6 +759,115 @@ async def process_attendance(
             "total_ms": round((t4 - t0) * 1000, 1),
         },
     }
+
+
+class _MemoryUpload:
+    """Minimal UploadFile stand-in.
+
+    Lets the video route hand a decoded frame to process_attendance() instead of
+    duplicating 250 lines of matching, marking and annotation that are already
+    correct and already tested.
+    """
+
+    def __init__(self, data: bytes, filename: str = "frame.jpg"):
+        self._data = data
+        self.filename = filename
+        self.content_type = "image/jpeg"
+
+    async def read(self, size: int = -1) -> bytes:  # noqa: ARG002 - API shape
+        return self._data
+
+
+@app.post("/api/attendance/process-video")
+async def process_attendance_video(
+    request: Request,
+    video: UploadFile = File(...),
+    date_str: Optional[str] = Form(None),
+    threshold: Optional[float] = Form(None),
+    detection_mode: Optional[str] = Form(None),
+    source: Optional[str] = Form(None),
+    latitude: Optional[float] = Form(None),
+    longitude: Optional[float] = Form(None),
+    accuracy_m: Optional[float] = Form(None),
+    centre_id: Optional[int] = Form(None),
+    user: dict = Depends(auth.current_user),
+):
+    """Mark attendance from a short clip, refusing photographs of photographs.
+
+    A still frame can only be judged on appearance, and appearance is what a
+    replay reproduces - which is why the earlier moire and 3D-landmark checks
+    both failed. A clip carries something a photograph cannot: parallax. A
+    picture on a screen is a plane, so under camera movement everything in it
+    moves through one homography; a real face does not, and the residual is
+    depth actually measured rather than inferred. See backend/liveness.py.
+
+    The check runs SERVER-SIDE deliberately. Refusing to show an upload button
+    in the browser is a nudge, not a control - anyone can POST to this endpoint
+    directly - so the guard has to live where it cannot be skipped.
+    """
+    data = await video.read()
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    result = liveness.analyse(data, get_detector())
+
+    # Sampled frames are stored whatever the verdict. On a rejection they are
+    # the evidence a coach needs to see why, and a refusal nobody can inspect
+    # is one nobody can appeal.
+    ts = utils.timestamp()
+    frame_names: List[str] = []
+    for i, frame in enumerate(result.frames[: config.LIVENESS_STORE_FRAMES]):
+        name = f"clip_{ts}_{i}.jpg"
+        try:
+            utils.save_image(frame, "uploads", name)
+            frame_names.append(name)
+        except Exception as e:  # noqa: BLE001 - storage must not sink attendance
+            log.warning("Could not store liveness frame %s: %s", name, e)
+
+    liveness_payload = {
+        **result.to_dict(),
+        "frame_urls": [f"/api/uploads/{n}" for n in frame_names],
+    }
+
+    if not result.is_live:
+        log.warning(
+            "Liveness refused a clip: %s (depth=%.5f motion=%.5f) by user %s",
+            result.verdict, result.depth_score, result.motion, user.get("username"),
+        )
+        return {
+            "ok": False,
+            "liveness": liveness_payload,
+            "faces_detected": 0,
+            "recognized_count": 0,
+            "newly_marked": 0,
+            "recognized": [],
+            "unknown": [],
+            "message": result.reason,
+        }
+
+    # Recognition runs on the sharpest frame rather than the first: the first is
+    # often caught before the camera has settled, and face size and focus drive
+    # accuracy far more than anything else measured on this system.
+    ok, buf = cv2.imencode(".jpg", result.best_frame,
+                           [cv2.IMWRITE_JPEG_QUALITY, config.CAMERA_PHOTO_QUALITY])
+    if not ok:
+        raise HTTPException(500, "Could not encode the chosen frame")
+
+    response = await process_attendance(
+        request=request,
+        photo=_MemoryUpload(buf.tobytes(), f"clip_{ts}.jpg"),
+        date_str=date_str,
+        threshold=threshold,
+        detection_mode=detection_mode,
+        source=source or "video",
+        latitude=latitude,
+        longitude=longitude,
+        accuracy_m=accuracy_m,
+        centre_id=centre_id,
+        user=user,
+    )
+    response["liveness"] = liveness_payload
+    return response
 
 
 def _face_from_original(crop_name: str):
