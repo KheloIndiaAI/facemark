@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from . import storage
 from .detector import Face
 
 # Palette (BGR-independent RGB tuples used via PIL)
@@ -133,7 +134,15 @@ def annotate(
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
 
-def save_image(img_bgr: np.ndarray, path: Path) -> str:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(path), img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    return path.name
+def save_image(img_bgr: np.ndarray, prefix: str, name: str) -> str:
+    """Encode as JPEG and hand the bytes to the configured storage backend.
+
+    Takes (prefix, name) rather than a filesystem path because the destination
+    is no longer necessarily a filesystem - under FACEMARK_STORAGE=s3 there is
+    no directory to create and no path to write. `prefix` is "students" or
+    "uploads"; the returned bare name is what the database stores.
+    """
+    ok, buf = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not ok:
+        raise ValueError("Could not encode image as JPEG")
+    return storage.put(prefix, name, buf.tobytes())

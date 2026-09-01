@@ -78,7 +78,7 @@ def create_user(
         raise ValueError("A coach must be assigned to a centre")
     now = datetime.now().isoformat(timespec="seconds")
     with database.connect() as conn:
-        cur = conn.execute(
+        return conn.insert(
             "INSERT INTO users (username, password_hash, role, full_name, email, phone, "
             "centre_id, student_id, is_active, created_at) VALUES (?,?,?,?,?,?,?,?,1,?)",
             (
@@ -86,7 +86,6 @@ def create_user(
                 email, phone, centre_id, student_id, now,
             ),
         )
-        return int(cur.lastrowid)
 
 
 def get_user_by_username(username: str) -> Optional[dict]:

@@ -61,7 +61,7 @@ def create_centre(
 ) -> int:
     now = datetime.now().isoformat(timespec="seconds")
     with database.connect() as conn:
-        cur = conn.execute(
+        return conn.insert(
             "INSERT INTO centres (code, name, centre_type, state, district, address, pincode, "
             "sports, capacity, latitude, longitude, geofence_m, incharge_name, contact_phone, "
             "contact_email, established, is_demo, created_at) "
@@ -72,7 +72,6 @@ def create_centre(
                 incharge_name, contact_phone, contact_email, established, int(is_demo), now,
             ),
         )
-        return int(cur.lastrowid)
 
 
 def update_centre(centre_id: int, **fields) -> None:
@@ -139,9 +138,12 @@ def search_centres(
         rows = [_row(r) for r in conn.execute(sql, params).fetchall()]
         # Enrolled headcount travels with each centre so the UI can default to
         # the one actually in use rather than guessing from a demo flag.
-        counts = dict(conn.execute(
+        # Built column-by-column rather than dict(rows). A row is now a mapping,
+        # so dict() over a list of them would consume each row's column NAMES as
+        # the key/value pair and silently produce {"centre_id": "count"}.
+        counts = {r[0]: r[1] for r in conn.execute(
             "SELECT centre_id, COUNT(*) FROM students "
-            "WHERE centre_id IS NOT NULL GROUP BY centre_id").fetchall())
+            "WHERE centre_id IS NOT NULL GROUP BY centre_id").fetchall()}
     for r in rows:
         r["people_count"] = counts.get(r["id"], 0)
     return rows

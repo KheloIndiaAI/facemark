@@ -11,6 +11,35 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
+
+def _load_dotenv() -> None:
+    """Read ROOT_DIR/.env into the environment, if it exists.
+
+    Hand-rolled rather than adding python-dotenv: it is fifteen lines, and this
+    project keeps its dependency list short and its licences auditable.
+
+    A real environment variable always wins. That ordering matters because
+    production sets DATABASE_URL and the S3 credentials through the platform,
+    and a stray .env copied into an image must not silently override them.
+    """
+    path = ROOT_DIR / ".env"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
 # FACEMARK_DATA_DIR lets a deployment point every writable path at a mounted
 # disk. On Render the container filesystem is replaced on each deploy, so the
 # SQLite database, enrolment photos and uploads must live on the persistent
@@ -24,9 +53,50 @@ DATA_DIR = Path(os.environ.get("FACEMARK_DATA_DIR") or (ROOT_DIR / "data"))
 MODELS_DIR = Path(os.environ.get("FACEMARK_MODELS_DIR") or (DATA_DIR / "models"))
 UPLOADS_DIR = DATA_DIR / "uploads"
 STUDENTS_DIR = DATA_DIR / "students"
-DB_PATH = DATA_DIR / "attendance.db"
 FRONTEND_DIR = ROOT_DIR / "frontend"
 SAMPLES_DIR = ROOT_DIR / "samples"
+
+# The SQLite file this project used before the move to PostgreSQL. Nothing
+# reads it at runtime any more; it is kept so scripts/migrate_to_postgres.py can
+# find the old data, and so an existing install is not silently orphaned.
+LEGACY_SQLITE_PATH = DATA_DIR / "attendance.db"
+DB_PATH = LEGACY_SQLITE_PATH          # retained for older scripts
+
+# --- Database ---------------------------------------------------------------
+# PostgreSQL, required. There is deliberately no SQLite fallback: a fallback
+# that silently engages when DATABASE_URL is missing would let a deployment
+# come up writing to a container-local file that vanishes on the next deploy,
+# which is exactly the failure this migration exists to remove.
+#
+#   postgresql://user:password@host:5432/facemark
+#
+# Managed providers hand out URLs starting `postgres://`; libpq accepts both
+# spellings, so no rewriting is needed.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
+# FastAPI runs sync endpoints in a thread pool, so several requests hold a
+# connection at once. The dashboard alone issues eight small counts per load.
+DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
+DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "10"))
+
+# --- Photo storage ----------------------------------------------------------
+# "local" keeps photos under DATA_DIR, where they have always lived; "s3" puts
+# them in an S3-compatible bucket (AWS S3, Cloudflare R2, MinIO). The switch is
+# read once at startup by backend/storage.py.
+#
+# S3 matters for the same reason DATABASE_URL does: on a platform that replaces
+# the container each deploy, a photo written to local disk is gone next push.
+STORAGE_BACKEND = os.environ.get("FACEMARK_STORAGE", "local").strip().lower()
+
+S3_BUCKET = os.environ.get("S3_BUCKET", "").strip()
+# Set for Cloudflare R2 / MinIO; leave empty to talk to AWS S3.
+#   R2: https://<account-id>.r2.cloudflarestorage.com
+S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "").strip()
+S3_REGION = os.environ.get("S3_REGION", "auto").strip()
+S3_ACCESS_KEY_ID = os.environ.get("S3_ACCESS_KEY_ID", "").strip()
+S3_SECRET_ACCESS_KEY = os.environ.get("S3_SECRET_ACCESS_KEY", "").strip()
+# Optional key prefix, so one bucket can hold several environments.
+S3_PREFIX = os.environ.get("S3_PREFIX", "").strip()
 
 for _d in (DATA_DIR, UPLOADS_DIR, STUDENTS_DIR):
     _d.mkdir(parents=True, exist_ok=True)

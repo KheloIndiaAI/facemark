@@ -18,7 +18,6 @@ from __future__ import annotations
 import csv
 import io
 import logging
-import sqlite3
 import time
 from datetime import date
 from pathlib import Path
@@ -31,7 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, centres as centres_mod, config, database, routes, utils
+from . import auth, centres as centres_mod, config, database, db as pgdb, routes, storage, utils
 from .detector import Face, estimate_landmarks, get_detector
 from .enhancer import get_enhancer, sharpness_quality
 from .recognizer import fused_similarity_to_student, fuse_scores, get_recognizer
@@ -106,10 +105,17 @@ def sync_all_student_templates() -> int:
         if s["id"] in have:
             continue
         photo_path = s.get("photo_path")
-        if not photo_path or not Path(photo_path).exists():
+        if not photo_path:
             continue
-        img = cv2.imread(photo_path)
-        if img is None:
+        # Rows written before the storage switch hold a full absolute path,
+        # newer ones a bare filename. .name is correct for both, and is the
+        # storage key under either backend.
+        data = storage.get("students", Path(photo_path).name)
+        if data is None:
+            continue
+        try:
+            img = utils.decode_image(data)
+        except ValueError:
             continue
         try:
             templates, face, _ = _enroll_photo_templates(img, "id")
@@ -237,36 +243,34 @@ async def register_student(
     live_info = None
     live_data = None
     live_img = None
-    live_path = None
+    live_name = None
     if live_photo is not None and live_photo.filename:
         live_data = await live_photo.read()
         try:
             live_img = utils.decode_image(live_data)
             live_templates, _, live_info = _enroll_photo_templates(live_img, "live")
             templates += live_templates
-            live_path = config.STUDENTS_DIR / f"student_{ts}_live.jpg"
-            utils.save_image(live_img, live_path)
+            live_name = utils.save_image(live_img, "students", f"student_{ts}_live.jpg")
         except ValueError:
             log.warning("Ignoring invalid live photo for %s", roll_no)
 
-    photo_path = config.STUDENTS_DIR / f"student_{ts}.jpg"
-    utils.save_image(img, photo_path)
+    photo_name = utils.save_image(img, "students", f"student_{ts}.jpg")
 
     if role not in ("athlete", "coach"):
         role = "athlete"
     target_centre = auth.scope_centre(user, centre_id) or user.get("centre_id")
     try:
         student_id = database.add_student(
-            name.strip(), roll_no.strip(), str(photo_path), templates,
+            name.strip(), roll_no.strip(), photo_name, templates,
             role=role, centre_id=target_centre, gender=gender,
             sport=sport, phone=phone,
         )
-    except sqlite3.IntegrityError:
+    except database.IntegrityError:
         raise HTTPException(409, f"Roll number '{roll_no}' is already registered")
         
     device_info = request.headers.get("user-agent")
     database.save_photo_record(
-        file_path=str(photo_path),
+        file_path=photo_name,
         photo_type="enrollment_id",
         student_id=student_id,
         file_size=len(data),
@@ -274,9 +278,9 @@ async def register_student(
         device_info=device_info,
         faces_detected=info.get("faces_found", 0),
     )
-    if live_path is not None and live_info is not None:
+    if live_name is not None and live_info is not None:
         database.save_photo_record(
-            file_path=str(live_path),
+            file_path=live_name,
             photo_type="enrollment_live",
             student_id=student_id,
             file_size=len(live_data),
@@ -296,7 +300,7 @@ async def register_student(
             "id": student_id,
             "name": name.strip(),
             "roll_no": roll_no.strip(),
-            "photo_url": f"/api/photos/{photo_path.name}",
+            "photo_url": f"/api/photos/{photo_name}",
             **info,
             "live": live_info,
             "templates": len(templates),
@@ -316,6 +320,10 @@ async def add_student_photo(
     student = database.get_student(student_id)
     if not student:
         raise HTTPException(404, "Student not found")
+    # The same guard enroll_multiview and assign_face_to_student already apply.
+    # Without it a coach can attach templates to another centre's athlete,
+    # which both alters that athlete's gallery and reveals they exist.
+    auth.scope_centre(user, student.get("centre_id"))
     if source not in ("id", "live"):
         source = "live"
 
@@ -332,11 +340,12 @@ async def add_student_photo(
     n = database.add_templates(student_id, templates)
     
     ts = utils.timestamp()
-    photo_path = config.STUDENTS_DIR / f"student_{student_id}_{ts}_{source}.jpg"
-    utils.save_image(img, photo_path)
-    
+    photo_name = utils.save_image(
+        img, "students", f"student_{student_id}_{ts}_{source}.jpg"
+    )
+
     database.save_photo_record(
-        file_path=str(photo_path),
+        file_path=photo_name,
         photo_type="extra_template",
         student_id=student_id,
         file_size=len(data),
@@ -354,11 +363,12 @@ def remove_student(student_id: int, user: dict = Depends(auth.current_user)):
     student = database.get_student(student_id)
     if not student:
         raise HTTPException(404, "Student not found")
+    # Without this a coach can delete any athlete at any centre in the country,
+    # and ON DELETE CASCADE takes their templates and attendance history too.
+    auth.scope_centre(user, student.get("centre_id"))
     database.delete_student(student_id)
-    try:
-        Path(student["photo_path"]).unlink(missing_ok=True)
-    except OSError:
-        pass
+    if student.get("photo_path"):
+        storage.delete("students", Path(student["photo_path"]).name)
     return {"ok": True}
 
 
@@ -474,7 +484,7 @@ async def process_attendance(
         # A photo with no detectable faces is a normal outcome, not an error -
         # someone photographs the floor, or the group is too far away. Return an
         # empty result the UI can render rather than a confusing 4xx.
-        utils.save_image(img, config.UPLOADS_DIR / f"group_{utils.timestamp()}.jpg")
+        utils.save_image(img, "uploads", f"group_{utils.timestamp()}.jpg")
         return {
             "ok": True, "date": day, "faces_detected": 0,
             "recognized_count": 0, "athletes_present": 0, "coaches_present": 0,
@@ -530,7 +540,7 @@ async def process_attendance(
     for i, face in enumerate(faces):
         face_img = utils.crop_face(img, face)
         face_file = f"face_{ts}_{i}.jpg"
-        utils.save_image(face_img, config.UPLOADS_DIR / face_file)
+        utils.save_image(face_img, "uploads", face_file)
 
         if i in match_by_face:
             student_id, sim = match_by_face[i]
@@ -645,14 +655,13 @@ async def process_attendance(
 
     annotated = utils.annotate(img, faces, labels, confs)
     ann_file = f"annotated_{ts}.jpg"
-    utils.save_image(annotated, config.UPLOADS_DIR / ann_file)
-    
+    utils.save_image(annotated, "uploads", ann_file)
+
     orig_file = f"group_{ts}.jpg"
-    orig_path = config.UPLOADS_DIR / orig_file
-    utils.save_image(img, orig_path)
-    
+    utils.save_image(img, "uploads", orig_file)
+
     database.save_photo_record(
-        file_path=str(orig_path),
+        file_path=orig_file,
         photo_type="attendance_camera" if source in ("camera_front", "camera_rear") else "attendance_group",
         source=source or "upload",
         file_size=len(data),
@@ -749,11 +758,12 @@ def _face_from_original(crop_name: str):
     ts, _, idx = body.rpartition("_")
     if not ts or not idx.isdigit():
         return None, None
-    original = config.UPLOADS_DIR / f"group_{ts}.jpg"
-    if not original.exists():
+    data = storage.get("uploads", f"group_{ts}.jpg")
+    if data is None:
         return None, None
-    img = cv2.imread(str(original))
-    if img is None:
+    try:
+        img = utils.decode_image(data)
+    except ValueError:
         return None, None
     faces = get_detector().detect(img, config.DETECTION_MODE)
     i = int(idx)
@@ -961,10 +971,11 @@ async def enroll_multiview(
         accepted.append({"frame": n, "pose": pose, "face_px": round(size),
                          "templates": n_added})
 
-        path = config.STUDENTS_DIR / f"student_{student_id}_{utils.timestamp()}_{pose}.jpg"
-        utils.save_image(img, path)
+        name = utils.save_image(
+            img, "students", f"student_{student_id}_{utils.timestamp()}_{pose}.jpg"
+        )
         database.save_photo_record(
-            file_path=str(path), photo_type="enrollment_multiview",
+            file_path=name, photo_type="enrollment_multiview",
             student_id=student_id, file_size=len(raw),
             resolution=f"{img.shape[1]}x{img.shape[0]}",
             device_info=request.headers.get("user-agent"), faces_detected=len(faces),
@@ -1077,8 +1088,7 @@ async def assign_face_to_student(
     auth.scope_centre(user, student.get("centre_id"))
 
     crop_name = Path(face_url).name
-    crop_path = config.UPLOADS_DIR / crop_name
-    if not crop_path.exists():
+    if not storage.exists("uploads", crop_name):
         raise HTTPException(404, "That face crop is no longer available")
 
     day = date_str or date.today().strftime(config.ATTENDANCE_DATE_FORMAT)
@@ -1145,6 +1155,8 @@ def student_history(student_id: int, user: dict = Depends(auth.current_user)):
     student = database.get_student(student_id)
     if not student:
         raise HTTPException(404, "Student not found")
+    # A coach may only read the attendance record of their own centre's people.
+    auth.scope_centre(user, student.get("centre_id"))
     records = database.student_attendance_history(student_id)
     return {
         "student": {
@@ -1211,7 +1223,12 @@ def download_test_suite():
 
 
 @app.get("/api/sample-images/{name}")
-def get_sample_image(name: str):
+def get_sample_image(name: str, user: dict = Depends(auth.current_user)):
+    """Demo images that ship with the repository.
+
+    Not user data, but authenticated all the same - an open image endpoint next
+    to three closed ones is exactly how the closed ones drift back open.
+    """
     path = config.ROOT_DIR / "samples" / "test_suite" / Path(name).name
     if not path.exists():
         raise HTTPException(404, "Sample image not found")
@@ -1219,25 +1236,32 @@ def get_sample_image(name: str):
 
 
 @app.get("/api/photos/history")
-def photo_history(student_id: Optional[int] = None, photo_type: Optional[str] = None, limit: int = 50):
+def photo_history(
+    student_id: Optional[int] = None,
+    photo_type: Optional[str] = None,
+    limit: int = 50,
+    user: dict = Depends(auth.current_user),
+):
+    """Photo metadata, including the stored filenames.
+
+    Authenticated because those filenames are the keys the two routes below
+    take: leaving this open turns "guess a filename" into "enumerate them all,
+    then download every enrolment portrait".
+    """
     photos = database.get_photos(student_id=student_id, photo_type=photo_type, limit=limit)
     return {"photos": photos}
 
 
 @app.get("/api/photos/{name}")
-def student_photo(name: str):
-    path = config.STUDENTS_DIR / Path(name).name  # sanitize
-    if not path.exists():
-        raise HTTPException(404, "Photo not found")
-    return FileResponse(path)
+def student_photo(name: str, user: dict = Depends(auth.current_user)):
+    """Enrolment portraits - photographs of children. Never unauthenticated."""
+    return storage.response("students", name)
 
 
 @app.get("/api/uploads/{name}")
-def uploaded_file(name: str):
-    path = config.UPLOADS_DIR / Path(name).name
-    if not path.exists():
-        raise HTTPException(404, "File not found")
-    return FileResponse(path)
+def uploaded_file(name: str, user: dict = Depends(auth.current_user)):
+    """Group photos and the face crops taken from them."""
+    return storage.response("uploads", name)
 
 
 @app.get("/api/health")
@@ -1252,13 +1276,28 @@ def health():
     except Exception as e:  # noqa: BLE001
         rec_label = f"error: {e}"
     enh = get_enhancer()
+
+    # Database and storage state are REPORTED, not raised. Health is what an
+    # operator and a load balancer read to find out *why* something is wrong;
+    # letting an unreachable database turn this into a 500 tells them only
+    # that it is. The old version did exactly that, via list_students().
+    db_ok = pgdb.ping()
+    n_students = None
+    if db_ok:
+        try:
+            n_students = len(database.list_students())
+        except Exception:  # noqa: BLE001
+            db_ok = False
+
     return {
-        "status": "ok",
+        "status": "ok" if db_ok else "degraded",
+        "database": "ok" if db_ok else "unreachable",
+        "storage": storage.backend_name(),
         "detector": det_label,
         "recognizer": rec_label,
         "restoration": "off (GFPGAN removed - licence)",
         "threshold": config.MATCH_THRESHOLD,
-        "students": len(database.list_students()),
+        "students": n_students,
     }
 
 

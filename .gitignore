@@ -43,6 +43,9 @@ desktop.ini
 # --- Secrets -----------------------------------------------------------------
 .env
 .env.*
+# ...but the template carries no secrets and must be committed, or nobody can
+# discover which variables exist.
+!.env.example
 !.env.example
 
 # --- Node (Vercel CLI) -------------------------------------------------------

@@ -8,44 +8,44 @@ Learning ADDS templates rather than overwriting, so nothing is lost.
 """
 from __future__ import annotations
 
-import sqlite3
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from . import config
+from .db import Conn, IntegrityError, Row, connect  # noqa: F401 - re-exported
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS students (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         SERIAL PRIMARY KEY,
     name       TEXT NOT NULL,
     roll_no    TEXT NOT NULL UNIQUE,
     photo_path TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS templates (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         SERIAL PRIMARY KEY,
     student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
     model      TEXT NOT NULL,
-    vector     BLOB NOT NULL,
+    vector     BYTEA NOT NULL,
     source     TEXT NOT NULL DEFAULT 'enrollment',
-    quality    REAL NOT NULL DEFAULT 0.0,
+    quality    DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_templates_student ON templates(student_id);
 CREATE INDEX IF NOT EXISTS idx_templates_model ON templates(model, student_id);
 CREATE TABLE IF NOT EXISTS attendance (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         SERIAL PRIMARY KEY,
     student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
     date       TEXT NOT NULL,
-    confidence REAL NOT NULL,
+    confidence DOUBLE PRECISION NOT NULL,
     image_path TEXT,
     marked_at  TEXT NOT NULL,
     UNIQUE(student_id, date)
 );
 CREATE TABLE IF NOT EXISTS photos (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id           SERIAL PRIMARY KEY,
     student_id   INTEGER REFERENCES students(id) ON DELETE SET NULL,
     photo_type   TEXT NOT NULL,
     file_path    TEXT NOT NULL,
@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_photos_type ON photos(photo_type);
 -- Khelo India centres. `is_demo` marks placeholder rows seeded for evaluation so
 -- they can never be mistaken for real government records (and can be bulk-deleted).
 CREATE TABLE IF NOT EXISTS centres (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id            SERIAL PRIMARY KEY,
     code          TEXT NOT NULL UNIQUE,
     name          TEXT NOT NULL,
     centre_type   TEXT NOT NULL DEFAULT 'KIC',
@@ -72,8 +72,8 @@ CREATE TABLE IF NOT EXISTS centres (
     pincode       TEXT,
     sports        TEXT,                       -- JSON array of disciplines
     capacity      INTEGER DEFAULT 0,
-    latitude      REAL,
-    longitude     REAL,
+    latitude      DOUBLE PRECISION,
+    longitude     DOUBLE PRECISION,
     geofence_m    INTEGER DEFAULT 300,        -- attendance radius in metres
     incharge_name TEXT,
     contact_phone TEXT,
@@ -86,7 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_centres_state ON centres(state, district);
 
 -- Coaches and super admins. Passwords are PBKDF2-HMAC-SHA256, never plaintext.
 CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id            SERIAL PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     role          TEXT NOT NULL CHECK (role IN ('super_admin','coach')),
@@ -116,13 +116,6 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON auth_sessions(user_id);
 TEMPLATE_SOURCES = ("id", "restored", "live", "adapted", "legacy")
 
 
-def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(config.DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
-
-
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
@@ -137,56 +130,76 @@ def init_db() -> None:
         _drop_removed_tables(conn)
         _ensure_columns(conn, "attendance", {
             "centre_id": "INTEGER REFERENCES centres(id) ON DELETE SET NULL",
-            "latitude": "REAL",
-            "longitude": "REAL",
-            "accuracy_m": "REAL",
+            "latitude": "DOUBLE PRECISION",
+            "longitude": "DOUBLE PRECISION",
+            "accuracy_m": "DOUBLE PRECISION",
             "geo_status": "TEXT",              # inside | outside | unknown | no_fix
-            "distance_m": "REAL",
+            "distance_m": "DOUBLE PRECISION",
             "marked_by": "INTEGER REFERENCES users(id) ON DELETE SET NULL",
         })
         # Runs last: dropping before _ensure_columns would let it re-add them.
         _drop_age_columns(conn)
 
 
-def _drop_removed_tables(conn: sqlite3.Connection) -> None:
+def _drop_removed_tables(conn: Conn) -> None:
     """Drop tables left behind by the removed performance-tracking feature."""
     for t in ("performance", "metrics"):
         conn.execute(f"DROP TABLE IF EXISTS {t}")
 
 
-def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
+def _table_columns(conn: Conn, table: str) -> set:
+    """Column names of `table` - Postgres's answer to PRAGMA table_info."""
+    return {
+        r["column_name"]
+        for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = ?",
+            (table,),
+        ).fetchall()
+    }
+
+
+def _ensure_columns(conn: Conn, table: str, columns: Dict[str, str]) -> None:
     """Add any missing columns to `table` (idempotent, runs on every startup)."""
-    have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    have = _table_columns(conn, table)
     for name, decl in columns.items():
         if name not in have:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
-def _migrate_legacy_embeddings(conn: sqlite3.Connection) -> None:
-    """One-time migration: old `embeddings` rows become source='legacy' templates."""
+def _migrate_legacy_embeddings(conn: Conn) -> None:
+    """One-time migration: old `embeddings` rows become source='legacy' templates.
+
+    This can only fire on a database carried over from the SQLite era by
+    scripts/migrate_to_postgres.py - a freshly created one has no such table.
+    """
     exists = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='embeddings'"
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = current_schema() AND table_name = 'embeddings'"
     ).fetchone()
     if not exists:
         return
+    # The timestamp comes from Python rather than now() so it matches the ISO
+    # strings every other row carries; the columns are TEXT, and a Postgres
+    # timestamp would render differently and break date comparisons.
     n = conn.execute(
         "INSERT INTO templates (student_id, model, vector, source, quality, created_at) "
-        "SELECT student_id, model, vector, 'legacy', 0.0, datetime('now') "
-        "FROM embeddings"
+        "SELECT student_id, model, vector, 'legacy', 0.0, ? FROM embeddings",
+        (datetime.now().isoformat(timespec="seconds"),),
     ).rowcount
     conn.execute("DROP TABLE embeddings")
     if n:
         print(f"[db] migrated {n} legacy embedding(s) to multi-template schema")
 
 
-def _drop_age_columns(conn: sqlite3.Connection) -> None:
+def _drop_age_columns(conn: Conn) -> None:
     """Remove the age columns left by the withdrawn age feature.
 
     `est_age` held the genderage model's guess, which proved unreliable on the
     school-age athletes this system serves; `dob` was only read by that same
     feature. Both are dropped so nothing downstream can resurface a wrong age.
     """
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(students)").fetchall()}
+    cols = _table_columns(conn, "students")
     for col in ("est_age", "dob"):
         if col in cols:
             conn.execute(f"ALTER TABLE students DROP COLUMN {col}")
@@ -212,12 +225,11 @@ def add_student(
     """
     now = datetime.now().isoformat(timespec="seconds")
     with connect() as conn:
-        cur = conn.execute(
+        student_id = conn.insert(
             "INSERT INTO students (name, roll_no, photo_path, created_at, "
             "role, centre_id, gender, sport, phone) VALUES (?,?,?,?,?,?,?,?,?)",
             (name, roll_no, photo_path, now, role, centre_id, gender, sport, phone),
         )
-        student_id = int(cur.lastrowid)
         _insert_templates(conn, student_id, templates, now)
         return student_id
 
@@ -229,7 +241,7 @@ def add_templates(student_id: int, templates: List[dict]) -> int:
         return _insert_templates(conn, student_id, templates, now)
 
 
-def _insert_templates(conn: sqlite3.Connection, student_id: int, templates: List[dict], now: str) -> int:
+def _insert_templates(conn: Conn, student_id: int, templates: List[dict], now: str) -> int:
     rows = 0
     for t in templates:
         source = t.get("source", "enrollment")
@@ -424,9 +436,10 @@ def mark_attendance(
     """
     with connect() as conn:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO attendance (student_id, date, confidence, image_path, "
+            "INSERT INTO attendance (student_id, date, confidence, image_path, "
             "marked_at, centre_id, latitude, longitude, accuracy_m, geo_status, distance_m, marked_by) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT (student_id, date) DO NOTHING",
             (
                 student_id, day, confidence, image_path,
                 datetime.now().isoformat(timespec="seconds"),
@@ -523,7 +536,7 @@ def stats(centre_id: Optional[int] = None) -> dict:
     }
 
 
-def _recent_row(row: sqlite3.Row) -> dict:
+def _recent_row(row: Row) -> dict:
     """One Recent Activity entry, with the HH:MM the dashboard renders."""
     d = dict(row)
     marked = d.get("marked_at") or ""
@@ -546,12 +559,11 @@ def save_photo_record(
     """Log a photo upload/capture with metadata. Returns photo record id."""
     now = datetime.now().isoformat(timespec="seconds")
     with connect() as conn:
-        cur = conn.execute(
+        return conn.insert(
             "INSERT INTO photos (student_id, photo_type, file_path, file_size, resolution, source, device_info, faces_detected, created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
             (student_id, photo_type, file_path, file_size, resolution, source, device_info, faces_detected, now),
         )
-        return int(cur.lastrowid)
 
 
 def get_photos(
@@ -644,7 +656,10 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
         conf = [
             {"bucket": r[0], "count": r[1]}
             for r in conn.execute(
-                "SELECT CAST(a.confidence * 20 AS INT) / 20.0, COUNT(*) "
+                # 20.0 alone is a numeric literal in Postgres, so the quotient
+                # comes back as Decimal where SQLite gave a float. Casting to
+                # float8 keeps the bucket a JSON number, as the chart expects.
+                "SELECT CAST(a.confidence * 20 AS INT) / 20.0::double precision, COUNT(*) "
                 "FROM attendance a JOIN students s ON s.id = a.student_id "
                 "WHERE s.role = 'athlete' AND a.confidence IS NOT NULL" + acs +
                 " GROUP BY 1 ORDER BY 1", cp
