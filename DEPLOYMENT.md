@@ -879,16 +879,6 @@ returning 500 when the database is unreachable.
 
 Still outstanding:
 
-- **`init_db()` is not concurrency-safe, and the Dockerfile ships
-  `--workers 2`.** `CREATE TABLE IF NOT EXISTS` does not serialise in
-  PostgreSQL: two workers both find a table absent, both try to create it, and
-  the loser raises `UniqueViolation` on `pg_type` instead of becoming a no-op.
-  Uvicorn then kills the parent, so **the image as built crashes on first boot
-  against an empty database.** This deployment survives only because the compose
-  file overrides the worker count to 1. CI reproduces it on every run. The fix
-  is a transaction-scoped advisory lock at the top of `init_db()`
-  (`backend/database.py:120`), which makes it correct at any worker count:
-  `conn.execute("SELECT pg_advisory_xact_lock(?)", (2749170101,))`.
 - **`LIKE` was not changed to `ILIKE`** (`backend/centres.py:125-126, 133`).
   SQLite's `LIKE` is case-insensitive for ASCII; PostgreSQL's is not. Centre
   search now misses lowercase queries — "pune" returns nothing.

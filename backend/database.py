@@ -116,8 +116,28 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON auth_sessions(user_id);
 TEMPLATE_SOURCES = ("id", "restored", "live", "adapted", "legacy")
 
 
+# Arbitrary but fixed application-wide key for the schema-setup advisory lock.
+# Any constant works; it only has to be the same in every process.
+_SCHEMA_LOCK_KEY = 2749170101
+
+
 def init_db() -> None:
     with connect() as conn:
+        # Serialise schema setup across processes.
+        #
+        # CREATE TABLE IF NOT EXISTS is NOT concurrency-safe in PostgreSQL: two
+        # sessions can both observe a table as absent, both attempt to create
+        # it, and the loser fails with UniqueViolation on pg_type's unique index
+        # rather than quietly becoming a no-op. `uvicorn --workers N` starts N
+        # processes that all reach this line within milliseconds of each other,
+        # so against an empty database the container used to die on boot -
+        # uvicorn kills the parent when any child fails to start.
+        #
+        # pg_advisory_xact_lock blocks rather than erroring, and releases when
+        # this transaction commits, so the losing worker simply waits and then
+        # finds every table already present. The same applies to the ALTER and
+        # DROP statements below, which have the same race.
+        conn.execute("SELECT pg_advisory_xact_lock(?)", (_SCHEMA_LOCK_KEY,))
         conn.executescript(SCHEMA)
         _migrate_legacy_embeddings(conn)
         _ensure_columns(conn, "students", {
