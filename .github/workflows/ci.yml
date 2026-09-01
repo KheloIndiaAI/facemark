@@ -1,0 +1,181 @@
+name: CI
+
+# Runs on every push and pull request. This project has no test suite, so the
+# job that earns its keep is the import check: it is what catches a module
+# referencing a dropped table, a removed helper, or a dependency that is used
+# but not declared. Every one of those has shipped here before.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'          # matches the Dockerfile
+
+      - name: Install ruff
+        run: pip install ruff
+
+      # Syntax and undefined-name errors only. Style is not worth failing a
+      # build over on a project this size; a NameError at runtime is.
+      - name: Ruff (errors only)
+        run: ruff check --select E9,F63,F7,F82,F401 --output-format=github .
+
+  imports:
+    name: Import check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+          pip install -r requirements.txt
+
+      # Blocking. If a backend module cannot be imported, the application is
+      # broken and no amount of green elsewhere matters.
+      - name: Import every backend module
+        run: |
+          python - <<'PY'
+          import importlib, pkgutil, sys, backend
+          failed = []
+          for m in pkgutil.iter_modules(backend.__path__, 'backend.'):
+              try:
+                  importlib.import_module(m.name)
+                  print(f'ok    {m.name}')
+              except Exception as e:
+                  print(f'FAIL  {m.name}  ->  {type(e).__name__}: {e}')
+                  failed.append(m.name)
+          if failed:
+              print(f'\n{len(failed)} module(s) failed to import: {", ".join(failed)}')
+              sys.exit(1)
+          PY
+
+      # Non-blocking, deliberately. Several scripts target the pre-PostgreSQL
+      # schema or removed modules and will fail until they are deleted or
+      # updated. Reporting them keeps the list visible without holding up work.
+      - name: Import every script (report only)
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import importlib, pkgutil, sys, scripts
+          failed = []
+          for m in pkgutil.iter_modules(scripts.__path__, 'scripts.'):
+              try:
+                  importlib.import_module(m.name)
+                  print(f'ok    {m.name}')
+              except Exception as e:
+                  print(f'FAIL  {m.name}  ->  {type(e).__name__}: {e}')
+                  failed.append(m.name)
+          print(f'\n{len(failed)} script(s) failed to import.')
+          PY
+
+      # Declared-but-unused and used-but-undeclared are both worth knowing.
+      # scipy is the live example: metaheuristics.py imports it, requirements
+      # does not list it, and the greedy fallback silently takes over.
+      - name: Undeclared dependencies
+        continue-on-error: true
+        run: |
+          pip install pipreqs
+          pipreqs --print --ignore .venv,scripts/archive . || true
+          echo '--- declared ---'
+          cat requirements.txt
+
+  build:
+    name: Docker build and smoke test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: attendance
+          POSTGRES_USER: attendance
+          POSTGRES_PASSWORD: attendance
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Same build the instance performs, including the model download, so a
+      # broken Dockerfile or an unreachable model mirror fails here rather than
+      # halfway through a deploy.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: facemark:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start the container
+        run: |
+          docker run -d --name facemark-ci --network host \
+            -e DATABASE_URL=postgresql://attendance:attendance@localhost:5432/attendance \
+            -e FACEMARK_STORAGE=local \
+            -e FACEMARK_DATA_DIR=/app/appdata \
+            -e FACEMARK_ADMIN_PASSWORD=ci-test-password \
+            facemark:ci
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 40); do
+            if curl -fsS http://localhost:8000/api/health > /tmp/health.json 2>/dev/null; then
+              cat /tmp/health.json; exit 0
+            fi
+            sleep 3
+          done
+          echo "health endpoint never came up"
+          docker logs facemark-ci
+          exit 1
+
+      # The schema was created, the pool opened, and the models loaded. This is
+      # the assertion that would have caught the SQLite->Postgres dialect breaks.
+      - name: Assert database and models are live
+        run: |
+          grep -q '"database":"ok"'  /tmp/health.json || { echo "database not ok"; exit 1; }
+          grep -q '"detector":"yunet' /tmp/health.json || { echo "detector missing"; exit 1; }
+          grep -q 'sface'            /tmp/health.json || { echo "recognizer missing"; exit 1; }
+
+      # Media routes must reject anonymous callers. These four were open once;
+      # this is what stops them drifting open again.
+      - name: Assert media routes require authentication
+        run: |
+          fail=0
+          for p in /api/photos/x.jpg /api/uploads/x.jpg /api/photos/history /api/sample-images/x.jpg; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8000$p")
+            echo "$p -> $code"
+            [ "$code" = "401" ] || fail=1
+          done
+          [ "$fail" = "0" ] || { echo "a media route did not require auth"; exit 1; }
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs facemark-ci
