@@ -973,20 +973,24 @@ async def enroll_pose_check(
     # Framing and image quality first: a correctly-posed blur is still useless.
     if size < config.MULTIVIEW_MIN_FACE_PX:
         return {"ok": False, "reason": "too_far", "message": "Move closer",
-                "face_px": round(size), "yaw": yaw, "pitch": pitch}
+                "face_px": round(size), "yaw": yaw, "pitch": pitch,
+                "box": [round(v, 1) for v in f.box]}
     # Brightness is judged before blur deliberately. A very dark frame has
     # almost no Laplacian variance, so a blur-first order diagnoses bad
     # lighting as "Hold still" and the athlete stands there holding still
     # while nothing improves.
     if q["brightness"] <= 40:
         return {"ok": False, "reason": "dark", "message": "Too dark - find better light",
-                "face_px": round(size), "yaw": yaw, "pitch": pitch}
+                "face_px": round(size), "yaw": yaw, "pitch": pitch,
+                "box": [round(v, 1) for v in f.box]}
     if q["brightness"] >= 240:
         return {"ok": False, "reason": "bright", "message": "Too bright - move out of direct light",
-                "face_px": round(size), "yaw": yaw, "pitch": pitch}
+                "face_px": round(size), "yaw": yaw, "pitch": pitch,
+                "box": [round(v, 1) for v in f.box]}
     if q["blur_score"] < config.MIN_BLUR_SCORE:
         return {"ok": False, "reason": "blurry", "message": "Hold still",
-                "face_px": round(size), "yaw": yaw, "pitch": pitch}
+                "face_px": round(size), "yaw": yaw, "pitch": pitch,
+                "box": [round(v, 1) for v in f.box]}
 
     dy = yaw - (base_yaw if base_yaw is not None else 0.0)
     dp = pitch - (base_pitch if base_pitch is not None else 0.0)

@@ -1272,12 +1272,16 @@ async function loadRecords(dateStr) {
 // --- Modals ---
 function openModal(title, contentHTML, footerHTML) {
     document.getElementById('modal-title').textContent = title;
-    document.getElementById('modal-body').innerHTML = `
-        ${contentHTML}
-        <div class="modal-footer" style="margin: 20px -20px -20px; padding: 16px 20px; border-top: 1px solid var(--border-subtle); display: flex; justify-content: flex-end; gap: 12px; background: var(--bg-surface);">
-            ${footerHTML}
-        </div>
-    `;
+    // The footer is omitted entirely when there is nothing to put in it. The
+    // previous version always emitted the bar and interpolated footerHTML, so
+    // every caller that passes only a title and body - and several do - printed
+    // the literal word "undefined" under an empty rule.
+    const footer = footerHTML
+        ? `<div class="modal-footer" style="margin: 20px -20px -20px; padding: 16px 20px; border-top: 1px solid var(--border-subtle); display: flex; justify-content: flex-end; gap: 12px; background: var(--bg-surface);">
+               ${footerHTML}
+           </div>`
+        : '';
+    document.getElementById('modal-body').innerHTML = `${contentHTML}${footer}`;
     document.getElementById('modal-container').classList.remove('hidden');
 }
 
@@ -1674,20 +1678,29 @@ document.addEventListener('click', (e) => {
     openClipEnrol(btn.dataset.studentId, btn.dataset.studentName || '');
 });
 
-/** Enrol from a two-second clip.
+/** Enrol from a two-second clip, with live tracking while you frame the shot.
  *
- * Enrolment is the one moment where a wrong identity becomes permanent: a
+ * Recording blind and reporting a verdict afterwards is the wrong shape: the
+ * person holding the phone cannot tell whether the face is being seen at all
+ * until it is too late to fix. So this polls /api/enroll/pose-check while the
+ * modal is open, draws the detected box over the video, and says what to change
+ * - the same live loop openFaceScan already uses, which is why no new model is
+ * needed in a frontend that has no build step.
+ *
+ * Enrolment is also the one moment where a wrong identity becomes permanent: a
  * template built from a photograph held to the camera lets that photograph mark
- * its subject present from then on. So the clip is checked for liveness before
- * a single template is stored, and a refusal stores nothing.
+ * its subject present from then on. The clip is checked for liveness server-side
+ * before a single template is stored.
  */
 async function openClipEnrol(studentId, studentName) {
     openModal(`Record clip - ${studentName}`, `
         <div class="camera-container" id="clip-enrol-camera">
             <video id="clip-enrol-video" class="camera-video" autoplay playsinline muted></video>
-            <div class="rec-hint">Look at the camera and move your head a little while recording</div>
+            <canvas id="clip-enrol-overlay" class="camera-overlay"></canvas>
+            <div class="rec-hint" id="clip-enrol-hint">Looking for a face...</div>
             <div class="camera-controls" style="justify-content:center">
-                <button type="button" class="camera-shutter" id="clip-enrol-shutter" aria-label="Record two seconds">
+                <button type="button" class="camera-shutter" id="clip-enrol-shutter"
+                        aria-label="Record two seconds" disabled>
                     <svg class="rec-ring" viewBox="0 0 44 44" aria-hidden="true">
                         <circle class="rec-ring-track" cx="22" cy="22" r="20"></circle>
                         <circle class="rec-ring-fill" id="clip-enrol-ring" cx="22" cy="22" r="20"></circle>
@@ -1697,42 +1710,147 @@ async function openClipEnrol(studentId, studentName) {
             </div>
         </div>
         <div id="clip-enrol-status" class="text-sm text-muted mt-3">
-            Two seconds is enough. Small natural movement is what proves this is a
-            person rather than a photograph.
+            Hold the phone at arm's length. Recording starts when a face is framed.
         </div>`);
 
-    const cam = new CameraCapture(document.getElementById('clip-enrol-video'), null, null);
-    cam.facingMode = 'user';                      // enrolment photographs the holder
-    const started = await cam.start();
-    if (started === false) { closeModal(); return; }
-
+    const video   = document.getElementById('clip-enrol-video');
+    const overlay = document.getElementById('clip-enrol-overlay');
+    const hint    = document.getElementById('clip-enrol-hint');
     const shutter = document.getElementById('clip-enrol-shutter');
     const ring    = document.getElementById('clip-enrol-ring');
     const status  = document.getElementById('clip-enrol-status');
+
+    const cam = new CameraCapture(video, null, null);
+    cam.facingMode = 'user';                 // enrolment photographs the holder
+    if (await cam.start() === false) { closeModal(); return; }
+
+    const state = { busy: false, timer: null, box: null, good: false, recording: false, alive: true };
     const setRing = p => { if (ring) ring.style.strokeDashoffset = String(126 * (1 - p)); };
 
-    // Stop the camera however the modal closes, including the X and Escape -
-    // a stream left running behind a closed dialog keeps the indicator light on
-    // and drains the battery indefinitely.
-    const stopCam = () => { try { cam.stop(); } catch {} };
+    // Stop everything however the modal closes - X, Escape, or a route change.
+    // A stream left running behind a closed dialog keeps the camera light on
+    // and drains the battery, which is the bug the audit found in face-scan.
+    const teardown = () => {
+        state.alive = false;
+        if (state.timer) clearInterval(state.timer);
+        try { cam.stop(); } catch { /* already stopped */ }
+    };
     const modal = document.getElementById('modal-container');
     const observer = new MutationObserver(() => {
-        if (modal.classList.contains('hidden')) { stopCam(); observer.disconnect(); }
+        if (modal.classList.contains('hidden')) { teardown(); observer.disconnect(); }
     });
     observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
 
+    function draw() {
+        if (!state.alive || !video.videoWidth) return;
+        // Match the canvas to the element's rendered size, not the stream's:
+        // object-fit: cover crops the video, so drawing in stream coordinates
+        // would put the box in the wrong place on any non-matching aspect.
+        const r = video.getBoundingClientRect();
+        // A zero rect happens transiently - the modal mid-open, or a
+        // backgrounded tab. Sizing the canvas to it would blank the overlay and
+        // it would stay blank until the next resize, so keep the last good size.
+        if (r.width < 1 || r.height < 1) return;
+        if (overlay.width !== Math.round(r.width) || overlay.height !== Math.round(r.height)) {
+            overlay.width = Math.round(r.width);
+            overlay.height = Math.round(r.height);
+        }
+        const ctx = overlay.getContext('2d');
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+        if (!state.box) return;
+
+        // pose-check was sent a 480px-wide frame, so its box is in those
+        // coordinates. Scale to the drawn video, accounting for the cover crop.
+        const sw = video.videoWidth, sh = video.videoHeight;
+        const scale = Math.max(overlay.width / sw, overlay.height / sh);
+        const dx = (overlay.width - sw * scale) / 2;
+        const dy = (overlay.height - sh * scale) / 2;
+        const k = sw / 480;                       // analysis frame -> stream
+        let [x1, y1, x2, y2] = state.box.map(v => v * k);
+        // The preview is mirrored for the front camera, so the box must be too
+        // or it tracks the wrong way as the head moves.
+        if (cam.facingMode === 'user') { const t = x1; x1 = sw - x2; x2 = sw - t; }
+
+        const X = x1 * scale + dx, Y = y1 * scale + dy;
+        const W = (x2 - x1) * scale, H = (y2 - y1) * scale;
+        const col = state.good ? '#22c55e' : '#f59e0b';
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(X, Y, W, H, 10); else ctx.rect(X, Y, W, H);
+        ctx.stroke();
+        // Corner ticks read as "tracking" rather than "a rectangle is drawn".
+        ctx.lineWidth = 5;
+        const c = Math.min(22, W / 4);
+        [[X, Y, 1, 1], [X + W, Y, -1, 1], [X, Y + H, 1, -1], [X + W, Y + H, -1, -1]]
+            .forEach(([px, py, sx, sy]) => {
+                ctx.beginPath();
+                ctx.moveTo(px + c * sx, py); ctx.lineTo(px, py);
+                ctx.lineTo(px, py + c * sy); ctx.stroke();
+            });
+    }
+
+    function grab(maxW) {
+        if (!video.videoWidth) return null;
+        const c = document.createElement('canvas');
+        const s = Math.min(1, maxW / video.videoWidth);
+        c.width = Math.round(video.videoWidth * s);
+        c.height = Math.round(video.videoHeight * s);
+        c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+        return c;
+    }
+
+    async function tick() {
+        if (!state.alive || state.busy) return;
+        const c = grab(480);
+        if (!c) return;
+        state.busy = true;
+        try {
+            const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.8));
+            const fd = new FormData();
+            fd.append('frame', blob, 'f.jpg');
+            fd.append('step', 'centre');
+            const r = await api.postForm('/api/enroll/pose-check', fd);
+            if (!state.alive) return;
+
+            state.box = r.box || null;
+            // "ok" here means correctly posed AND framed. For a clip, pose does
+            // not matter - the recording captures several angles by itself - so
+            // only framing and image quality gate the button.
+            state.good = !!r.box && (r.ok || r.reason === 'pose');
+            hint.textContent = state.good
+                ? (state.recording ? 'Recording - keep moving slightly' : 'Face found - tap to record')
+                : (r.message || 'No face detected');
+            if (!state.recording) shutter.disabled = !state.good;
+            draw();
+        } catch {
+            /* a dropped frame is not worth reporting - the next one follows */
+        } finally {
+            state.busy = false;
+        }
+    }
+
+    state.timer = setInterval(tick, 350);
+    tick();
+
     shutter.addEventListener('click', async () => {
+        if (state.recording) return;
+        state.recording = true;
         shutter.disabled = true;
         shutter.classList.add('recording');
-        status.textContent = 'Recording...';
+        status.textContent = 'Recording two seconds - move your head slightly.';
 
         const file = await cam.recordClip(2000, setRing);
+
         shutter.classList.remove('recording');
         setRing(0);
+        state.recording = false;
         if (!file) { shutter.disabled = false; status.textContent = 'Nothing was recorded. Try again.'; return; }
 
-        stopCam();
+        if (state.timer) clearInterval(state.timer);
+        try { cam.stop(); } catch { /* already stopped */ }
         status.textContent = 'Checking the clip and building templates...';
+
         const fd = new FormData();
         fd.append('video', file);
         try {
@@ -1740,8 +1858,12 @@ async function openClipEnrol(studentId, studentName) {
             if (r.ok === false) {
                 status.innerHTML = livenessBanner(r.liveness, r.message);
                 showToast('Not accepted', r.message || 'The clip was refused', 'error');
-                shutter.disabled = false;
-                await cam.start();
+                // Back to a live camera so the next attempt is one tap away.
+                if (await cam.start() !== false) {
+                    state.alive = true;
+                    state.timer = setInterval(tick, 350);
+                    shutter.disabled = false;
+                }
                 return;
             }
             const poses = (r.poses_captured || []).join(', ') || 'one view';
