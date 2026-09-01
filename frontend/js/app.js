@@ -1185,6 +1185,15 @@ function drawStudents(students) {
                     <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;" onclick="openMultiViewEnrol('${s.id}', '${s.name.replace(/'/g, "\\'")}')" title="Scan the face from several angles with the camera - the strongest way to improve recognition">
                         ${Icon('camera', 12)}Register face
                     </button>
+                    <!-- dataset + a delegated listener rather than another
+                         interpolated onclick: a name containing a quote breaks
+                         out of the handler above, and this button should not
+                         widen that surface. -->
+                    <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;"
+                            data-clip-enrol data-student-id="${s.id}" data-student-name="${Charts.esc(s.name)}"
+                            title="Record a two second clip - checks the subject is a real person, and captures several views at once">
+                        ${Icon('camera', 12)}Record clip
+                    </button>
                 </div>
             </div>
         </div>
@@ -1656,6 +1665,97 @@ const MV_MIN_RADIUS = 0.55;      // how far the head must turn for a segment to 
 let mvState = null;
 
 // Re-scan an existing person: the frames go straight to their profile.
+// One delegated listener rather than a handler per card: the student grid is
+// rebuilt on every render, and per-card listeners would accumulate.
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest && e.target.closest('[data-clip-enrol]');
+    if (!btn) return;
+    e.preventDefault();
+    openClipEnrol(btn.dataset.studentId, btn.dataset.studentName || '');
+});
+
+/** Enrol from a two-second clip.
+ *
+ * Enrolment is the one moment where a wrong identity becomes permanent: a
+ * template built from a photograph held to the camera lets that photograph mark
+ * its subject present from then on. So the clip is checked for liveness before
+ * a single template is stored, and a refusal stores nothing.
+ */
+async function openClipEnrol(studentId, studentName) {
+    openModal(`Record clip - ${studentName}`, `
+        <div class="camera-container" id="clip-enrol-camera">
+            <video id="clip-enrol-video" class="camera-video" autoplay playsinline muted></video>
+            <div class="rec-hint">Look at the camera and move your head a little while recording</div>
+            <div class="camera-controls" style="justify-content:center">
+                <button type="button" class="camera-shutter" id="clip-enrol-shutter" aria-label="Record two seconds">
+                    <svg class="rec-ring" viewBox="0 0 44 44" aria-hidden="true">
+                        <circle class="rec-ring-track" cx="22" cy="22" r="20"></circle>
+                        <circle class="rec-ring-fill" id="clip-enrol-ring" cx="22" cy="22" r="20"></circle>
+                    </svg>
+                    <div class="shutter-inner"></div>
+                </button>
+            </div>
+        </div>
+        <div id="clip-enrol-status" class="text-sm text-muted mt-3">
+            Two seconds is enough. Small natural movement is what proves this is a
+            person rather than a photograph.
+        </div>`);
+
+    const cam = new CameraCapture(document.getElementById('clip-enrol-video'), null, null);
+    cam.facingMode = 'user';                      // enrolment photographs the holder
+    const started = await cam.start();
+    if (started === false) { closeModal(); return; }
+
+    const shutter = document.getElementById('clip-enrol-shutter');
+    const ring    = document.getElementById('clip-enrol-ring');
+    const status  = document.getElementById('clip-enrol-status');
+    const setRing = p => { if (ring) ring.style.strokeDashoffset = String(126 * (1 - p)); };
+
+    // Stop the camera however the modal closes, including the X and Escape -
+    // a stream left running behind a closed dialog keeps the indicator light on
+    // and drains the battery indefinitely.
+    const stopCam = () => { try { cam.stop(); } catch {} };
+    const modal = document.getElementById('modal-container');
+    const observer = new MutationObserver(() => {
+        if (modal.classList.contains('hidden')) { stopCam(); observer.disconnect(); }
+    });
+    observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
+
+    shutter.addEventListener('click', async () => {
+        shutter.disabled = true;
+        shutter.classList.add('recording');
+        status.textContent = 'Recording...';
+
+        const file = await cam.recordClip(2000, setRing);
+        shutter.classList.remove('recording');
+        setRing(0);
+        if (!file) { shutter.disabled = false; status.textContent = 'Nothing was recorded. Try again.'; return; }
+
+        stopCam();
+        status.textContent = 'Checking the clip and building templates...';
+        const fd = new FormData();
+        fd.append('video', file);
+        try {
+            const r = await api.postForm(`/api/students/${studentId}/enroll-video`, fd);
+            if (r.ok === false) {
+                status.innerHTML = livenessBanner(r.liveness, r.message);
+                showToast('Not accepted', r.message || 'The clip was refused', 'error');
+                shutter.disabled = false;
+                await cam.start();
+                return;
+            }
+            const poses = (r.poses_captured || []).join(', ') || 'one view';
+            showToast('Face registered',
+                      `${r.templates_added} template(s) from ${poses}`, 'success');
+            closeModal();
+            renderStudents();
+        } catch (err) {
+            status.textContent = 'Could not reach the server. Try again.';
+            shutter.disabled = false;
+        }
+    });
+}
+
 async function openMultiViewEnrol(studentId, studentName) {
     openFaceScan({
         title: `Register face - ${studentName}`,

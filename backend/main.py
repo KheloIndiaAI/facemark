@@ -1133,6 +1133,79 @@ async def enroll_multiview(
     }
 
 
+@app.post("/api/students/{student_id}/enroll-video")
+async def enroll_from_video(
+    request: Request,
+    student_id: int,
+    video: UploadFile = File(...),
+    user: dict = Depends(auth.current_user),
+):
+    """Enrol an athlete from a short clip instead of a posed frame sequence.
+
+    Two things this buys over enroll-multiview, which it otherwise reuses
+    wholesale rather than reimplementing:
+
+    Liveness. Enrolment is the one moment where a wrong identity is permanent -
+    a template built from a photograph held up to the camera means that
+    photograph can mark its subject present forever after. The clip is checked
+    before a single template is stored, and a refusal stores nothing.
+
+    Natural variety. Someone recording for two seconds moves without being
+    told to, so the frames differ by small amounts of yaw and expression - which
+    is exactly the variation max-pooled matching benefits from, and it arrives
+    without asking a child to perform a sequence of head turns on cue.
+
+    The frames go through the multi-view path unchanged, so the duplicate gate,
+    the face-size floor and the pose labelling all behave identically.
+    """
+    student = database.get_student(student_id)
+    if not student:
+        raise HTTPException(404, "Athlete not found")
+    auth.scope_centre(user, student.get("centre_id"))
+
+    data = await video.read()
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    result = liveness.analyse(data, get_detector())
+    liveness_payload = result.to_dict()
+
+    if not result.is_live:
+        log.warning(
+            "Enrolment clip refused for student %s: %s (depth=%.5f motion=%.5f)",
+            student_id, result.verdict, result.depth_score, result.motion,
+        )
+        return {
+            "ok": False,
+            "liveness": liveness_payload,
+            "templates_added": 0,
+            "poses_captured": [],
+            "accepted": [],
+            "rejected": [],
+            "message": result.reason,
+        }
+
+    uploads: List[_MemoryUpload] = []
+    for i, frame in enumerate(result.frames):
+        ok, buf = cv2.imencode(".jpg", frame,
+                               [cv2.IMWRITE_JPEG_QUALITY, config.CAMERA_PHOTO_QUALITY])
+        if ok:
+            # Distinct prefixes matter: the multi-view path keys seen poses by
+            # label, and identical fallback labels would collapse them into one
+            # entry, leaving the duplicate check comparing against a single
+            # embedding instead of every view kept so far.
+            uploads.append(_MemoryUpload(buf.tobytes(), f"frame{i}_.jpg"))
+
+    if not uploads:
+        raise HTTPException(400, "Could not read any frames from the clip")
+
+    response = await enroll_multiview(
+        request=request, student_id=student_id, frames=uploads, user=user,
+    )
+    response["liveness"] = liveness_payload
+    return response
+
+
 @app.get("/api/attendance/suggest")
 def suggest_for_face(
     face_url: str,
