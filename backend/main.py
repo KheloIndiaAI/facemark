@@ -1191,24 +1191,6 @@ def student_history(student_id: int, user: dict = Depends(auth.current_user)):
     }
 
 
-_MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
-
-
-def _export_date(iso: str) -> str:
-    """'2026-09-01' -> '01 SEP 2026'.
-
-    An ISO date has no letters to capitalise, so "date in caps" is rendered as
-    a spelled-out month. This also removes the day/month ambiguity that bites a
-    register read in India when a spreadsheet reinterprets 01-09 as 9 January.
-    """
-    try:
-        y, m, d = str(iso).split("-")
-        return f"{int(d):02d} {_MONTHS[int(m) - 1]} {y}"
-    except (ValueError, IndexError, TypeError):
-        return str(iso or "")
-
-
 @app.get("/api/attendance/export")
 def export_attendance(
     day: Optional[str] = None,
@@ -1223,12 +1205,15 @@ def export_attendance(
     # exported: it was only ever useful for threshold tuning, and in a register
     # handed to an administrator two different "scores" per row invite the wrong
     # one being read as the answer.
-    writer.writerow(["ID number", "Name", "Date", "Confidence", "Marked at"])
+    # Headings are capitalised; the values are left exactly as stored. Names
+    # keep their own casing because a register is a document about people, and
+    # dates stay ISO so a spreadsheet still reads them as dates.
+    writer.writerow(["ID NUMBER", "NAME", "DATE", "CONFIDENCE", "MARKED AT"])
     for r in records:
         writer.writerow([
             r["roll_no"],
-            (r["name"] or "").upper(),
-            _export_date(r["date"]),
+            r["name"],
+            r["date"],
             round(utils.similarity_to_confidence(r["confidence"], config.MATCH_THRESHOLD), 4),
             r["marked_at"],
         ])
