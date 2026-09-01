@@ -20,10 +20,15 @@ name: Deploy
 # Settings -> Environments and each deploy pauses for a click. Worth having on
 # a system that holds photographs of children.
 #
-# One useful property of the command sequence: it is `set -euo pipefail`, so a
+# One useful property of the command sequence: it runs under `set -eu`, so a
 # failed `docker compose build` stops before `up -d` runs and the previously
 # working container keeps serving. A broken commit fails the deploy rather than
 # taking the service down.
+#
+# `set -eu`, NOT `set -euo pipefail`. SSM's AWS-RunShellScript executes under
+# /bin/sh, which on Ubuntu is dash, and dash has no `pipefail` - it aborts with
+# "Illegal option -o pipefail" before running a single command. There are no
+# pipelines here, so the two are equivalent in effect anyway.
 
 on:
   workflow_dispatch:            # manual deploy of any commit on dev
@@ -78,7 +83,7 @@ jobs:
             --document-name AWS-RunShellScript \
             --comment "deploy ${GITHUB_SHA::7} by ${GITHUB_ACTOR}" \
             --parameters commands="[
-              \"set -euo pipefail\",
+              \"set -eu\",
               \"cd ${APP_DIR}\",
               \"git fetch --all --prune\",
               \"git reset --hard ${GITHUB_SHA}\",

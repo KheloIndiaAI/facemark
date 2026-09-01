@@ -797,6 +797,41 @@ sed -i 's/^FACEMARK_STORAGE=.*/FACEMARK_STORAGE=s3/' .env
 docker compose up -d app
 ```
 
+### Continuous integration and deployment
+
+`.github/workflows/ci.yml` runs on every push: ruff (runtime errors only),
+an import check over every `backend/` module, and a Docker build whose container
+is started against a real Postgres and asserted on — health reports
+`"database":"ok"`, the models load, and all four media routes return 401.
+
+`.github/workflows/deploy.yml` deploys on push to `dev` or manual dispatch, via
+**SSM Run Command rather than SSH** — the security group allows port 22 from one
+address, and opening it to GitHub's runner ranges to deploy would be a poor
+trade. Credentials come from GitHub's OIDC provider, so no AWS key exists in the
+repository.
+
+Three things about that setup are non-obvious and each will waste an afternoon
+if forgotten:
+
+- **The OIDC subject carries numeric IDs.** This organisation has subject
+  customization enabled, so the claim is
+  `repo:KheloIndiaAI@318880338/facemark@1352332885:environment:production`,
+  *not* `repo:KheloIndiaAI/facemark:environment:production`. The role's trust
+  policy matches the full string exactly. The IDs are immutable, which is the
+  point — a renamed or recreated repository cannot assume the role. But remove
+  `environment: production` from the job, or recreate the repo, and deploys fail
+  with an opaque `Not authorized to perform sts:AssumeRoleWithWebIdentity`.
+  CloudTrail (`AssumeRoleWithWebIdentity`, `userIdentity.userName`) is the only
+  place the real subject is visible.
+- **SSM runs commands as root**, and `/opt/attendence-application` is owned by
+  `ubuntu`, so git refuses with "dubious ownership" unless the instance has
+  `sudo git config --system --add safe.directory /opt/attendence-application`.
+- **The instance must show `Online`** in `aws ssm describe-instance-information`
+  before a deploy can reach it.
+- **`AWS-RunShellScript` runs under `/bin/sh`, which is dash on Ubuntu.**
+  `set -o pipefail` is a bash-ism and aborts the whole script with "Illegal
+  option -o pipefail" before the first command. The deploy uses `set -eu`.
+
 **Replacing the instance.** The root volume has `DeleteOnTermination=false`, so
 terminating leaves an orphaned 30 GB volume billing quietly. Capture the id
 first, and delete it only once you are sure the data is elsewhere:
@@ -844,6 +879,16 @@ returning 500 when the database is unreachable.
 
 Still outstanding:
 
+- **`init_db()` is not concurrency-safe, and the Dockerfile ships
+  `--workers 2`.** `CREATE TABLE IF NOT EXISTS` does not serialise in
+  PostgreSQL: two workers both find a table absent, both try to create it, and
+  the loser raises `UniqueViolation` on `pg_type` instead of becoming a no-op.
+  Uvicorn then kills the parent, so **the image as built crashes on first boot
+  against an empty database.** This deployment survives only because the compose
+  file overrides the worker count to 1. CI reproduces it on every run. The fix
+  is a transaction-scoped advisory lock at the top of `init_db()`
+  (`backend/database.py:120`), which makes it correct at any worker count:
+  `conn.execute("SELECT pg_advisory_xact_lock(?)", (2749170101,))`.
 - **`LIKE` was not changed to `ILIKE`** (`backend/centres.py:125-126, 133`).
   SQLite's `LIKE` is case-insensitive for ASCII; PostgreSQL's is not. Centre
   search now misses lowercase queries — "pune" returns nothing.
