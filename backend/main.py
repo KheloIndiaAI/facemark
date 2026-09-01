@@ -57,33 +57,49 @@ app.include_router(routes.router)
 
 @app.on_event("startup")
 def startup() -> None:
-    database.init_db()
+    # Everything that writes on first boot runs under one lock.
+    #
+    # `uvicorn --workers N` starts N processes that reach this within
+    # milliseconds of each other, and each step below is a check-then-act pair
+    # in its own transaction: count the centres and seed if empty, count the
+    # users and create admin if none. Two workers both read zero, both write,
+    # and the loser dies on a unique constraint - which makes uvicorn kill the
+    # parent, so the whole container fails to boot against an empty database.
+    #
+    # Serialising is enough on its own: whichever worker arrives second finds
+    # the tables created, the centres seeded and admin present, so every step
+    # is a no-op for it.
+    with pgdb.advisory_lock(pgdb.STARTUP_LOCK_KEY):
+        database.init_db()
 
-    n = centres_mod.seed_demo_centres()
-    if n:
-        log.warning(
-            "Seeded %d PLACEHOLDER centres (code prefix DEMO-, is_demo=1). "
-            "These are NOT real Khelo India records - replace them via "
-            "POST /api/centres/import or delete with DELETE /api/centres/demo/all.", n,
-        )
-    pw = auth.bootstrap_default_admin()
-    if pw:
-        bar = "=" * 62
-        log.warning(
-            "%s | FIRST RUN - super admin account created | "
-            "username: admin | password: %s | "
-            "Change it after signing in; it is not stored in plaintext. | %s",
-            bar, pw, bar,
-        )
+        n = centres_mod.seed_demo_centres()
+        if n:
+            log.warning(
+                "Seeded %d PLACEHOLDER centres (code prefix DEMO-, is_demo=1). "
+                "These are NOT real Khelo India records - replace them via "
+                "POST /api/centres/import or delete with DELETE /api/centres/demo/all.", n,
+            )
+        pw = auth.bootstrap_default_admin()
+        if pw:
+            bar = "=" * 62
+            log.warning(
+                "%s | FIRST RUN - super admin account created | "
+                "username: admin | password: %s | "
+                "Change it after signing in; it is not stored in plaintext. | %s",
+                bar, pw, bar,
+            )
+
+        # Also inside the lock: it rebuilds templates for anyone missing them,
+        # and two workers doing that at once would write each template twice.
+        try:
+            healed = sync_all_student_templates()
+            if healed:
+                log.info("Auto-healed %d student template profiles on startup.", healed)
+        except Exception as e:
+            log.warning("Template sync check skipped: %s", e)
+
     log.info("Detector backend: %s", get_detector().backend_label)
     log.info("Recognizer ensemble: %s", get_recognizer().label)
-    # Self-healing audit: ensure 100% of registered students have templates across all ensemble models
-    try:
-        healed = sync_all_student_templates()
-        if healed:
-            log.info("Auto-healed %d student template profiles on startup.", healed)
-    except Exception as e:
-        log.warning("Template sync check skipped: %s", e)
 
 
 def sync_all_student_templates() -> int:

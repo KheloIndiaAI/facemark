@@ -187,6 +187,37 @@ def pool() -> ConnectionPool:
     return _pool
 
 
+# Key for the lock held across the whole first-boot sequence. Any constant
+# works; it only has to be the same in every process.
+STARTUP_LOCK_KEY = 2749170102
+
+
+@contextmanager
+def advisory_lock(key: int) -> Iterator[None]:
+    """Hold a session-scoped advisory lock across several transactions.
+
+    `pg_advisory_xact_lock` releases at the end of ITS transaction, which is no
+    use when the work spans a sequence of independent `connect()` blocks. This
+    takes a connection of its own and holds a session-level lock for the whole
+    `with` body.
+
+    Needed because the startup sequence is full of check-then-act pairs -
+    "count the users, and create admin if there are none" - each in its own
+    transaction. Two uvicorn workers both read zero and both write, and the
+    loser dies on a unique constraint, taking the parent process with it.
+
+    The unlock is explicit and in a finally: the connection goes back to the
+    pool afterwards, and a session lock left behind would be held by whichever
+    request borrowed it next.
+    """
+    with pool().connection() as raw:
+        raw.execute("SELECT pg_advisory_lock(%s)", (key,))
+        try:
+            yield
+        finally:
+            raw.execute("SELECT pg_advisory_unlock(%s)", (key,))
+
+
 @contextmanager
 def connect() -> Iterator[Conn]:
     """Borrow a connection; commit on clean exit, roll back on exception.
