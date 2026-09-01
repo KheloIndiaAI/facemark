@@ -1763,4 +1763,22 @@ def manifest():
 # icon served from cache is not a correctness problem. Code is different, so
 # /static revalidates - see NoCacheStatic.
 app.mount("/icons", StaticFiles(directory=config.FRONTEND_DIR / "icons"), name="icons")
+
+# The MediaPipe runtime and face model, fetched by
+# scripts/fetch_frontend_models.py. Mounted only when present: the fetch is
+# allowed to fail (a blocked CDN at build time), and the enrolment overlay falls
+# back to server-side detection, so a missing directory must not stop the app
+# from starting.
+#
+# These are immutable, content-pinned assets - a 12 MB wasm re-validated on every
+# page load would be absurd - so they keep StaticFiles' default caching rather
+# than the no-cache policy /static needs for code that changes between deploys.
+_VENDOR_DIR = config.FRONTEND_DIR / "vendor"
+if _VENDOR_DIR.is_dir():
+    app.mount("/vendor", StaticFiles(directory=_VENDOR_DIR), name="vendor")
+    log.info("Vendored browser assets served from %s", _VENDOR_DIR)
+else:
+    log.info("No frontend/vendor - the enrolment overlay will use server-side "
+             "detection. Run: python -m scripts.fetch_frontend_models")
+
 app.mount("/static", NoCacheStatic(directory=config.FRONTEND_DIR), name="static")

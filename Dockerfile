@@ -24,6 +24,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY scripts/download_models.py scripts/
 RUN python -m scripts.download_models && ls -lh /app/data/models
 
+# The browser-side face model and MediaPipe runtime, same reasoning: 27 MB that
+# would otherwise be committed. Its own layer so it is not re-fetched on a code
+# change. It does NOT fail the build if the CDN is unreachable - the enrolment
+# overlay falls back to server-side detection, which is how it worked before.
+COPY scripts/fetch_frontend_models.py scripts/
+RUN python -m scripts.fetch_frontend_models && ls -lh /app/frontend/vendor/mediapipe || true
+
 # Application code last: the layer that actually changes between deploys.
 COPY backend/ backend/
 COPY frontend/ frontend/

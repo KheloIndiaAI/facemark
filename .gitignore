@@ -66,3 +66,9 @@ data/roster_import/
 # --- Server scratch logs -----------------------------------------------------
 server.log
 server.err
+
+# Browser-side MediaPipe runtime and face model: 27 MB, fetched by
+# scripts/fetch_frontend_models.py during the Docker build, exactly as
+# data/models/ is. Committing it would make a sub-1 MB repo ~28x larger, and
+# git would keep the blobs even after a later deletion.
+frontend/vendor/

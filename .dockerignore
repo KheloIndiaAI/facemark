@@ -8,6 +8,12 @@ __pycache__/
 # Models are downloaded inside the build, never copied from the host.
 data/models/
 
+# Same for the browser-side MediaPipe runtime and face model. A developer who
+# has run scripts/fetch_frontend_models.py locally has 27 MB sitting here, and
+# without this line every build would upload it to the builder only for the
+# fetch step to produce the same bytes again.
+frontend/vendor/
+
 # Runtime data belongs on the mounted disk.
 data/uploads/
 data/students/

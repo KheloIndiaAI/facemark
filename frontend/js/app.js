@@ -1714,7 +1714,8 @@ async function openClipCapture(opts) {
     if (await cam.start() === false) { closeModal(); return; }
 
     const state = { busy: false, timer: null, box: null, landmarks: null, good: false,
-                    recording: false, alive: true, fails: 0, closed: false };
+                    recording: false, alive: true, fails: 0, closed: false,
+                    mesh: null, raf: 0 };
     const setRing = p => { if (ring) ring.style.strokeDashoffset = String(126 * (1 - p)); };
 
     // Stop everything however the modal closes - X, Escape, or a route change.
@@ -1723,6 +1724,9 @@ async function openClipCapture(opts) {
         state.alive = false;
         state.closed = true;          // one-way: nothing may restart after this
         if (state.timer) clearInterval(state.timer);
+        if (state.raf) cancelAnimationFrame(state.raf);
+        state.raf = 0;
+        state.mesh = null;
         try { cam.stop(); } catch { /* already stopped */ }
     };
     const modal = document.getElementById('modal-container');
@@ -1744,6 +1748,39 @@ async function openClipCapture(opts) {
         }
         const ctx = overlay.getContext('2d');
         ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+        // Geometry shared by both sources: the video is object-fit: cover, so
+        // part of it is cropped, and the preview is mirrored for the front
+        // camera. Anything drawn on top has to undo both or it drifts.
+        const sw0 = video.videoWidth, sh0 = video.videoHeight;
+        const sc = Math.max(overlay.width / sw0, overlay.height / sh0);
+        const ox = (overlay.width - sw0 * sc) / 2;
+        const oy = (overlay.height - sh0 * sc) / 2;
+        const mirror = cam.facingMode === 'user';
+        const toScreen = (px, py) => [
+            (mirror ? sw0 - px : px) * sc + ox,
+            py * sc + oy,
+        ];
+
+        // Preferred: the on-device mesh. 478 points at video rate.
+        if (state.mesh) {
+            const accentM = state.good ? '#22c55e' : '#f59e0b';
+            // Small and semi-transparent: 478 opaque dots read as a blob and
+            // hide the face they are meant to be tracking.
+            const r = Math.max(0.8, Math.min(1.8, overlay.width * 0.0035));
+            ctx.fillStyle = accentM;
+            ctx.globalAlpha = 0.75;
+            for (let i = 0; i < state.mesh.length; i++) {
+                const lm = state.mesh[i];
+                const [X, Y] = toScreen(lm.x * sw0, lm.y * sh0);
+                ctx.beginPath();
+                ctx.arc(X, Y, r, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.globalAlpha = 1;
+            return;
+        }
+
         if (!state.box) return;
 
         // pose-check was sent a 480px-wide frame, so the box is in those
@@ -1886,6 +1923,27 @@ async function openClipCapture(opts) {
 
     state.timer = setInterval(tick, 350);
     tick();
+
+    // On-device landmarks, if the runtime was fetched at build time. This is
+    // what makes the dots track rather than step: the server poll above is a
+    // round trip roughly three times a second, while this runs at video rate
+    // and returns 478 points instead of five. Entirely optional - when
+    // frontend/vendor is absent FaceMesh.load() resolves null and the overlay
+    // keeps using the five server points.
+    (async () => {
+        const ok = await FaceMesh.load();
+        if (!ok || state.closed) return;
+        const loop = () => {
+            if (state.closed) return;
+            const pts = FaceMesh.detect(video, performance.now());
+            if (pts) state.mesh = pts;
+            // Only the mesh path redraws here; the server path redraws on its
+            // own poll, so a dropped mesh frame never blanks the overlay.
+            if (state.mesh) draw();
+            state.raf = requestAnimationFrame(loop);
+        };
+        state.raf = requestAnimationFrame(loop);
+    })();
 
     shutter.addEventListener('click', async () => {
         if (state.recording) return;
