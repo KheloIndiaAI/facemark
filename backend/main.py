@@ -935,6 +935,18 @@ def _pose_label(face, requested: str) -> str:
     return "centre"
 
 
+def _landmarks_payload(f) -> list:
+    """YuNet's five landmarks as [[x, y], ...], for the live overlay.
+
+    Returned alongside the box on every path that found a face, including the
+    framing rejections: a dot pattern that vanishes exactly when the app says
+    "move closer" is the moment it is most useful to see.
+    """
+    if f.landmarks is None:
+        return []
+    return [[round(float(x), 1), round(float(y), 1)] for x, y in f.landmarks]
+
+
 @app.post("/api/enroll/pose-check")
 async def enroll_pose_check(
     frame: UploadFile = File(...),
@@ -983,7 +995,8 @@ async def enroll_pose_check(
     if size < config.MULTIVIEW_MIN_FACE_PX:
         return {"ok": False, "reason": "too_far", "message": "Move closer",
                 "face_px": round(size), "yaw": yaw, "pitch": pitch,
-                "box": [round(v, 1) for v in f.box]}
+                "box": [round(v, 1) for v in f.box],
+                "landmarks": _landmarks_payload(f)}
     # Brightness is judged before blur deliberately. A very dark frame has
     # almost no Laplacian variance, so a blur-first order diagnoses bad
     # lighting as "Hold still" and the athlete stands there holding still
@@ -991,15 +1004,18 @@ async def enroll_pose_check(
     if q["brightness"] <= 40:
         return {"ok": False, "reason": "dark", "message": "Too dark - find better light",
                 "face_px": round(size), "yaw": yaw, "pitch": pitch,
-                "box": [round(v, 1) for v in f.box]}
+                "box": [round(v, 1) for v in f.box],
+                "landmarks": _landmarks_payload(f)}
     if q["brightness"] >= 240:
         return {"ok": False, "reason": "bright", "message": "Too bright - move out of direct light",
                 "face_px": round(size), "yaw": yaw, "pitch": pitch,
-                "box": [round(v, 1) for v in f.box]}
+                "box": [round(v, 1) for v in f.box],
+                "landmarks": _landmarks_payload(f)}
     if q["blur_score"] < config.MIN_BLUR_SCORE:
         return {"ok": False, "reason": "blurry", "message": "Hold still",
                 "face_px": round(size), "yaw": yaw, "pitch": pitch,
-                "box": [round(v, 1) for v in f.box]}
+                "box": [round(v, 1) for v in f.box],
+                "landmarks": _landmarks_payload(f)}
 
     dy = yaw - (base_yaw if base_yaw is not None else 0.0)
     dp = pitch - (base_pitch if base_pitch is not None else 0.0)
@@ -1032,6 +1048,7 @@ async def enroll_pose_check(
         "face_px": round(size), "yaw": yaw, "pitch": pitch,
         "delta_yaw": round(dy, 1), "delta_pitch": round(dp, 1),
         "box": [round(v, 1) for v in f.box],
+        "landmarks": _landmarks_payload(f),
         "frame": [img.shape[1], img.shape[0]],
     }
 

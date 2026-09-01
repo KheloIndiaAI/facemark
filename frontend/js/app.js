@@ -109,6 +109,12 @@ class CameraCapture {
             this.video.srcObject = this.stream;
             this.isActive = true;
             this.torchEnabled = false;
+            // Mirror the PREVIEW for the front camera only. The overlay's box
+            // and landmark dots flip to match (see openClipCapture.draw), so
+            // the two must agree - a mirrored overlay over an unmirrored video
+            // tracks the wrong way the moment the head moves. Attendance uses
+            // the rear camera and is left alone.
+            this._applyMirror();
 
             // If metadata is already available the event has fired and will not
             // fire again, so waiting on it here hung start() forever.
@@ -237,6 +243,12 @@ class CameraCapture {
         });
     }
     
+    /** Keep the preview's mirroring in step with the facing mode. */
+    _applyMirror() {
+        if (!this.video || !this.video.classList) return;
+        this.video.classList.toggle('mirrored', this.facingMode === 'user');
+    }
+
     // Safari records MP4/H.264, Chrome and Firefox WebM/VP8-9. Both decode
     // server-side through the same FFmpeg backend, so the first type this
     // browser supports wins rather than forcing one and failing on the other.
@@ -1701,7 +1713,7 @@ async function openClipCapture(opts) {
     cam.facingMode = 'user';                 // enrolment photographs the holder
     if (await cam.start() === false) { closeModal(); return; }
 
-    const state = { busy: false, timer: null, box: null, good: false,
+    const state = { busy: false, timer: null, box: null, landmarks: null, good: false,
                     recording: false, alive: true, fails: 0, closed: false };
     const setRing = p => { if (ring) ring.style.strokeDashoffset = String(126 * (1 - p)); };
 
@@ -1748,19 +1760,54 @@ async function openClipCapture(opts) {
 
         const X = x1 * scale + dx, Y = y1 * scale + dy;
         const W = (x2 - x1) * scale, H = (y2 - y1) * scale;
-        ctx.strokeStyle = state.good ? '#22c55e' : '#f59e0b';
-        ctx.lineWidth = 3;
+        const accent = state.good ? '#22c55e' : '#f59e0b';
+
+        // A light frame, kept thin - it says where the face is, and the dots
+        // below say the face is actually being tracked.
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.55;
         ctx.beginPath();
         if (ctx.roundRect) ctx.roundRect(X, Y, W, H, 10); else ctx.rect(X, Y, W, H);
         ctx.stroke();
-        ctx.lineWidth = 5;
-        const c = Math.min(22, W / 4);
-        [[X, Y, 1, 1], [X + W, Y, -1, 1], [X, Y + H, 1, -1], [X + W, Y + H, -1, -1]]
-            .forEach(([px, py, sx, sy]) => {
-                ctx.beginPath();
-                ctx.moveTo(px + c * sx, py); ctx.lineTo(px, py);
-                ctx.lineTo(px, py + c * sy); ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        // Landmark dots, drawn the way the KIRTI analyzer draws pose joints:
+        // a dark casing under a coloured joint, so they stay readable over
+        // both a bright face and a dark room. YuNet gives five - right eye,
+        // left eye, nose, right mouth corner, left mouth corner.
+        const pts = (state.landmarks || []).map(([lx, ly]) => {
+            let px = lx * k;
+            // Mirrored for the front camera, exactly as the box is, or the
+            // dots drift the wrong way the moment the head moves.
+            if (cam.facingMode === 'user') px = sw - px;
+            return [px * scale + dx, ly * k * scale + dy];
+        });
+        if (pts.length === 5) {
+            const [rEye, lEye, nose, rMouth, lMouth] = pts;
+            const bones = [[rEye, lEye], [rEye, nose], [lEye, nose],
+                           [nose, rMouth], [nose, lMouth], [rMouth, lMouth]];
+            const r = Math.max(2.5, Math.min(6, W * 0.035));
+            // Casing first, then the bone inside it - the same two-pass trick
+            // that keeps a skeleton legible against any background.
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+            ctx.lineWidth = Math.max(3, r * 1.1);
+            bones.forEach(([a, b]) => {
+                ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
             });
+            ctx.strokeStyle = 'rgba(253,252,248,0.9)';
+            ctx.lineWidth = Math.max(1.5, r * 0.5);
+            bones.forEach(([a, b]) => {
+                ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+            });
+            pts.forEach(([px, py]) => {
+                ctx.beginPath(); ctx.arc(px, py, r + 1.5, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fill();
+                ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2);
+                ctx.fillStyle = accent; ctx.fill();
+            });
+        }
     }
 
     function grab(maxW) {
@@ -1787,6 +1834,7 @@ async function openClipCapture(opts) {
             if (!state.alive) return;
 
             state.box = r.box || null;
+            state.landmarks = r.landmarks || null;
             // "ok" means correctly posed AND framed. Pose does not matter for a
             // clip - the recording captures several angles by itself - so only
             // framing and image quality gate the button.

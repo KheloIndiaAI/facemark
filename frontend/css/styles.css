@@ -350,6 +350,14 @@ a:hover { color: var(--accent-hover); }
     .image-preview-container { max-width: 400px; margin-left: auto; margin-right: auto; }
 }
 .camera-video { width: 100%; height: 100%; object-fit: cover; }
+/* A selfie preview is mirrored - that is the convention, and what makes moving
+   your head feel right. The rule that did this lived on .mv-stage video and went
+   with the deleted head-circle scan, so the clip preview was showing an
+   UNMIRRORED stream while the overlay was still flipping the box and dots to
+   match a mirror that was no longer there. The overlay tracked the wrong way.
+   Applied by class, because attendance uses the rear camera and must NOT be
+   mirrored. The capture itself is never mirrored - only the preview. */
+.camera-video.mirrored { transform: scaleX(-1); }
 .camera-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
 .camera-guides { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; pointer-events: none; }
 .guide-circle { width: 60%; aspect-ratio: 1; border: 2px dashed rgba(255,255,255,0.5); border-radius: 50%; }
@@ -877,21 +885,9 @@ a:hover { color: var(--accent-hover); }
 .suggest-row:first-child { border-color: var(--border-hover); }
 
 /* Guided multi-view enrolment capture */
-.mv-stage {
-    position: relative; width: 100%; aspect-ratio: 4/3;
-    background: #000; border-radius: var(--radius-md); overflow: hidden;
-}
-.mv-stage video {
-    width: 100%; height: 100%; object-fit: cover;
-    transform: scaleX(-1);          /* mirror the preview only, never the capture */
-}
 /* The ring is the whole interface: 24 segments around the face, each lighting
    as that angle is covered. Progress is a map of which poses exist, not a
    count of button presses. */
-.mv-ringsvg {
-    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    height: 96%; aspect-ratio: 1; pointer-events: none;
-}
 /* Lit segments are green AND noticeably brighter, so the state does not rest
    on colour alone. */
 
