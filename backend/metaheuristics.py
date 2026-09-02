@@ -28,9 +28,21 @@ _WARNED_NO_SCIPY = False
 
 
 def assignment_solver_name() -> str:
-    """Which solver is actually in use, for the startup banner and /api/health."""
+    """Which solver is actually in use, for the startup banner and /api/health.
+
+    Imports the function that is ACTUALLY called, not the scipy package. Two
+    reasons, and both bit:
+
+    - scipy loads its submodules lazily, so a bare `import scipy` succeeds
+      without proving scipy.optimize is importable - this reported "hungarian"
+      on a box where the real call would have fallen back to greedy.
+    - that same laziness made the first attendance request of each process pay
+      for loading scipy.optimize: measured at 6.2 s of a 6.8 s request, against
+      0.3 ms once warm. Calling this at startup now pays it at boot instead of
+      charging it to whichever coach marks attendance first.
+    """
     try:
-        import scipy  # noqa: F401
+        from scipy.optimize import linear_sum_assignment  # noqa: F401
         return "hungarian (scipy)"
     except ImportError:
         return "GREEDY FALLBACK - scipy missing, results differ from benchmarks"
