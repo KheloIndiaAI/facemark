@@ -308,7 +308,12 @@ class CameraCapture {
         const stopped = new Promise(resolve => { rec.onstop = resolve; });
 
         if (navigator.vibrate) navigator.vibrate(40);
-        rec.start();
+        try {
+            rec.start();
+        } catch (err) {
+            showToast('Recording unavailable', 'The camera could not start recording.', 'error');
+            return null;
+        }
 
         const t0 = Date.now();
         // A timer rather than requestAnimationFrame: rAF is paused when the tab
@@ -1424,7 +1429,11 @@ async function openRegisterModal() {
     } catch { /* the select simply renders empty and the field stays required */ }
 
     const html = `
-        <form id="register-form" autocomplete="off">
+        <!-- onsubmit is load-bearing: the footer buttons are type="button", but
+             pressing Enter in a text field (a phone keyboard's "Go" key) still
+             submits natively, which reloaded the app and silently discarded
+             everything typed. Enter now does what the person meant. -->
+        <form id="register-form" autocomplete="off" onsubmit="event.preventDefault(); regContinue(); return false;">
             <div class="form-group">
                 <label class="form-label" for="reg-name">Full name</label>
                 <input type="text" id="reg-name" class="form-input" required placeholder="As it appears on the roster">
@@ -2062,20 +2071,32 @@ async function openClipCapture(opts) {
     async function waitForStep(stepKey, baseYaw, basePitch, timeoutMs, pollMs) {
         const start = Date.now();
         while (!state.closed && Date.now() - start < timeoutMs) {
-            const c = grab(480);
-            if (c) {
-                const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.8));
-                const fd = new FormData();
-                fd.append('frame', blob, 'f.jpg');
-                fd.append('step', stepKey);
-                if (baseYaw !== null) { fd.append('base_yaw', baseYaw); fd.append('base_pitch', basePitch); }
-                let r = null;
-                try { r = await api.postForm('/api/enroll/pose-check', fd); } catch { /* one dropped poll - retry */ }
-                if (r) {
-                    if (r.box) { state.box = r.box; draw(); }
-                    if (r.ok) return r;
+            // The WHOLE poll attempt is one try/catch, not just the network
+            // call. canvas.toBlob() is explicitly allowed by spec to resolve
+            // null if encoding fails - rare on an idle desktop browser, far
+            // less rare on a real phone under the load a live camera plus a
+            // 200ms encode loop puts on it - and fd.append('frame', null, ...)
+            // throws a TypeError that a narrower try/catch would not catch,
+            // crashing the whole guided sequence with an unhandled rejection
+            // mid-registration. One bad frame here must cost one retry, never
+            // the capture.
+            try {
+                const c = grab(480);
+                if (c) {
+                    const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.8));
+                    if (blob) {
+                        const fd = new FormData();
+                        fd.append('frame', blob, 'f.jpg');
+                        fd.append('step', stepKey);
+                        if (baseYaw !== null) { fd.append('base_yaw', baseYaw); fd.append('base_pitch', basePitch); }
+                        const r = await api.postForm('/api/enroll/pose-check', fd);
+                        if (r) {
+                            if (r.box) { state.box = r.box; draw(); }
+                            if (r.ok) return r;
+                        }
+                    }
                 }
-            }
+            } catch { /* one dropped poll - retry */ }
             await new Promise(res => setTimeout(res, pollMs));
         }
         return null;
@@ -2101,20 +2122,27 @@ async function openClipCapture(opts) {
         let baseYaw = null, basePitch = null, hold = 0;
         const centreStart = Date.now();
         while (!state.closed && baseYaw === null && Date.now() - centreStart < CENTRE_TIMEOUT_MS) {
-            const c = grab(480);
-            if (c) {
-                const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.8));
-                const fd = new FormData();
-                fd.append('frame', blob, 'f.jpg');
-                fd.append('step', 'centre');
-                let r = null;
-                try { r = await api.postForm('/api/enroll/pose-check', fd); } catch { /* retry */ }
-                if (r) {
-                    if (r.box) { state.box = r.box; draw(); }
-                    if (r.ok) { hold++; if (hold >= 3) { baseYaw = r.yaw; basePitch = r.pitch; } }
-                    else hold = 0;
+            // Same reasoning as waitForStep: the whole attempt is one
+            // try/catch, because canvas.toBlob() resolving null under real
+            // device load is a real failure mode a narrower catch would miss,
+            // and that must cost one retry rather than crash the sequence.
+            try {
+                const c = grab(480);
+                if (c) {
+                    const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.8));
+                    if (blob) {
+                        const fd = new FormData();
+                        fd.append('frame', blob, 'f.jpg');
+                        fd.append('step', 'centre');
+                        const r = await api.postForm('/api/enroll/pose-check', fd);
+                        if (r) {
+                            if (r.box) { state.box = r.box; draw(); }
+                            if (r.ok) { hold++; if (hold >= 3) { baseYaw = r.yaw; basePitch = r.pitch; } }
+                            else hold = 0;
+                        }
+                    }
                 }
-            }
+            } catch { /* retry */ }
             if (baseYaw === null) await new Promise(res => setTimeout(res, POLL_MS));
         }
         // Framing never stabilised - fall through on an absolute baseline
@@ -2156,18 +2184,45 @@ async function openClipCapture(opts) {
         hint.classList.add('hidden');
         promptBox.classList.remove('hidden');
 
-        const control = { done: false };
-        const [file] = await Promise.all([
-            cam.recordClip(GUIDED_CAPTURE_MAX_MS, null, control),
-            runGuidedSequence(control),
-        ]);
+        // Both recordClip and runGuidedSequence already catch every failure
+        // mode I could identify (a dropped poll, a null blob, a recorder that
+        // refuses to start) and degrade to a retry rather than throwing. This
+        // outer catch is the backstop for whatever that reasoning missed -
+        // without it, an unanticipated exception here left the shutter
+        // disabled, the prompt panel stuck visible, and no way back to the
+        // camera except closing and reopening the whole modal.
+        let file = null;
+        try {
+            const control = { done: false };
+            [file] = await Promise.all([
+                cam.recordClip(GUIDED_CAPTURE_MAX_MS, null, control),
+                runGuidedSequence(control),
+            ]);
+        } catch (err) {
+            console.error('Guided capture failed:', err);
+            file = null;
+        }
 
         promptBox.classList.add('hidden');
         hint.classList.remove('hidden');
         shutter.classList.remove('recording');
         setRing(0);
         state.recording = false;
-        if (!file) { shutter.disabled = false; ui.status('Nothing was recorded. Try again.'); return; }
+        if (!file) {
+            // Covers two different situations with one message, since neither
+            // is distinguishable from here without extra signalling: a
+            // legitimate empty capture (recordClip already toasts the specific
+            // reason, e.g. no MediaRecorder support) and the outer catch above
+            // firing on something unexpected.
+            shutter.disabled = false;
+            ui.status('Recording did not complete. Try again.');
+            // The framing loop was stopped to give the guided sequence sole
+            // use of pose-check; restore it so the shutter re-enables/
+            // disables correctly for the retry instead of staying stuck at
+            // whatever state.good last was.
+            if (!state.closed && !state.timer) state.timer = setInterval(tick, 350);
+            return;
+        }
 
         try { cam.stop(); } catch { /* already stopped */ }
         await opts.onClip(file, ui);
