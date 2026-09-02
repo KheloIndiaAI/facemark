@@ -273,7 +273,19 @@ class CameraCapture {
      * @param {number} ms      how long to record
      * @param {function} onTick called with 0..1 progress, for the UI ring
      */
-    async recordClip(ms = 2000, onTick = null) {
+    /**
+     * @param ms       safety ceiling - recording stops here even if `control`
+     *                 never signals done. For a fixed-length capture (attendance)
+     *                 this IS the duration; for a gated capture it is a backstop.
+     * @param onTick   called with 0..1 = elapsed/ms. Meaningless for a gated
+     *                 capture with no fixed target, so gated callers pass null
+     *                 and drive their own progress indicator instead.
+     * @param control  optional mutable {done: false}. The caller flips
+     *                 control.done = true to end the recording before `ms`
+     *                 elapses - this is what makes "stop once every instruction
+     *                 is verified complete" possible instead of a blind timer.
+     */
+    async recordClip(ms = 2000, onTick = null, control = null) {
         if (!this.isActive || !this.stream) return null;
         if (!window.MediaRecorder) {
             showToast('Recording unavailable',
@@ -306,7 +318,7 @@ class CameraCapture {
             const tick = setInterval(() => {
                 const p = Math.min(1, (Date.now() - t0) / ms);
                 if (onTick) onTick(p);
-                if (p >= 1) { clearInterval(tick); resolve(); }
+                if (p >= 1 || (control && control.done)) { clearInterval(tick); resolve(); }
             }, 50);
         });
 
@@ -813,7 +825,8 @@ function initMarkPage() {
         shutterBtn.classList.add('recording');
         if (recHint) recHint.textContent = 'Recording - move the phone slightly';
 
-        // Attendance stays short on purpose - see the note by CLIP_MS_ENROL.
+        // Attendance stays a short, fixed-length capture, unlike registration's
+        // guided sequence - see the note by CLIP_MS_ATTENDANCE.
         const file = await currentCameraCapture.recordClip(CLIP_MS_ATTENDANCE, setRing);
 
         shutterBtn.classList.remove('recording');
@@ -1399,7 +1412,7 @@ const REG_GUIDELINES = [
     'Remove cap, sunglasses and mask',
     'Hold the device at arm\'s length, at eye level',
     'Only the person being registered should be in frame',
-    'Move your head a little while recording - that is what shows a real person is present, not a photograph',
+    'Follow the on-screen prompts and turn your head as asked - that is what shows a real person is present, not a photograph',
 ];
 
 let regDetails = null;
@@ -1701,38 +1714,43 @@ document.addEventListener('click', (e) => {
  *   ui.resume()                    return to a live camera for another attempt
  *   ui.close()                     finish and close the modal
  */
-// Registration records for longer than attendance, and deliberately so. The
-// depth signal comes from parallax, which accumulates with how much the head
-// actually moves - and two seconds of someone trying to hold still produces
-// very little of it. Measured: genuine small motion scored 0.0072-0.0097 over
-// two seconds, close enough to a flat photograph (0.0038-0.0055) to be refused.
-// Ten seconds gives an ordinary person time to shift naturally, which separates
-// the two without asking them to perform anything.
-//
-// Attendance stays short: it photographs a group across a room, where nobody is
-// going to hold a ten second pose, and the clip is a means to a register rather
-// than a permanent identity record.
-const CLIP_MS_ENROL = 10000;
+// Attendance stays a short, fixed capture: it photographs a group across a
+// room, where nobody is going to perform a guided sequence, and the clip is a
+// means to a register rather than a permanent identity record.
 const CLIP_MS_ATTENDANCE = 2000;
 
-// What the recording is FOR, spelled out as it happens rather than said once
-// up front and then left to memory for ten seconds. The backend measures
-// parallax - depth revealed by a changing viewpoint - so the sequence below is
-// not decorative: it is a script that produces the four directions of head
-// turn most likely to generate a clear, unambiguous depth signal, in an order
-// a person can follow without re-reading anything.
+// Registration does NOT record for a fixed duration. A clock was tried first -
+// ten seconds, on the reasoning that more elapsed time gives a person more
+// chance to shift naturally. It was the wrong mechanism: a script tied to a
+// clock plays "turn left" for a slice of time whether or not anyone actually
+// turned, so it does not GUARANTEE the motion the depth check depends on, and
+// a full ten seconds is also longer than most people need once they are
+// actually being told what to do and confirmed to have done it.
 //
-// `at` is a fraction of the clip (0..1), matched against recordClip's onTick
-// progress, so this scales to whatever clipMs actually is rather than
-// hardcoding seconds - useful since a caller could pass a different duration.
-const CLIP_PROMPTS = [
-    { at: 0.00, text: 'Hold still, looking at the camera',  arrow: null    },
-    { at: 0.12, text: 'Slowly turn your head to your LEFT', arrow: 'left'  },
-    { at: 0.34, text: 'Back to the centre',                 arrow: null    },
-    { at: 0.46, text: 'Slowly turn your head to your RIGHT',arrow: 'right' },
-    { at: 0.68, text: 'Back to the centre',                 arrow: null    },
-    { at: 0.80, text: 'Tilt your head UP a little',         arrow: 'up'    },
-    { at: 0.90, text: 'Tilt your head DOWN a little',       arrow: 'down'  },
+// So each instruction is verified against the person's own measured pose
+// before the next one is shown, reusing /api/enroll/pose-check's existing
+// named steps (left/right/up/down, judged relative to a captured baseline) -
+// the same endpoint and thresholds the old guided-multiview flow used, just
+// without that flow's ring visualisation. Recording stops once every step has
+// been measured complete, however long that actually took.
+//
+// GUIDED_CAPTURE_MAX_MS is a backstop, not a target: if pose measurement never
+// works at all (bad light, an unreliable estimate for this face, a network
+// hiccup) the loop below moves on from each stuck step after its own timeout
+// rather than trapping someone, and this is the outer ceiling in case that
+// safety valve itself fails - normal use should never come close to it. The
+// server's own liveness check on the finished clip remains the real gate
+// either way; this sequence exists to elicit good motion, not to replace it.
+const GUIDED_CAPTURE_MAX_MS = 45000;
+
+// The four directions, named exactly as pose-check expects. Order matters
+// only for how it reads to a person - left/right/up/down, not because the
+// depth measurement needs a particular sequence.
+const GUIDED_DIRECTIONS = [
+    { key: 'left',  text: 'Slowly turn your head to your LEFT',  arrow: 'left'  },
+    { key: 'right', text: 'Slowly turn your head to your RIGHT', arrow: 'right' },
+    { key: 'up',    text: 'Tilt your head UP a little',          arrow: 'up'    },
+    { key: 'down',  text: 'Tilt your head DOWN a little',        arrow: 'down'  },
 ];
 
 function _arrowSvg(direction) {
@@ -1747,24 +1765,24 @@ function _arrowSvg(direction) {
 }
 
 async function openClipCapture(opts) {
-    const clipMs = opts.clipMs || CLIP_MS_ENROL;
-    const clipSecs = Math.round(clipMs / 1000);
     openModal(opts.title || 'Record clip', `
         <div class="camera-container" id="clip-cap-camera">
             <video id="clip-cap-video" class="camera-video" autoplay playsinline muted></video>
             <canvas id="clip-cap-overlay" class="camera-overlay"></canvas>
             <div class="rec-hint" id="clip-cap-hint">Looking for a face...</div>
-            <!-- Shown only while recording - see CLIP_PROMPTS. Separate from
-                 #clip-cap-hint on purpose: the pose-check poll (tick()) keeps
-                 overwriting that pill every 350ms, which would fight a timed
-                 script for control of the same element. -->
+            <!-- Shown only while recording. Separate from #clip-cap-hint on
+                 purpose: the pose-check poll used for pre-recording framing
+                 (tick()) keeps overwriting that pill, which would fight the
+                 guided sequence for control of the same element - so the
+                 framing poll is stopped for the duration of the recording and
+                 this element takes over instead. -->
             <div class="rec-prompt hidden" id="clip-cap-prompt">
                 <div class="rec-prompt-arrow" id="clip-cap-prompt-arrow"></div>
                 <div class="rec-prompt-text" id="clip-cap-prompt-text"></div>
             </div>
             <div class="camera-controls" style="justify-content:center">
                 <button type="button" class="camera-shutter" id="clip-cap-shutter"
-                        aria-label="Record a ${clipSecs} second clip" disabled>
+                        aria-label="Record - follow the on-screen prompts" disabled>
                     <svg class="rec-ring" viewBox="0 0 44 44" aria-hidden="true">
                         <circle class="rec-ring-track" cx="22" cy="22" r="20"></circle>
                         <circle class="rec-ring-fill" id="clip-cap-ring" cx="22" cy="22" r="20"></circle>
@@ -1774,7 +1792,8 @@ async function openClipCapture(opts) {
             </div>
         </div>
         <div id="clip-cap-status" class="text-sm text-muted mt-3">
-            ${Charts.esc(opts.intro || `Hold the phone at arm's length. Follow the on-screen prompts for ${clipSecs} seconds.`)}
+            ${Charts.esc(opts.intro || "Hold the phone at arm's length. Follow the on-screen prompts - "
+                                      + "recording stops automatically once every step is done.")}
         </div>`);
 
     const video   = document.getElementById('clip-cap-video');
@@ -2020,21 +2039,11 @@ async function openClipCapture(opts) {
         state.raf = requestAnimationFrame(loop);
     })();
 
-    const promptBox  = document.getElementById('clip-cap-prompt');
-    const promptText = document.getElementById('clip-cap-prompt-text');
+    const promptBox   = document.getElementById('clip-cap-prompt');
+    const promptText  = document.getElementById('clip-cap-prompt-text');
     const promptArrow = document.getElementById('clip-cap-prompt-arrow');
-    let lastPromptIdx = -1;
 
-    function updatePrompt(p) {
-        // The last entry whose `at` has been reached - so the phase holds
-        // steady between cues rather than resetting every progress tick.
-        let idx = 0;
-        for (let i = 0; i < CLIP_PROMPTS.length; i++) {
-            if (p >= CLIP_PROMPTS[i].at) idx = i; else break;
-        }
-        if (idx === lastPromptIdx) return;
-        lastPromptIdx = idx;
-        const step = CLIP_PROMPTS[idx];
+    function setPromptStep(step) {
         promptText.textContent = step.text;
         promptArrow.innerHTML = step.arrow ? _arrowSvg(step.arrow) : '';
         promptArrow.classList.toggle('hidden', !step.arrow);
@@ -2044,21 +2053,114 @@ async function openClipCapture(opts) {
         if (navigator.vibrate) navigator.vibrate(25);
     }
 
+    /** Wait for one frame captured DURING an active recording to satisfy one
+     *  named pose-check step, polling at its own pace independent of the
+     *  pre-recording framing loop (which is stopped for the duration - see
+     *  the shutter handler). Resolves the measured response on success, or
+     *  null if `timeoutMs` passes first - the caller decides what "gave up"
+     *  means, this function only reports which one happened. */
+    async function waitForStep(stepKey, baseYaw, basePitch, timeoutMs, pollMs) {
+        const start = Date.now();
+        while (!state.closed && Date.now() - start < timeoutMs) {
+            const c = grab(480);
+            if (c) {
+                const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.8));
+                const fd = new FormData();
+                fd.append('frame', blob, 'f.jpg');
+                fd.append('step', stepKey);
+                if (baseYaw !== null) { fd.append('base_yaw', baseYaw); fd.append('base_pitch', basePitch); }
+                let r = null;
+                try { r = await api.postForm('/api/enroll/pose-check', fd); } catch { /* one dropped poll - retry */ }
+                if (r) {
+                    if (r.box) { state.box = r.box; draw(); }
+                    if (r.ok) return r;
+                }
+            }
+            await new Promise(res => setTimeout(res, pollMs));
+        }
+        return null;
+    }
+
+    /** Drive the person through hold-still, then four verified turns, setting
+     *  control.done = true only once that is genuinely complete (or a step's
+     *  own timeout gives up on it - see the constant's comment for why that
+     *  is the right trade-off rather than trapping someone indefinitely). */
+    async function runGuidedSequence(control) {
+        const CENTRE_TIMEOUT_MS = 6000;
+        const STEP_TIMEOUT_MS = 7000;
+        const POLL_MS = 200;
+        // A floor under the fast-completion case, not a target: someone who
+        // turns quickly could otherwise finish in a couple of seconds, and the
+        // backend's frame sampler wants a reasonably sized clip to spread
+        // across regardless of how briskly the steps were satisfied.
+        const MIN_TOTAL_MS = 3000;
+        const t0 = Date.now();
+
+        setPromptStep({ text: 'Hold still, looking at the camera', arrow: null });
+        setRing(0);
+        let baseYaw = null, basePitch = null, hold = 0;
+        const centreStart = Date.now();
+        while (!state.closed && baseYaw === null && Date.now() - centreStart < CENTRE_TIMEOUT_MS) {
+            const c = grab(480);
+            if (c) {
+                const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.8));
+                const fd = new FormData();
+                fd.append('frame', blob, 'f.jpg');
+                fd.append('step', 'centre');
+                let r = null;
+                try { r = await api.postForm('/api/enroll/pose-check', fd); } catch { /* retry */ }
+                if (r) {
+                    if (r.box) { state.box = r.box; draw(); }
+                    if (r.ok) { hold++; if (hold >= 3) { baseYaw = r.yaw; basePitch = r.pitch; } }
+                    else hold = 0;
+                }
+            }
+            if (baseYaw === null) await new Promise(res => setTimeout(res, POLL_MS));
+        }
+        // Framing never stabilised - fall through on an absolute baseline
+        // rather than trap someone here. The turns below are still measured
+        // and still shown, just against 0 instead of their own straight-ahead
+        // reading; the server's liveness check on the finished clip is the
+        // actual authority regardless of how this phase went.
+        if (baseYaw === null) { baseYaw = 0; basePitch = 0; }
+        setRing(0.2);
+
+        for (let i = 0; i < GUIDED_DIRECTIONS.length && !state.closed; i++) {
+            const step = GUIDED_DIRECTIONS[i];
+            setPromptStep(step);
+            await waitForStep(step.key, baseYaw, basePitch, STEP_TIMEOUT_MS, POLL_MS);
+            // Advances whether or not the step measured complete in time -
+            // see GUIDED_CAPTURE_MAX_MS's comment. A stuck step must not
+            // become a stuck recording.
+            setRing(0.2 + 0.2 * (i + 1));
+        }
+
+        const elapsed = Date.now() - t0;
+        if (!state.closed && elapsed < MIN_TOTAL_MS) {
+            await new Promise(res => setTimeout(res, MIN_TOTAL_MS - elapsed));
+        }
+        control.done = true;
+    }
+
     shutter.addEventListener('click', async () => {
         if (state.recording) return;
         state.recording = true;
         shutter.disabled = true;
         shutter.classList.add('recording');
-        ui.status(`Recording ${clipSecs} seconds - follow the on-screen prompts.`);
-        lastPromptIdx = -1;
-        updatePrompt(0);
-        // The framing hint and the movement script occupy nearly the same
-        // spot and would overlap if both were visible - the script is strictly
-        // more useful once recording has actually started, so it takes over.
+        ui.status('Recording - follow the on-screen prompts.');
+
+        // The pre-recording framing poll and the guided sequence's own poll
+        // would otherwise both be hitting pose-check for the same video at
+        // once. One voice at a time.
+        if (state.timer) { clearInterval(state.timer); state.timer = null; }
         hint.classList.add('hidden');
         promptBox.classList.remove('hidden');
 
-        const file = await cam.recordClip(clipMs, p => { setRing(p); updatePrompt(p); });
+        const control = { done: false };
+        const [file] = await Promise.all([
+            cam.recordClip(GUIDED_CAPTURE_MAX_MS, null, control),
+            runGuidedSequence(control),
+        ]);
 
         promptBox.classList.add('hidden');
         hint.classList.remove('hidden');
@@ -2067,7 +2169,6 @@ async function openClipCapture(opts) {
         state.recording = false;
         if (!file) { shutter.disabled = false; ui.status('Nothing was recorded. Try again.'); return; }
 
-        if (state.timer) clearInterval(state.timer);
         try { cam.stop(); } catch { /* already stopped */ }
         await opts.onClip(file, ui);
     });
