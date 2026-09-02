@@ -77,6 +77,35 @@ def score_photo(path: str, gallery: dict, det, rec) -> tuple:
     return faces, fused, ids
 
 
+def _iou(a, b) -> float:
+    """Overlap of two [x, y, w, h] boxes, 0..1."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix1, iy1 = max(ax, bx), max(ay, by)
+    ix2, iy2 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    union = aw * ah + bw * bh - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
+def _best_overlap(box, faces, min_iou: float = 0.4):
+    """Index of the detected face that best covers `box`, or None.
+
+    0.4 is deliberately loose: the label box is drawn by a human and the
+    detector's box is machine-tight, so demanding a close match would report
+    misses that are really just differently drawn rectangles.
+    """
+    if not box:
+        return None
+    best, best_i = 0.0, None
+    for i, f in enumerate(faces):
+        v = _iou(box, [f.x, f.y, f.width, f.height])
+        if v > best:
+            best, best_i = v, i
+    return best_i if best >= min_iou else None
+
+
 def collect_scores(labels: dict, gallery: dict, det, rec, names: dict) -> dict:
     """Split every (face, student) similarity into genuine and impostor pools."""
     genuine, impostor = [], []
@@ -110,6 +139,37 @@ def collect_scores(labels: dict, gallery: dict, det, rec, names: dict) -> dict:
                 else:
                     impostor.append(s)
 
+        # Per-face ground truth, when the label file supplies it.
+        #
+        # WHY THIS EXISTS: "correct" below counts an assignment right if that
+        # person is anywhere in the photo. So if A and B are both present and
+        # the matcher swaps their faces, both ids are in `present` and the
+        # photo scores full marks - while in production both athletes get the
+        # wrong attendance record. A set cannot express who is who, so the
+        # harness was structurally unable to report its most damaging error.
+        #
+        # Boxes are matched by overlap rather than by index because detection
+        # order is not stable across detector or config changes, and an
+        # index-keyed label file would silently re-point at different faces.
+        truth_faces = spec.get("faces") or []
+        swaps = misses = 0
+        identified = None
+        if truth_faces:
+            identified = 0
+            for tf in truth_faces:
+                want = tf.get("student_id")
+                gi = _best_overlap(tf.get("box"), faces)
+                if gi is None:
+                    misses += 1                      # nothing detected there
+                    continue
+                got = assign.get(gi)
+                if got is None:
+                    misses += 1                      # detected but unassigned
+                elif int(got) == int(want):
+                    identified += 1
+                else:
+                    swaps += 1                       # assigned to the WRONG person
+
         photo_rows.append({
             "photo": Path(photo).name,
             "faces_detected": len(faces),
@@ -118,6 +178,11 @@ def collect_scores(labels: dict, gallery: dict, det, rec, names: dict) -> dict:
             "matched": len(assign),
             "correct": sum(1 for sid in assign.values() if sid in present),
             "wrong": sum(1 for sid in assign.values() if sid not in present),
+            # None means "not checkable", which is NOT the same as zero.
+            "identified": identified,
+            "swapped": swaps if truth_faces else None,
+            "unidentified": misses if truth_faces else None,
+            "has_face_truth": bool(truth_faces),
         })
 
     return {"genuine": np.array(genuine), "impostor": np.array(impostor),
@@ -197,12 +262,36 @@ def main() -> int:
     print("-" * 68)
     print("  PER-PHOTO")
     print("-" * 68)
-    print(f"  {'photo':<34}{'faces':>7}{'exp':>5}{'matched':>9}{'right':>7}{'wrong':>7}")
+    print(f"  {'photo':<34}{'faces':>7}{'exp':>5}{'matched':>9}{'right':>7}{'wrong':>7}"
+          f"{'ident':>7}{'SWAP':>6}")
     for r in res["photos"]:
         exp = r["expected_faces"] if r["expected_faces"] is not None else "-"
+        ident = "-" if r["identified"] is None else r["identified"]
+        swap = "-" if r["swapped"] is None else r["swapped"]
         print(f"  {r['photo']:<34}{r['faces_detected']:>7}{exp:>5}"
-              f"{r['matched']:>9}{r['correct']:>7}{r['wrong']:>7}")
+              f"{r['matched']:>9}{r['correct']:>7}{r['wrong']:>7}{ident:>7}{swap:>6}")
     print()
+
+    # A harness that cannot detect its worst failure must say so, every run.
+    # "right" only checks that each matched person is somewhere in the photo,
+    # so two athletes whose faces are swapped both count as right - and both
+    # get the wrong attendance record in production.
+    unchecked = [r["photo"] for r in res["photos"] if not r["has_face_truth"]]
+    total_swaps = sum(r["swapped"] or 0 for r in res["photos"] if r["has_face_truth"])
+    if unchecked:
+        print(f"  NOTE: {len(unchecked)} of {len(res['photos'])} photos have no "
+              f"per-face labels, so a SWAP between two people who are both")
+        print("        present cannot be detected there - 'right' counts only "
+              "whether each match is someone in the photo.")
+        print("        Add a \"faces\" list to those entries to check identity:")
+        print('          "faces": [{"box": [x, y, w, h], "student_id": 57}, ...]')
+        print()
+    if total_swaps:
+        print(f"  {'*' * 60}")
+        print(f"  {total_swaps} SWAPPED IDENTITIES on photos that could be checked.")
+        print("  Each one is two wrong attendance records, not one.")
+        print(f"  {'*' * 60}")
+        print()
 
     if not len(g) or not len(imp):
         print("  Not enough labelled data for score statistics.")
