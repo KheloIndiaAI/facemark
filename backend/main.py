@@ -1542,6 +1542,25 @@ def student_history(student_id: int, user: dict = Depends(auth.current_user)):
     }
 
 
+# Excel, LibreOffice and Sheets all treat a cell beginning = + - @ (or a
+# leading tab / carriage return) as a FORMULA, not as text. Names reach this
+# register from the registration form and from roster imports, and neither
+# validates their content - so a person named =HYPERLINK("http://…"&A2,"Click")
+# becomes a live link, and the DDE form (=cmd|'/c calc'!A1) prompts to run a
+# program, in a file an administrator opens precisely because they trust it.
+#
+# Prefixing with an apostrophe is the standard mitigation: spreadsheets read it
+# as "this is text" and do not display it. Applied to every string column
+# rather than only `name`, because guessing which field can never hold a hostile
+# value is how these come back.
+_CSV_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
+def _csv_safe(value):
+    text = "" if value is None else str(value)
+    return "'" + text if text.startswith(_CSV_FORMULA_LEAD) else text
+
+
 @app.get("/api/attendance/export")
 def export_attendance(
     day: Optional[str] = None,
@@ -1562,11 +1581,11 @@ def export_attendance(
     writer.writerow(["ID NUMBER", "NAME", "DATE", "CONFIDENCE", "MARKED AT"])
     for r in records:
         writer.writerow([
-            r["roll_no"],
-            r["name"],
-            r["date"],
+            _csv_safe(r["roll_no"]),
+            _csv_safe(r["name"]),
+            _csv_safe(r["date"]),
             round(utils.similarity_to_confidence(r["confidence"], config.MATCH_THRESHOLD), 4),
-            r["marked_at"],
+            _csv_safe(r["marked_at"]),
         ])
     buf.seek(0)
     return StreamingResponse(
