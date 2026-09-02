@@ -931,24 +931,40 @@ function initMarkPage() {
             textEl.textContent = "Done";
 
             setTimeout(() => {
+                // Re-queried rather than reusing the reference captured before
+                // the upload: that one is a detached node after a route change,
+                // so writing to it silently goes nowhere.
+                const live = document.getElementById('mark-results-container');
                 if (data.ok === false) {
                     // Refused. The frames the server judged are shown alongside
                     // the reason: a rejection nobody can inspect is one nobody
                     // can appeal, and a coach needs to see what the camera saw.
-                    resultsContainer.innerHTML = livenessBanner(data.liveness, data.message)
-                        + `<div class="empty-state" style="padding-top:8px">
-                             <div class="text-xs text-muted">No attendance was recorded for this clip.</div>
-                           </div>`;
+                    if (live) {
+                        live.innerHTML = livenessBanner(data.liveness, data.message)
+                            + `<div class="empty-state" style="padding-top:8px">
+                                 <div class="text-xs text-muted">No attendance was recorded for this clip.</div>
+                               </div>`;
+                    }
                     showToast('Not accepted', data.message || 'The clip was refused', 'error');
                     return;
                 }
-                renderMarkResults(data);
-                showToast('Success', `${data.recognized_count} student(s) marked present`, 'success');
+                // The toast fires whether or not the panel is still on screen,
+                // so a coach who navigated away still learns the mark landed.
+                const shown = renderMarkResults(data);
+                showToast('Success',
+                          `${data.recognized_count} student(s) marked present`
+                          + (shown ? '' : ' - reopen Mark Attendance to see the summary'),
+                          'success');
             }, 300);
         } catch (err) {
             clearInterval(progressTimer);
-            resultsContainer.innerHTML =
-                `<div style="color: var(--red);">Could not process the clip. Check the console.</div>`;
+            console.error('Attendance processing failed:', err);
+            const live = document.getElementById('mark-results-container');
+            if (live) {
+                live.innerHTML =
+                    `<div style="color: var(--red);">Could not process the clip. Try again.</div>`;
+            }
+            showToast('Could not process', 'The clip was not processed. Try again.', 'error');
         } finally {
             processBtn.disabled = false;
         }
@@ -1047,7 +1063,14 @@ function geoBanner(geo) {
 }
 
 function renderMarkResults(data) {
+    // Re-queried, and allowed to be absent. Results are rendered from a
+    // setTimeout after an upload, and changing route REPLACES the mark page's
+    // markup - so a coach who walks to another tab while a clip processes used
+    // to land here with a null container and throw. The attendance was already
+    // recorded by then, so the throw lost the summary AND the success toast
+    // that follows this call, making a successful mark look like a failure.
     const container = document.getElementById('mark-results-container');
+    if (!container) return false;
     const totalSec = (data.timings.total_ms / 1000).toFixed(1);
 
     // Shown on success too, not only on refusal. A coach should be able to see
@@ -1220,6 +1243,7 @@ function renderMarkResults(data) {
     }
 
     container.innerHTML = html;
+    return true;
 }
 
 // --- Students Page ---
@@ -1967,6 +1991,12 @@ async function openClipCapture(opts) {
         state.busy = true;
         try {
             const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.8));
+            // A null blob is a failed ENCODE, not a failed request. Letting it
+            // fall through would throw in FormData.append and be counted as a
+            // network failure, and five of those dead-end the person at "Lost
+            // connection" with the poll cancelled - recoverable only by closing
+            // the modal. Skip the frame and keep the streak intact.
+            if (!blob) return;
             const fd = new FormData();
             fd.append('frame', blob, 'f.jpg');
             fd.append('step', 'centre');
