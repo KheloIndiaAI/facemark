@@ -1715,6 +1715,37 @@ document.addEventListener('click', (e) => {
 const CLIP_MS_ENROL = 10000;
 const CLIP_MS_ATTENDANCE = 2000;
 
+// What the recording is FOR, spelled out as it happens rather than said once
+// up front and then left to memory for ten seconds. The backend measures
+// parallax - depth revealed by a changing viewpoint - so the sequence below is
+// not decorative: it is a script that produces the four directions of head
+// turn most likely to generate a clear, unambiguous depth signal, in an order
+// a person can follow without re-reading anything.
+//
+// `at` is a fraction of the clip (0..1), matched against recordClip's onTick
+// progress, so this scales to whatever clipMs actually is rather than
+// hardcoding seconds - useful since a caller could pass a different duration.
+const CLIP_PROMPTS = [
+    { at: 0.00, text: 'Hold still, looking at the camera',  arrow: null    },
+    { at: 0.12, text: 'Slowly turn your head to your LEFT', arrow: 'left'  },
+    { at: 0.34, text: 'Back to the centre',                 arrow: null    },
+    { at: 0.46, text: 'Slowly turn your head to your RIGHT',arrow: 'right' },
+    { at: 0.68, text: 'Back to the centre',                 arrow: null    },
+    { at: 0.80, text: 'Tilt your head UP a little',         arrow: 'up'    },
+    { at: 0.90, text: 'Tilt your head DOWN a little',       arrow: 'down'  },
+];
+
+function _arrowSvg(direction) {
+    // Same stroke-based style as every other icon in this file, so it reads as
+    // part of the app rather than a dropped-in graphic.
+    const rot = { left: 180, right: 0, up: -90, down: 90 }[direction] ?? 0;
+    return `<svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                 style="transform:rotate(${rot}deg)">
+                <path d="M5 12h14M13 6l6 6-6 6"/>
+            </svg>`;
+}
+
 async function openClipCapture(opts) {
     const clipMs = opts.clipMs || CLIP_MS_ENROL;
     const clipSecs = Math.round(clipMs / 1000);
@@ -1723,6 +1754,14 @@ async function openClipCapture(opts) {
             <video id="clip-cap-video" class="camera-video" autoplay playsinline muted></video>
             <canvas id="clip-cap-overlay" class="camera-overlay"></canvas>
             <div class="rec-hint" id="clip-cap-hint">Looking for a face...</div>
+            <!-- Shown only while recording - see CLIP_PROMPTS. Separate from
+                 #clip-cap-hint on purpose: the pose-check poll (tick()) keeps
+                 overwriting that pill every 350ms, which would fight a timed
+                 script for control of the same element. -->
+            <div class="rec-prompt hidden" id="clip-cap-prompt">
+                <div class="rec-prompt-arrow" id="clip-cap-prompt-arrow"></div>
+                <div class="rec-prompt-text" id="clip-cap-prompt-text"></div>
+            </div>
             <div class="camera-controls" style="justify-content:center">
                 <button type="button" class="camera-shutter" id="clip-cap-shutter"
                         aria-label="Record a ${clipSecs} second clip" disabled>
@@ -1735,7 +1774,7 @@ async function openClipCapture(opts) {
             </div>
         </div>
         <div id="clip-cap-status" class="text-sm text-muted mt-3">
-            ${Charts.esc(opts.intro || `Hold the phone at arm's length and keep moving gently for ${clipSecs} seconds.`)}
+            ${Charts.esc(opts.intro || `Hold the phone at arm's length. Follow the on-screen prompts for ${clipSecs} seconds.`)}
         </div>`);
 
     const video   = document.getElementById('clip-cap-video');
@@ -1981,15 +2020,48 @@ async function openClipCapture(opts) {
         state.raf = requestAnimationFrame(loop);
     })();
 
+    const promptBox  = document.getElementById('clip-cap-prompt');
+    const promptText = document.getElementById('clip-cap-prompt-text');
+    const promptArrow = document.getElementById('clip-cap-prompt-arrow');
+    let lastPromptIdx = -1;
+
+    function updatePrompt(p) {
+        // The last entry whose `at` has been reached - so the phase holds
+        // steady between cues rather than resetting every progress tick.
+        let idx = 0;
+        for (let i = 0; i < CLIP_PROMPTS.length; i++) {
+            if (p >= CLIP_PROMPTS[i].at) idx = i; else break;
+        }
+        if (idx === lastPromptIdx) return;
+        lastPromptIdx = idx;
+        const step = CLIP_PROMPTS[idx];
+        promptText.textContent = step.text;
+        promptArrow.innerHTML = step.arrow ? _arrowSvg(step.arrow) : '';
+        promptArrow.classList.toggle('hidden', !step.arrow);
+        // A beat of haptic feedback on each new instruction - the phone is
+        // usually held at arm's length during this, where a small on-screen
+        // text change is easy to miss.
+        if (navigator.vibrate) navigator.vibrate(25);
+    }
+
     shutter.addEventListener('click', async () => {
         if (state.recording) return;
         state.recording = true;
         shutter.disabled = true;
         shutter.classList.add('recording');
-        ui.status(`Recording ${clipSecs} seconds - keep moving your head gently the whole time.`);
+        ui.status(`Recording ${clipSecs} seconds - follow the on-screen prompts.`);
+        lastPromptIdx = -1;
+        updatePrompt(0);
+        // The framing hint and the movement script occupy nearly the same
+        // spot and would overlap if both were visible - the script is strictly
+        // more useful once recording has actually started, so it takes over.
+        hint.classList.add('hidden');
+        promptBox.classList.remove('hidden');
 
-        const file = await cam.recordClip(clipMs, setRing);
+        const file = await cam.recordClip(clipMs, p => { setRing(p); updatePrompt(p); });
 
+        promptBox.classList.add('hidden');
+        hint.classList.remove('hidden');
         shutter.classList.remove('recording');
         setRing(0);
         state.recording = false;
