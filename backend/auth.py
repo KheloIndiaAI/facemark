@@ -78,7 +78,12 @@ def create_user(
         raise ValueError(f"Unknown role: {role}")
     if role == "coach" and centre_id is None:
         raise ValueError("A coach must be assigned to a centre")
-    now = datetime.now().isoformat(timespec="seconds")
+    # Display-only stamp, never compared - so it uses the centre's clock like
+    # every other stored timestamp. The session expiry below deliberately does
+    # NOT: those datetime.now() calls are only ever compared against each
+    # other, and moving one side of that comparison is how sessions end up
+    # never expiring.
+    now = config.now_stamp()
     with database.connect() as conn:
         return conn.insert(
             "INSERT INTO users (username, password_hash, role, full_name, email, phone, "

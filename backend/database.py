@@ -212,7 +212,7 @@ def _migrate_legacy_embeddings(conn: Conn) -> None:
     n = conn.execute(
         "INSERT INTO templates (student_id, model, vector, source, quality, created_at) "
         "SELECT student_id, model, vector, 'legacy', 0.0, ? FROM embeddings",
-        (datetime.now().isoformat(timespec="seconds"),),
+        (config.now_stamp(),),
     ).rowcount
     conn.execute("DROP TABLE embeddings")
     if n:
@@ -250,7 +250,7 @@ def add_student(
     templates: [{"model": str, "vector": np.ndarray, "source": str,
                  "quality": float}, ...] - one row per (model, source image).
     """
-    now = datetime.now().isoformat(timespec="seconds")
+    now = config.now_stamp()
     with connect() as conn:
         student_id = conn.insert(
             "INSERT INTO students (name, roll_no, photo_path, created_at, "
@@ -263,7 +263,7 @@ def add_student(
 
 def add_templates(student_id: int, templates: List[dict]) -> int:
     """Attach more templates (extra photo, another ID) to an existing student."""
-    now = datetime.now().isoformat(timespec="seconds")
+    now = config.now_stamp()
     with connect() as conn:
         return _insert_templates(conn, student_id, templates, now)
 
@@ -438,7 +438,7 @@ def add_adapted_template(
     per-(student, model) cap is reached.
     """
     stored = False
-    now = datetime.now().isoformat(timespec="seconds")
+    now = config.now_stamp()
     with connect() as conn:
         for model_name, new_vec in new_embeddings.items():
             new_vec = np.asarray(new_vec, dtype=np.float32).flatten()
@@ -491,7 +491,7 @@ def mark_attendance(
             "ON CONFLICT (student_id, date) DO NOTHING",
             (
                 student_id, day, confidence, image_path,
-                datetime.now().isoformat(timespec="seconds"),
+                config.now_stamp(),
                 centre_id, latitude, longitude, accuracy_m, geo_status, distance_m, marked_by,
             ),
         )
@@ -532,7 +532,7 @@ def clear_attendance() -> int:
 
 
 def stats(centre_id: Optional[int] = None) -> dict:
-    today = date.today().strftime(config.ATTENDANCE_DATE_FORMAT)
+    today = config.today_str()
     cs = " AND centre_id = ?" if centre_id is not None else ""
     cp = [centre_id] if centre_id is not None else []
     with connect() as conn:
@@ -606,7 +606,7 @@ def save_photo_record(
     faces_detected: int = 0,
 ) -> int:
     """Log a photo upload/capture with metadata. Returns photo record id."""
-    now = datetime.now().isoformat(timespec="seconds")
+    now = config.now_stamp()
     with connect() as conn:
         return conn.insert(
             "INSERT INTO photos (student_id, photo_type, file_path, file_size, resolution, source, device_info, faces_detected, created_at) "

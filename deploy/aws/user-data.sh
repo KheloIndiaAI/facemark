@@ -43,6 +43,11 @@ AWS_REGION="ap-south-1"
 # Optional. Where the nightly database dump goes. Leave empty to skip backups.
 BACKUP_BUCKET=""
 
+# The timezone the centre is in. Decides what "today" means for attendance -
+# this box runs UTC, and IST is UTC+5:30, so without it a 5 AM session files
+# under the previous day.
+APP_TIMEZONE="Asia/Kolkata"
+
 # Optional. Photo storage: "local" keeps them on the data volume, "s3" puts
 # them in a bucket (set S3_BUCKET too, and leave the access keys empty so the
 # instance role is used).
@@ -118,6 +123,7 @@ DATABASE_URL=${DATABASE_URL}
 FACEMARK_ADMIN_PASSWORD=${ADMIN_PASSWORD}
 FACEMARK_DATA_DIR=/data
 FACEMARK_MODELS_DIR=/app/data/models
+FACEMARK_TIMEZONE=${APP_TIMEZONE}
 FACEMARK_STORAGE=${FACEMARK_STORAGE}
 S3_BUCKET=${S3_BUCKET}
 S3_REGION=${AWS_REGION}

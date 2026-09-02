@@ -466,7 +466,7 @@ async def process_attendance(
     except ValueError:
         raise HTTPException(400, "Uploaded file is not a valid image")
 
-    day = date_str or date.today().strftime(config.ATTENDANCE_DATE_FORMAT)
+    day = date_str or config.today_str()
     thr = threshold if threshold is not None else config.MATCH_THRESHOLD
 
     # A coach always marks for their own centre regardless of what was posted.
@@ -1462,7 +1462,7 @@ async def assign_face_to_student(
     if not storage.exists("uploads", crop_name):
         raise HTTPException(404, "That face crop is no longer available")
 
-    day = date_str or date.today().strftime(config.ATTENDANCE_DATE_FORMAT)
+    day = date_str or config.today_str()
     marked = database.mark_attendance(
         student_id, day, 1.0, Path(face_url).stem,
         centre_id=student.get("centre_id"), geo_status="manual",
@@ -1507,7 +1507,7 @@ def get_attendance(
     centre_id: Optional[int] = None,
     user: dict = Depends(auth.current_user),
 ):
-    day = day or date.today().strftime(config.ATTENDANCE_DATE_FORMAT)
+    day = day or config.today_str()
     records = database.attendance_for_day(day, auth.scope_centre(user, centre_id))
     for r in records:
         r["photo_url"] = f"/api/photos/{Path(r['photo_path']).name}"
@@ -1567,7 +1567,7 @@ def export_attendance(
     centre_id: Optional[int] = None,
     user: dict = Depends(auth.current_user),
 ):
-    day = day or date.today().strftime(config.ATTENDANCE_DATE_FORMAT)
+    day = day or config.today_str()
     records = database.attendance_for_day(day, auth.scope_centre(user, centre_id))
     buf = io.StringIO()
     writer = csv.writer(buf)

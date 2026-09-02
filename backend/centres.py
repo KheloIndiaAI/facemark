@@ -14,7 +14,7 @@ import math
 from datetime import datetime
 from typing import List, Optional
 
-from . import database
+from . import config, database
 
 EARTH_RADIUS_M = 6_371_000.0
 
@@ -59,7 +59,7 @@ def create_centre(
     established: Optional[str] = None,
     is_demo: bool = False,
 ) -> int:
-    now = datetime.now().isoformat(timespec="seconds")
+    now = config.now_stamp()
     with database.connect() as conn:
         return conn.insert(
             "INSERT INTO centres (code, name, centre_type, state, district, address, pincode, "

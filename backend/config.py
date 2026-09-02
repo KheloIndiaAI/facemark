@@ -358,6 +358,71 @@ WARMUP_ON_START = True         # pre-run models once to avoid first-request JIT 
 # --- Attendance ------------------------------------------------------------
 ATTENDANCE_DATE_FORMAT = "%Y-%m-%d"
 
+# The timezone the CENTRE is in, which is what decides "what day is it".
+#
+# This is not cosmetic. Every attendance date came from a naive date.today(),
+# i.e. the server's own clock. That is correct on a laptop in India and wrong
+# on EC2, which is UTC by default: IST is UTC+5:30, so a 5:00 AM session is
+# 23:30 UTC the PREVIOUS day. Morning training - athletics, swimming - is
+# exactly when that window falls, so those registers would file under
+# yesterday and "today's attendance" would come back empty.
+#
+# Override with FACEMARK_TIMEZONE for a deployment outside India.
+APP_TIMEZONE = os.environ.get("FACEMARK_TIMEZONE") or "Asia/Kolkata"
+
+
+def _resolve_tz():
+    """The configured zone, or a safe stand-in if the tz database is missing.
+
+    python:3.11-slim has no tzdata unless it is installed, and ZoneInfo raises
+    rather than guessing. Falling back to UTC there would silently reintroduce
+    the very bug this exists to fix, so India - which has no DST, making a
+    fixed offset exactly right - falls back to +5:30 instead.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(APP_TIMEZONE)
+    except Exception:
+        import logging
+        from datetime import timedelta, timezone as _tz
+        if APP_TIMEZONE == "Asia/Kolkata":
+            logging.getLogger(__name__).warning(
+                "tzdata is unavailable, using a fixed UTC+5:30 for %s. "
+                "Correct for India (no DST). Install tzdata to be safe elsewhere.",
+                APP_TIMEZONE,
+            )
+            return _tz(timedelta(hours=5, minutes=30))
+        logging.getLogger(__name__).error(
+            "tzdata is unavailable and %s needs it - falling back to UTC, so "
+            "attendance dates will be wrong wherever local time is not UTC. "
+            "Install tzdata.", APP_TIMEZONE,
+        )
+        return _tz(timedelta(0))
+
+
+TZ = _resolve_tz()
+
+
+def local_now():
+    """Now, as an AWARE datetime in the centre's timezone."""
+    from datetime import datetime
+    return datetime.now(TZ)
+
+
+def now_stamp() -> str:
+    """Now, as the naive 'YYYY-MM-DDTHH:MM:SS' string this database stores.
+
+    Naive on purpose: every timestamp already written is naive, and mixing the
+    two would make comparisons raise. This keeps the format identical while
+    fixing which clock it comes from - so no migration is needed.
+    """
+    return local_now().replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def today_str() -> str:
+    """Today's date at the centre, formatted the way attendance stores it."""
+    return local_now().strftime(ATTENDANCE_DATE_FORMAT)
+
 # --- Advanced tuning (expert) ----------------------------------------------
 # TTA (test-time augmentation) for detection - enables horizontal flip
 DETECTOR_TTA = True            # set True for "accurate" mode
