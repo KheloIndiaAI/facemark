@@ -76,60 +76,80 @@ class LivenessResult:
 
 
 def sample_frames(data: bytes, max_frames: int = None) -> Tuple[List[np.ndarray], dict]:
-    """Decode the clip and return evenly-spaced frames plus what we learned about it.
+    """Decode the clip and return evenly-spaced frames plus what we learned.
 
     OpenCV cannot decode from memory, so the bytes go to a temporary file. The
-    browser decides the container - Chrome records WebM/VP8, Safari MP4/H.264 -
-    and both are read through the same FFmpeg backend, so nothing here depends
-    on which one arrived.
+    browser decides the container - Chrome records WebM/VP9, Safari MP4/H.264 -
+    and both go through the same FFmpeg backend.
+
+    READ SEQUENTIALLY, NEVER SEEK. The previous version trusted
+    CAP_PROP_FRAME_COUNT and then seeked to evenly spaced indices. A file from
+    MediaRecorder is a LIVE stream: it carries no Cues index and usually no
+    duration, so the frame count is a guess derived from a header that is not
+    there. Where that guess comes back wrong, every seek lands past the end,
+    every read fails, and a clip that decodes perfectly well yields zero frames
+    - surfacing to the person as "could not read enough frames from this clip",
+    with no way to tell that from a codec the box genuinely cannot decode.
+    Sequential reading needs no index and is what streamed WebM supports.
+
+    Memory stays bounded by halving: once twice the wanted number of frames is
+    held, every other one is dropped and the stride doubles. The kept frames
+    still span the WHOLE clip, which is what the parallax check needs - depth
+    grows with the distance between viewpoints, so the first and last frames
+    matter more than any adjacent pair.
     """
     max_frames = max_frames or config.LIVENESS_SAMPLE_FRAMES
-    info = {"frames_total": 0, "fps": 0.0, "duration_s": 0.0}
+    info = {"frames_total": 0, "fps": 0.0, "duration_s": 0.0,
+            "opened": False, "bytes": len(data), "decoded": 0}
 
-    with tempfile.NamedTemporaryFile(suffix=".video", delete=False) as tmp:
+    # A real extension, not ".video". FFmpeg probes content rather than trusting
+    # the name, but some builds consult it first, and there is no reason to hand
+    # the demuxer a name it has never seen.
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
         tmp.write(data)
         tmp_path = Path(tmp.name)
 
     try:
         cap = cv2.VideoCapture(str(tmp_path))
+        info["opened"] = bool(cap.isOpened())
         if not cap.isOpened():
             return [], info
 
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        # Recorded for diagnostics only - nothing below depends on them being
+        # right, which is the entire point.
+        reported = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        info["frames_total"] = total
+        info["frames_total"] = reported
         info["fps"] = fps
-        info["duration_s"] = (total / fps) if fps > 0 else 0.0
+        info["duration_s"] = (reported / fps) if fps > 0 else 0.0
 
         frames: List[np.ndarray] = []
-        if total > 0:
-            # Evenly spaced across the whole clip: parallax grows with the
-            # distance between viewpoints, so the first and last frames are
-            # worth more than any two adjacent ones.
-            wanted = np.linspace(0, total - 1, min(max_frames, total)).astype(int)
-            for idx in wanted:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
-                ok, frame = cap.read()
-                if ok and frame is not None:
-                    frames.append(frame)
-        else:
-            # Some WebM files report no frame count. Read sequentially instead
-            # of trusting the header.
-            step_guard = 0
-            while len(frames) < max_frames and step_guard < 600:
-                ok, frame = cap.read()
-                step_guard += 1
-                if not ok:
-                    break
-                if step_guard % 4 == 1:
-                    frames.append(frame)
-            info["frames_total"] = step_guard
+        stride = 1
+        seen = 0
+        # 1800 frames is about two minutes at 15fps - far beyond any clip this
+        # accepts, and a guard against a corrupt file that never reports EOF.
+        while seen < 1800:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            if seen % stride == 0:
+                frames.append(frame)
+                if len(frames) > max_frames * 2:
+                    frames = frames[::2]      # keep the span, halve the count
+                    stride *= 2
+            seen += 1
         cap.release()
+        info["decoded"] = seen
+
+        # Trim to the requested count, still spread across the whole clip.
+        if len(frames) > max_frames:
+            idx = np.linspace(0, len(frames) - 1, max_frames).astype(int)
+            frames = [frames[i] for i in idx]
         return frames, info
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
-        except OSError:
+        except Exception:
             pass
 
 
@@ -236,9 +256,26 @@ def analyse(data: bytes, detector) -> LivenessResult:
 
     frames, info = sample_frames(data)
     if len(frames) < 2:
+        # Three genuinely different faults used to share one message, which
+        # made the difference between "this box cannot decode the format" and
+        # "the clip really was empty" invisible from the outside. Say which.
+        if not info.get("opened"):
+            detail = ("the server could not open it - the video format may not "
+                      "be supported on this server")
+        elif not info.get("decoded"):
+            detail = ("the server opened it but decoded no frames - the codec "
+                      "is likely unsupported on this server")
+        else:
+            detail = "it was too short - record for a few seconds"
+        log.warning(
+            "Liveness could not use the clip: %s (bytes=%s opened=%s decoded=%s "
+            "reported_count=%s fps=%.2f)",
+            detail, info.get("bytes"), info.get("opened"), info.get("decoded"),
+            info.get("frames_total"), info.get("fps") or 0.0,
+        )
         return LivenessResult(
             "inconclusive",
-            "Could not read enough frames from this clip - is it a video?",
+            f"Could not read enough frames from this clip - {detail}.",
         )
 
     face = _largest_face(frames[0], detector)
