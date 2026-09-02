@@ -813,7 +813,8 @@ function initMarkPage() {
         shutterBtn.classList.add('recording');
         if (recHint) recHint.textContent = 'Recording - move the phone slightly';
 
-        const file = await currentCameraCapture.recordClip(2000, setRing);
+        // Attendance stays short on purpose - see the note by CLIP_MS_ENROL.
+        const file = await currentCameraCapture.recordClip(CLIP_MS_ATTENDANCE, setRing);
 
         shutterBtn.classList.remove('recording');
         recording = false;
@@ -976,10 +977,29 @@ function livenessBanner(l, message) {
                 : 'Could not confirm this was live';
     const frames = (l.frame_urls || []).map(u =>
         `<img src="${Charts.esc(u)}" alt="Frame from the clip">`).join('');
+
+    // What was actually measured, on a refusal. Without this a rejection is
+    // unfalsifiable - the coach cannot tell "you barely moved" from "the
+    // threshold is wrong", and neither can anyone debugging it later. The
+    // advice is chosen from the numbers rather than being generic.
+    let detail = '';
+    if (l.verdict === 'screen' || l.verdict === 'inconclusive') {
+        const bits = [];
+        if (typeof l.depth_score === 'number') bits.push(`depth ${l.depth_score}`);
+        if (typeof l.motion === 'number') bits.push(`motion ${l.motion}`);
+        if (l.tracked_points) bits.push(`${l.tracked_points} points`);
+        const advice = (l.motion !== undefined && l.motion < 0.02)
+            ? 'Almost nothing moved. Turn your head slowly left and right while recording.'
+            : 'Try again, turning your head further and more slowly through the whole clip.';
+        detail = `<div class="text-xs text-muted mt-1">${Charts.esc(advice)}</div>
+                  <div class="text-xs text-muted mt-1" style="font-family:var(--font-mono)">${
+                      Charts.esc(bits.join(' · '))}</div>`;
+    }
     return `
         <div class="liveness-banner ${kind}">
             <div class="liveness-title">${Charts.esc(title)}</div>
             <div class="text-sm">${Charts.esc(message || l.reason || '')}</div>
+            ${detail}
             ${frames ? `<div class="liveness-frames">${frames}</div>
                         <div class="text-xs text-muted mt-1">Frames the check was made from</div>` : ''}
         </div>`;
@@ -1681,7 +1701,23 @@ document.addEventListener('click', (e) => {
  *   ui.resume()                    return to a live camera for another attempt
  *   ui.close()                     finish and close the modal
  */
+// Registration records for longer than attendance, and deliberately so. The
+// depth signal comes from parallax, which accumulates with how much the head
+// actually moves - and two seconds of someone trying to hold still produces
+// very little of it. Measured: genuine small motion scored 0.0072-0.0097 over
+// two seconds, close enough to a flat photograph (0.0038-0.0055) to be refused.
+// Ten seconds gives an ordinary person time to shift naturally, which separates
+// the two without asking them to perform anything.
+//
+// Attendance stays short: it photographs a group across a room, where nobody is
+// going to hold a ten second pose, and the clip is a means to a register rather
+// than a permanent identity record.
+const CLIP_MS_ENROL = 10000;
+const CLIP_MS_ATTENDANCE = 2000;
+
 async function openClipCapture(opts) {
+    const clipMs = opts.clipMs || CLIP_MS_ENROL;
+    const clipSecs = Math.round(clipMs / 1000);
     openModal(opts.title || 'Record clip', `
         <div class="camera-container" id="clip-cap-camera">
             <video id="clip-cap-video" class="camera-video" autoplay playsinline muted></video>
@@ -1689,7 +1725,7 @@ async function openClipCapture(opts) {
             <div class="rec-hint" id="clip-cap-hint">Looking for a face...</div>
             <div class="camera-controls" style="justify-content:center">
                 <button type="button" class="camera-shutter" id="clip-cap-shutter"
-                        aria-label="Record two seconds" disabled>
+                        aria-label="Record a ${clipSecs} second clip" disabled>
                     <svg class="rec-ring" viewBox="0 0 44 44" aria-hidden="true">
                         <circle class="rec-ring-track" cx="22" cy="22" r="20"></circle>
                         <circle class="rec-ring-fill" id="clip-cap-ring" cx="22" cy="22" r="20"></circle>
@@ -1699,7 +1735,7 @@ async function openClipCapture(opts) {
             </div>
         </div>
         <div id="clip-cap-status" class="text-sm text-muted mt-3">
-            ${Charts.esc(opts.intro || "Hold the phone at arm's length. Two seconds is enough.")}
+            ${Charts.esc(opts.intro || `Hold the phone at arm's length and keep moving gently for ${clipSecs} seconds.`)}
         </div>`);
 
     const video   = document.getElementById('clip-cap-video');
@@ -1877,7 +1913,7 @@ async function openClipCapture(opts) {
             // framing and image quality gate the button.
             state.good = !!r.box && (r.ok || r.reason === 'pose');
             hint.textContent = state.good
-                ? (state.recording ? 'Recording - keep moving slightly' : 'Face found - tap to record')
+                ? (state.recording ? 'Recording - keep moving gently' : 'Face found - tap to record')
                 : (r.message || 'No face detected');
             if (!state.recording) shutter.disabled = !state.good;
             state.fails = 0;
@@ -1950,9 +1986,9 @@ async function openClipCapture(opts) {
         state.recording = true;
         shutter.disabled = true;
         shutter.classList.add('recording');
-        ui.status('Recording two seconds - move your head slightly.');
+        ui.status(`Recording ${clipSecs} seconds - keep moving your head gently the whole time.`);
 
-        const file = await cam.recordClip(2000, setRing);
+        const file = await cam.recordClip(clipMs, setRing);
 
         shutter.classList.remove('recording');
         setRing(0);
@@ -1969,7 +2005,9 @@ async function openClipCapture(opts) {
 async function openClipEnrol(studentId, studentName) {
     await openClipCapture({
         title: `Record clip - ${studentName}`,
-        intro: "Look at the camera and move your head a little while recording.",
+        intro: "Look at the camera and keep turning your head slowly - left, right, "
+             + "up and down - for the whole recording. The movement is what proves "
+             + "a real person is present.",
         onClip: async (file, ui) => {
             ui.status('Checking the clip and building templates...');
             const fd = new FormData();

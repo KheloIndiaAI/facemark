@@ -289,18 +289,41 @@ SCREEN_MIN_FACE_PX = 60          # below this the spectrum is too coarse to judg
 # way, so the clip is called inconclusive rather than live. Without that guard a
 # photograph held perfectly still would sail through.
 #
-# CALIBRATION STATUS: the flat side is calibrated against synthetic clips built
-# by warping a real photograph through known homographies, which is exactly what
-# a rigid photo does and so is faithful. The LIVE side needs real recordings
-# from the devices in use and is NOT yet measured - see
-# scripts/calibrate_liveness.py. Until it is, treat the threshold as provisional.
+# CALIBRATION STATUS, 2026-09-02: 0.010 was set from synthetic clips only - a
+# photo warped through known homographies (faithful for the flat side) and
+# deliberate large head turns stitched from guided-enrolment frames (which
+# overstated the live side: a big, deliberate pose swing is not what "look at
+# the camera and move your head a little" produces).
+#
+# That gap was real. A user reported genuine registrations being refused as
+# "screen". Reproduced by measuring REAL people - not synthetic warps - with
+# ordinary small motion, encoded through actual browser VP8 compression at a
+# realistic phone bitrate, the same pipeline production traffic uses:
+#
+#                                                  depth    motion
+#   flat photo, real VP8, 3 portraits x 2 bitrates 0.0038-0.0055   0.17-0.21
+#   real face, genuine small natural motion (n=2)  0.0072-0.0097   0.098-0.099
+#   real face, deliberate large pose change        0.17 -0.32      0.20-0.37
+#
+# 0.010 sat ABOVE both real small-motion measurements - it was rejecting
+# ordinary people by construction, not as an edge case. 0.006 sits between the
+# two clusters, biased toward the flat side on purpose: the margin above the
+# threshold to the nearest real measurement (0.0072, ~1.2x) is wider than the
+# margin below it to the nearest flat measurement (0.0055, ~1.09x), because a
+# genuine person refused attendance is a worse failure than a spoof let
+# through. The margin is still thin - two people, one capture pipeline - and
+# needs more real clips before it can be called settled.
+# See scripts/calibrate_liveness.py to re-measure on your own devices.
 LIVENESS_ENABLED = True
-LIVENESS_SAMPLE_FRAMES = 12      # evenly spaced; parallax grows with separation
+LIVENESS_SAMPLE_FRAMES = 18      # was 12; more samples for the longer clip below
 LIVENESS_MIN_POINTS = 25         # fewer trackable corners than this cannot judge
 LIVENESS_MIN_MOTION = 0.004      # median displacement in face-widths
-LIVENESS_MIN_DEPTH = 0.010       # provisional - see calibration status above
+LIVENESS_MIN_DEPTH = 0.006       # measured - see calibration note above
 LIVENESS_MAX_BYTES = 25 * 1024 * 1024
-LIVENESS_MAX_SECONDS = 10        # anything longer is not an attendance clip
+# Registration records for 10s (config below); attendance stays at 2s. The
+# ceiling needs headroom above the longer of the two, not to equal it exactly -
+# encoding jitter can make an intended 10s recording land a little over.
+LIVENESS_MAX_SECONDS = 14
 # Frames kept per clip. They are the evidence behind a refusal, so a coach
 # can see WHY a capture was rejected rather than being told only that it was.
 LIVENESS_STORE_FRAMES = 6
