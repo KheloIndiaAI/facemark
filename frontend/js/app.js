@@ -1380,7 +1380,7 @@ async function loadRecords(dateStr) {
                         <span class="font-medium">${Charts.esc(r.name)}</span>
                     </div>
                 </td>
-                <td class="font-mono" data-label="ID number">${Charts.esc(r.roll_no)}</td>
+                <td class="font-mono" data-label="NSRS ID">${Charts.esc(r.roll_no)}</td>
                 <td data-label="Role">${r.role === 'coach' ? '<span class="badge badge-blue">Coach</span>'
                                          : '<span class="badge badge-green">Athlete</span>'}</td>
                 <td class="font-mono" data-label="Confidence">${(r.confidence * 100).toFixed(1)}%</td>
@@ -1464,7 +1464,7 @@ async function openRegisterModal() {
             </div>
             <div class="form-row">
                 <div class="form-group">
-                    <label class="form-label" for="reg-roll">Roll number</label>
+                    <label class="form-label" for="reg-roll">NSRS ID</label>
                     <input type="text" id="reg-roll" class="form-input" required placeholder="e.g. WEAA039F11">
                 </div>
                 <div class="form-group">
@@ -1555,7 +1555,7 @@ async function regSubmit(file, ui) {
                   'success');
         if (state.currentRoute === '/students') renderStudents();
     } catch (err) {
-        // A duplicate roll number is a 409 the person can act on, so it must not
+        // A duplicate NSRS ID is a 409 the person can act on, so it must not
         // be swallowed into a generic failure.
         const msg = (err && err.message) ? err.message : 'Could not register. Try again.';
         ui.status(msg);

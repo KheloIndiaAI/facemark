@@ -289,7 +289,7 @@ async def register_student(
             sport=sport, phone=phone,
         )
     except database.IntegrityError:
-        raise HTTPException(409, f"Roll number '{roll_no}' is already registered")
+        raise HTTPException(409, f"NSRS ID '{roll_no}' is already registered")
         
     device_info = request.headers.get("user-agent")
     database.save_photo_record(
@@ -1245,7 +1245,7 @@ async def register_student_from_video(
             sport=sport, phone=phone,
         )
     except database.IntegrityError:
-        raise HTTPException(409, f"Roll number '{roll_no}' is already registered")
+        raise HTTPException(409, f"NSRS ID '{roll_no}' is already registered")
 
     database.save_photo_record(
         file_path=photo_name,
@@ -1578,7 +1578,7 @@ def export_attendance(
     # Headings are capitalised; the values are left exactly as stored. Names
     # keep their own casing because a register is a document about people, and
     # dates stay ISO so a spreadsheet still reads them as dates.
-    writer.writerow(["ID NUMBER", "NAME", "DATE", "CONFIDENCE", "MARKED AT"])
+    writer.writerow(["NSRS ID", "NAME", "DATE", "CONFIDENCE", "MARKED AT"])
     for r in records:
         writer.writerow([
             _csv_safe(r["roll_no"]),
