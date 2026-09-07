@@ -84,6 +84,10 @@
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
                     Centres
                 </a>
+                <a href="#/oversight" class="nav-item" data-route="/oversight" data-role-only="super_admin">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+                    Oversight
+                </a>
                 <a href="#/users" class="nav-item" data-route="/users" data-role-only="super_admin">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 11h-6"></path></svg>
                     Accounts
@@ -318,7 +322,16 @@
         </div>
     </template>
 
-    <template id="tpl-me">
+    <template id="tpl-oversight">
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+        <input type="date" id="ov-date" class="form-input" style="max-width:190px">
+        <span class="text-xs text-muted" id="ov-meta"></span>
+    </div>
+    <div id="ov-tiles" class="stats-grid" style="margin-bottom:16px"></div>
+    <div id="ov-lists"></div>
+</template>
+
+<template id="tpl-me">
     <div class="card" style="margin-bottom:16px">
         <div class="card-header"><div style="font-weight:600">Mark yourself present</div></div>
         <div class="card-body">

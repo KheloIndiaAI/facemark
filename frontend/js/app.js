@@ -458,6 +458,12 @@ function handleRoute() {
         root.appendChild(tpl);
         initMarkPage();
     }
+    else if (hash === '/oversight') {
+        title.textContent = 'Oversight';
+        const tpl = document.getElementById('tpl-oversight').content.cloneNode(true);
+        root.appendChild(tpl);
+        initOversightPage();
+    }
     else if (hash === '/me') {
         title.textContent = 'My attendance';
         const tpl = document.getElementById('tpl-me').content.cloneNode(true);
@@ -1940,6 +1946,94 @@ function meMark(coachId, coachName) {
                                                  { timeout: 6000, maximumAge: 60000 });
     } else {
         send(null);
+    }
+}
+
+
+/* ---------------------------------------------------------------------------
+   Oversight (super admin)
+
+   The question this answers is not "how many were present" - the dashboard
+   already does that. It is which registers are MISSING, and which of the ones
+   that exist should not be taken at face value. Those two lists come first
+   because they are the only ones that require somebody to do something.
+--------------------------------------------------------------------------- */
+
+async function initOversightPage() {
+    const picker = document.getElementById('ov-date');
+    if (picker) {
+        picker.value = new Date().toISOString().slice(0, 10);
+        picker.addEventListener('change', () => ovLoad(picker.value));
+    }
+    await ovLoad(picker ? picker.value : null);
+}
+
+function ovTile(label, value, tone) {
+    const colour = tone === 'bad' ? 'var(--red)'
+                 : tone === 'warn' ? 'var(--amber, #b45309)'
+                 : 'var(--text-primary)';
+    return `<div class="stat-card">
+        <div class="stat-header">${Charts.esc(label)}</div>
+        <div class="stat-value" style="color:${colour}">${value}</div>
+    </div>`;
+}
+
+function ovList(title, rows, render, empty) {
+    return `<div class="card" style="margin-bottom:16px">
+        <div class="card-header"><div style="font-weight:600">${Charts.esc(title)}
+            <span class="text-xs text-muted">(${rows.length})</span></div></div>
+        <div class="card-body">${
+            rows.length ? rows.map(render).join('')
+                        : `<div class="empty-state">${Charts.esc(empty)}</div>`}</div>
+    </div>`;
+}
+
+async function ovLoad(day) {
+    const tiles = document.getElementById('ov-tiles');
+    const lists = document.getElementById('ov-lists');
+    const meta = document.getElementById('ov-meta');
+    if (!tiles || !lists) return;
+    try {
+        const o = await api.get('/api/admin/overview' + (day ? `?date_str=${day}` : ''));
+        if (meta) meta.textContent = `for ${o.date}`;
+
+        tiles.innerHTML =
+              ovTile('Registers missing', o.missing_count, o.missing_count ? 'bad' : null)
+            + ovTile('Submitted', o.submitted_count)
+            + ovTile('Still draft', o.draft_count, o.draft_count ? 'warn' : null)
+            + ovTile('Unverified', o.unverified_count, o.unverified_count ? 'bad' : null)
+            + ovTile('Photo-only captures', o.photo_only_count, o.photo_only_count ? 'warn' : null)
+            + ovTile('Pending approvals', o.pending_approvals);
+
+        const row = (main, sub) => `
+            <div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border-subtle)">
+                <span style="font-weight:600">${Charts.esc(main)}</span>
+                <span class="text-xs text-muted">${Charts.esc(sub)}</span>
+            </div>`;
+
+        lists.innerHTML =
+              ovList('Coaches with no register today', o.missing,
+                     x => row(x.coach_name || `Coach ${x.coach_id}`, x.centre_name || ''),
+                     'Every coach with athletes has opened a register.')
+            + ovList('Submitted but NOT verified', o.unverified,
+                     x => row(x.coach_name || 'Centre sweep',
+                              `${x.date} \u00b7 score ${x.submitter_score ?? '-'} \u00b7 ${x.centre_name || ''}`),
+                     'Every submission was verified.')
+            + ovList('Still draft', o.drafts,
+                     x => row(x.coach_name || 'Centre sweep',
+                              `${x.rows || 0} row(s) \u00b7 expires ${(x.expires_at || '').replace('T', ' ')}`),
+                     'Nothing left unsubmitted.')
+            + ovList('Captures that could not be liveness-checked', o.photo_only,
+                     x => row(x.coach_name || 'Centre sweep',
+                              `${x.date} \u00b7 ${x.kind} \u00b7 ${x.liveness_verdict || 'not_checked'}`),
+                     'Every capture was a checked video.')
+            + ovList('Submitted today', o.submitted,
+                     x => row(x.coach_name || 'Centre sweep',
+                              `${(x.submitted_at || '').replace('T', ' ')} \u00b7 `
+                              + `${x.submitter_verified ? 'verified' : 'UNVERIFIED'}`),
+                     'No registers submitted yet today.');
+    } catch (err) {
+        lists.innerHTML = `<div class="empty-state">Could not load the overview.</div>`;
     }
 }
 

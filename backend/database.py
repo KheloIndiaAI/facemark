@@ -217,6 +217,16 @@ def init_db() -> None:
             "phone": "TEXT",
         })
         _ensure_columns(conn, "users", {
+            # Account lifecycle. The column arrives with the admin dashboard so
+            # it has a pending count to show; the gate that makes it MEAN
+            # anything (login refusal, gallery exclusion, approvals) is phase 5.
+            # Existing accounts take 'active', which is what they are.
+            "status": "TEXT NOT NULL DEFAULT 'active'",   # pending|active|suspended|rejected
+            "approved_by": "INTEGER REFERENCES users(id) ON DELETE SET NULL",
+            "approved_at": "TEXT",
+            "phone_verified_at": "TEXT",
+            "guardian_name": "TEXT",
+            "guardian_consent_at": "TEXT",
             # Login throttling state. On the users row rather than in a new
             # table because it is one-to-one with an account and needs to be
             # read on the same query that fetches the password hash.

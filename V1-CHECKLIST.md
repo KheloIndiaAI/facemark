@@ -17,7 +17,7 @@ the Notes column. "Compiles" is not evidence.
 | 1 | Coach mapping and the session flow | `[x]` **done** |
 | 2 | Submit with coach verification | `[x]` **done** |
 | 3 | Athlete accounts and self-marking | `[x]` **done** |
-| 4 | Super-admin oversight | `[ ]` |
+| 4 | Super-admin oversight | `[x]` **done** |
 | 5 | Pending accounts and approval | `[ ]` |
 | 6 | Self-signup with OTP | `[ ]` |
 
@@ -115,14 +115,14 @@ screen. Built **before** signup opens.
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 4.1 | `GET /api/admin/overview` | `[ ]` | |
-| 4.2 | Sessions submitted today | `[ ]` | |
-| 4.3 | Coaches who have **not** submitted | `[ ]` | |
-| 4.4 | Unverified submissions | `[ ]` | |
-| 4.5 | Photo-only captures | `[ ]` | |
-| 4.6 | Drafts about to expire | `[ ]` | |
-| 4.7 | Pending approvals count | `[ ]` | |
-| 4.8 | Admin dashboard screen | `[ ]` | |
+| 4.1 | `GET /api/admin/overview` | `[x]` | verify_phase4 13/13; super-admin only (coach 403) |
+| 4.2 | Sessions submitted today | `[x]` | lists both submitted registers |
+| 4.3 | Coaches who have **not** submitted | `[x]` | LEFT JOIN so a coach with no session appears |
+| 4.4 | Unverified submissions | `[x]` | unverified listed, verified not flagged |
+| 4.5 | Photo-only captures | `[x]` | photo/not_checked captures listed |
+| 4.6 | Drafts about to expire | `[x]` | expiring derived from expires_at |
+| 4.7 | Pending approvals count | `[x]` | pending count (users.status added early - see 5.1) |
+| 4.8 | Admin dashboard screen | `[x]` | driven in browser; 'Registers missing 1' tile |
 
 ---
 
@@ -133,7 +133,7 @@ capture, and approving it makes both true in one action.
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 5.1 | `users.status` + `approved_by/at`, guardian columns | `[ ]` | |
+| 5.1 | `users.status` + `approved_by/at`, guardian columns | `[x]` | columns added in phase 4 (4.7 needed the count); behaviour in phase 5 | |
 | 5.2 | Pending account **cannot sign in** | `[ ]` | |
 | 5.3 | **`load_gallery()` excludes pending** (one join) | `[ ]` | |
 | 5.4 | `GET /api/approvals` — the coach's own queue | `[ ]` | |

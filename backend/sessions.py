@@ -444,3 +444,95 @@ def already_self_marked(athlete_id: int, coach_id: int, day: str) -> bool:
             (int(athlete_id), int(coach_id), day),
         ).fetchone()
         return row is not None
+
+
+# =============================================================================
+# Oversight
+# =============================================================================
+
+def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -> dict:
+    """One screen's worth of "is today's attendance actually happening".
+
+    The question an administrator has is not "how many were present" - it is
+    which registers are MISSING, and which of the ones that exist should not be
+    trusted. So the expensive part of this is the coaches who have done
+    nothing, which no other view surfaces.
+    """
+    day = day or config.today_str()
+    cs = " AND s.centre_id = ?" if centre_id is not None else ""
+    cp = [centre_id] if centre_id is not None else []
+
+    with connect() as conn:
+        submitted = [dict(r) for r in conn.execute(
+            "SELECT s.*, c.name AS centre_name, p.name AS coach_name "
+            "FROM attendance_sessions s "
+            "LEFT JOIN centres c ON c.id = s.centre_id "
+            "LEFT JOIN students p ON p.id = s.coach_id "
+            "WHERE s.date = ? AND s.status = 'submitted'" + cs +
+            " ORDER BY s.submitted_at DESC", [day] + cp).fetchall()]
+
+        drafts = [dict(r) for r in conn.execute(
+            "SELECT s.*, c.name AS centre_name, p.name AS coach_name, "
+            "  (SELECT COUNT(*) FROM attendance a WHERE a.session_id = s.id) AS rows "
+            "FROM attendance_sessions s "
+            "LEFT JOIN centres c ON c.id = s.centre_id "
+            "LEFT JOIN students p ON p.id = s.coach_id "
+            "WHERE s.date = ? AND s.status = 'draft'" + cs +
+            " ORDER BY s.expires_at", [day] + cp).fetchall()]
+
+        # Coaches with no register at all today. LEFT JOIN, not NOT IN: a coach
+        # with no session produces a NULL row rather than being dropped, which
+        # is the entire list this view exists to show.
+        acs = " AND st.centre_id = ?" if centre_id is not None else ""
+        missing = [dict(r) for r in conn.execute(
+            "SELECT st.id AS coach_id, st.name AS coach_name, st.centre_id, "
+            "       c.name AS centre_name "
+            "FROM students st "
+            "LEFT JOIN centres c ON c.id = st.centre_id "
+            "LEFT JOIN attendance_sessions s "
+            "       ON s.coach_id = st.id AND s.date = ? "
+            "WHERE st.role = 'coach' AND s.id IS NULL"
+            "  AND EXISTS (SELECT 1 FROM coach_athletes ca WHERE ca.coach_id = st.id)"
+            + acs + " ORDER BY st.name", [day] + cp).fetchall()]
+
+        unverified = [dict(r) for r in conn.execute(
+            "SELECT s.*, c.name AS centre_name, p.name AS coach_name "
+            "FROM attendance_sessions s "
+            "LEFT JOIN centres c ON c.id = s.centre_id "
+            "LEFT JOIN students p ON p.id = s.coach_id "
+            "WHERE s.status = 'submitted' AND COALESCE(s.submitter_verified, 0) = 0"
+            + cs + " ORDER BY s.submitted_at DESC LIMIT 50", cp).fetchall()]
+
+        # A capture that could not be checked at all. Not an accusation - it is
+        # the one thing the liveness guard cannot speak to, so it is listed.
+        photo_only = [dict(r) for r in conn.execute(
+            "SELECT cap.*, s.date, s.centre_id, p.name AS coach_name "
+            "FROM session_captures cap "
+            "JOIN attendance_sessions s ON s.id = cap.session_id "
+            "LEFT JOIN students p ON p.id = s.coach_id "
+            "WHERE cap.kind = 'photo' OR cap.liveness_verdict = 'not_checked'"
+            + cs + " ORDER BY cap.id DESC LIMIT 50", cp).fetchall()]
+
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE status = 'pending'"
+        ).fetchone()[0]
+
+    now = config.local_now().replace(tzinfo=None).isoformat(timespec="seconds")
+    expiring = [d for d in drafts if (d.get("expires_at") or "") <= now]
+
+    return {
+        "date": day,
+        "submitted": submitted,
+        "submitted_count": len(submitted),
+        "drafts": drafts,
+        "draft_count": len(drafts),
+        "expiring": expiring,
+        "expiring_count": len(expiring),
+        "missing": missing,
+        "missing_count": len(missing),
+        "unverified": unverified,
+        "unverified_count": len(unverified),
+        "photo_only": photo_only,
+        "photo_only_count": len(photo_only),
+        "pending_approvals": pending,
+    }

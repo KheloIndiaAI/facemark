@@ -1880,6 +1880,17 @@ async def mark_myself(
     }
 
 
+
+@app.get("/api/admin/overview")
+def admin_overview(
+    date_str: Optional[str] = None,
+    centre_id: Optional[int] = None,
+    user: dict = Depends(auth.require_super_admin),
+):
+    """Which registers are missing today, and which should not be trusted."""
+    return {"ok": True, **sessions_mod.admin_overview(date_str, centre_id)}
+
+
 @app.get("/api/attendance/suggest")
 def suggest_for_face(
     face_url: str,
