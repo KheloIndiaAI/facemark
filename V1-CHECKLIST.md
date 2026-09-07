@@ -18,7 +18,7 @@ the Notes column. "Compiles" is not evidence.
 | 2 | Submit with coach verification | `[x]` **done** |
 | 3 | Athlete accounts and self-marking | `[x]` **done** |
 | 4 | Super-admin oversight | `[x]` **done** |
-| 5 | Pending accounts and approval | `[ ]` |
+| 5 | Pending accounts and approval | `[x]` **done** |
 | 6 | Self-signup with OTP | `[ ]` |
 
 ---
@@ -134,13 +134,13 @@ capture, and approving it makes both true in one action.
 | # | Item | Status | Notes |
 |---|---|---|---|
 | 5.1 | `users.status` + `approved_by/at`, guardian columns | `[x]` | columns added in phase 4 (4.7 needed the count); behaviour in phase 5 | |
-| 5.2 | Pending account **cannot sign in** | `[ ]` | |
-| 5.3 | **`load_gallery()` excludes pending** (one join) | `[ ]` | |
-| 5.4 | `GET /api/approvals` — the coach's own queue | `[ ]` | |
-| 5.5 | `POST /api/approvals/{user_id}` approve / reject | `[ ]` | |
-| 5.6 | Guardian name + consent timestamp for minors | `[ ]` | |
-| 5.7 | Approval creates `coach_athletes` link `is_primary=1` | `[ ]` | |
-| 5.8 | Approval puts templates into the gallery in the same action | `[ ]` | |
+| 5.2 | Pending account **cannot sign in** | `[x]` | 403 with the real reason, checked before the password hash |
+| 5.3 | **`load_gallery()` excludes pending** (one join) | `[x]` | NOT EXISTS join; pending person NOT drafted from a real capture |
+| 5.4 | `GET /api/approvals` — the coach's own queue | `[x]` | queue scoped by chosen_coach_id; another coach sees nothing |
+| 5.5 | `POST /api/approvals/{user_id}` approve / reject | `[x]` | verify_phase5 21/21; 409 on a second decision |
+| 5.6 | Guardian name + consent timestamp for minors | `[x]` | guardian name + consent timestamp stored |
+| 5.7 | Approval creates `coach_athletes` link `is_primary=1` | `[x]` | link created is_primary=1 in the same transaction |
+| 5.8 | Approval puts templates into the gallery in the same action | `[x]` | gallery is a query, so approval un-hides atomically |
 
 ---
 
@@ -175,7 +175,7 @@ Several of these fail **silently**. Each needs its own check.
 | C4 | CSV export filters `status='confirmed'` | `[x]` | verify_phase1 27/27 (CSV 0 rows) |
 | C5 | Dashboard tiles filter `status='confirmed'` | `[x]` | verify_phase1 27/27 |
 | C6 | `stats().present_today` → `COUNT(DISTINCT student_id)` | `[x]` | COUNT(DISTINCT student_id) |
-| C7 | `load_gallery()` excludes pending accounts | `[ ]` | Phase 5 |
+| C7 | `load_gallery()` excludes pending accounts | `[x]` | Phase | verify_phase5 21/21 |
 | C8 | `users.role` CHECK widened; every `role ==` reviewed | `[x]` | roleLabel/roleShort; nav gated; landing route fixed |
 | C9 | Unique constraint swapped | `[x]` | verify_p1_schema 20/20 |
 | C10 | Every read handles `session_id IS NULL` (pre-migration rows) | `[x]` | legacy rows still read; suites 16/16 12/12 23/23 |

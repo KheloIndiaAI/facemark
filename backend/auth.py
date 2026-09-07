@@ -151,6 +151,21 @@ def delete_user(user_id: int) -> None:
 
 # --- sessions ----------------------------------------------------------------
 
+class AccountNotActive(Exception):
+    """Pending, suspended or rejected. NOT a throttle.
+
+    Separate from LoginBlocked because the two need different answers: a
+    throttled caller should wait and retry, and this caller should not - no
+    amount of waiting approves an account. Reusing 429 here told clients to
+    back off and try again forever.
+    """
+
+    def __init__(self, message: str, status: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
 class LoginBlocked(Exception):
     """Raised instead of returning None, so the caller can say WHY."""
 
@@ -229,6 +244,17 @@ def login(username: str, password: str, ip: str = "") -> Optional[dict]:
                 int((until - datetime.now()).total_seconds()),
             )
 
+    # Checked BEFORE the password comparison so a pending account cannot be
+    # probed for a valid password, and so the 600k-round hash is not spent on
+    # an account that cannot sign in either way.
+    status = (user.get("status") or "active")
+    if status != "active":
+        raise AccountNotActive(
+            "This account is waiting for a coach to approve it."
+            if status == "pending" else
+            "This account is not active. Ask an administrator.",
+            status,
+        )
     if not verify_password(password, user["password_hash"]):
         _note_failure(int(user["id"]), int(user.get("failed_attempts") or 0))
         return None

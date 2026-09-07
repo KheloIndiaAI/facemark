@@ -36,6 +36,9 @@ def login(request: Request, response: Response,
 
     try:
         result = auth.login(username, password, ip=ip)
+    except auth.AccountNotActive as inactive:
+        # 403, not 429: waiting changes nothing, so no Retry-After.
+        raise HTTPException(403, inactive.message)
     except auth.LoginBlocked as blocked:
         # 429, not 401. A throttled caller is not being told their password is
         # wrong - and an operator reading the logs needs the two distinguished.

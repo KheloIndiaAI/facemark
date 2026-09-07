@@ -1891,6 +1891,49 @@ def admin_overview(
     return {"ok": True, **sessions_mod.admin_overview(date_str, centre_id)}
 
 
+
+@app.get("/api/approvals")
+def list_approvals(user: dict = Depends(auth.current_user)):
+    """Accounts waiting on THIS coach. A super admin sees every queue."""
+    if user["role"] == "super_admin":
+        return {"ok": True, "pending": sessions_mod.pending_for_coach(None)}
+    who = auth.coach_student_id(user)
+    return {"ok": True, "pending": sessions_mod.pending_for_coach(who)}
+
+
+@app.post("/api/approvals/{user_id}")
+def decide_approval(
+    user_id: int,
+    approve: bool = Form(...),
+    guardian_name: Optional[str] = Form(None),
+    guardian_consent: bool = Form(False),
+    user: dict = Depends(auth.current_user),
+):
+    """Approve or reject. Approval activates, links and un-hides in one step."""
+    if user["role"] != "super_admin":
+        # Ownership is checked against chosen_coach_id, NOT against the pending
+        # queue. Once an account is decided it leaves that queue, so a queue
+        # check answered "that account did not choose you" for an account that
+        # had chosen exactly this coach - the wrong reason, and a confusing one.
+        # Resolving ownership first lets an already-decided account fall
+        # through to the accurate 409 below.
+        who = auth.coach_student_id(user)
+        with pgdb.connect() as conn:
+            row = conn.execute(
+                "SELECT chosen_coach_id FROM users WHERE id = ?", (int(user_id),)
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, "No such account")
+        if row["chosen_coach_id"] is None or int(row["chosen_coach_id"]) != who:
+            raise HTTPException(403, "That account did not choose you")
+    try:
+        out = sessions_mod.decide(user_id, approve, int(user["id"]),
+                                  guardian_name, guardian_consent)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True, **out}
+
+
 @app.get("/api/attendance/suggest")
 def suggest_for_face(
     face_url: str,

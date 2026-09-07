@@ -348,6 +348,19 @@
 </template>
 
 <template id="tpl-register">
+    <!-- Shown only when somebody is waiting. A permanently-empty card trains
+         people to ignore the space it occupies. -->
+    <div class="card" id="reg-approvals-card" style="display:none;margin-bottom:16px">
+        <div class="card-header"><div style="font-weight:600">Waiting for your approval
+            <span class="text-xs text-muted" id="reg-approvals-count"></span></div></div>
+        <div class="card-body">
+            <div class="text-xs text-muted" style="margin-bottom:8px">
+                Until you approve them they cannot sign in, and their face will not
+                be recognised in any capture.
+            </div>
+            <div id="reg-approvals"></div>
+        </div>
+    </div>
     <div class="card" style="margin-bottom:16px">
         <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
             <div>

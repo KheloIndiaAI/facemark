@@ -227,6 +227,11 @@ def init_db() -> None:
             "phone_verified_at": "TEXT",
             "guardian_name": "TEXT",
             "guardian_consent_at": "TEXT",
+            # Who this person asked to be approved by. The plan creates the
+            # coach_athletes link on approval, so until then the choice has
+            # nowhere else to live - and without it there is no way to build
+            # "the chosen coach's queue".
+            "chosen_coach_id": "INTEGER REFERENCES students(id) ON DELETE SET NULL",
             # Login throttling state. On the users row rather than in a new
             # table because it is one-to-one with an account and needs to be
             # read on the same query that fetches the password hash.
@@ -572,11 +577,26 @@ def load_gallery(centre_id: Optional[int] = None) -> Dict[str, Tuple[np.ndarray,
     pool means fewer chances for a look-alike from another centre to outscore
     the right person.
     """
+    # Templates belonging to a PENDING account never enter the gallery.
+    #
+    # This is the join that stops an unapproved stranger being marked present.
+    # The face is captured at signup - deferring that means a second visit and
+    # half the people never come back - but it must not be matchable until a
+    # coach has approved the person. Forgetting this one clause is the whole
+    # difference between "signup is open" and "anyone can enrol themselves into
+    # the register".
+    #
+    # NOT EXISTS rather than a join on users: most enrolled people have no
+    # account at all, and an inner join would silently drop every one of them.
+    pending = (" AND NOT EXISTS (SELECT 1 FROM users u "
+               "WHERE u.student_id = t.student_id AND u.status = 'pending')")
     q = "SELECT t.id, t.student_id, t.model, t.vector FROM templates t"
     p: list = []
     if centre_id is not None:
-        q += " JOIN students s ON s.id = t.student_id WHERE s.centre_id = ?"
+        q += " JOIN students s ON s.id = t.student_id WHERE s.centre_id = ?" + pending
         p.append(centre_id)
+    else:
+        q += " WHERE 1=1" + pending
     with connect() as conn:
         rows = conn.execute(q, p).fetchall()
     gallery: Dict[str, list] = {}

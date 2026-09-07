@@ -536,3 +536,77 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
         "photo_only_count": len(photo_only),
         "pending_approvals": pending,
     }
+
+
+# =============================================================================
+# Approvals
+# =============================================================================
+
+def pending_for_coach(coach_student_id: Optional[int]) -> List[dict]:
+    """The approval queue. None means every pending account (super admin)."""
+    q = ("SELECT u.id AS user_id, u.username, u.full_name, u.email, u.phone, "
+         "       u.status, u.created_at, u.student_id, u.chosen_coach_id, "
+         "       u.phone_verified_at, u.guardian_name, "
+         "       s.name AS person_name, s.roll_no, s.photo_path, s.centre_id, "
+         "       c.name AS centre_name, "
+         "       (SELECT COUNT(*) FROM templates t WHERE t.student_id = u.student_id) AS templates "
+         "FROM users u "
+         "LEFT JOIN students s ON s.id = u.student_id "
+         "LEFT JOIN centres c ON c.id = u.centre_id "
+         "WHERE u.status = 'pending'")
+    p: list = []
+    if coach_student_id is not None:
+        q += " AND u.chosen_coach_id = ?"
+        p.append(int(coach_student_id))
+    q += " ORDER BY u.created_at"
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(q, p).fetchall()]
+
+
+def decide(user_id: int, approve: bool, approver_user_id: int,
+           guardian_name: Optional[str] = None,
+           guardian_consent: bool = False) -> dict:
+    """Approve or reject a pending account.
+
+    On approval three things happen together, in one transaction: the account
+    becomes active, the coach_athletes link is created, and - because the
+    gallery excludes pending accounts by query rather than by copying rows -
+    their templates become matchable. "Approving makes both true in one action"
+    is therefore a property of the transaction, not of remembering to do a
+    second step.
+    """
+    now = config.now_stamp()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, status, student_id, chosen_coach_id FROM users WHERE id = ?",
+            (int(user_id),),
+        ).fetchone()
+        if row is None:
+            raise ValueError("No such account")
+        if row["status"] != "pending":
+            raise ValueError("That account is not pending")
+
+        if not approve:
+            conn.execute(
+                "UPDATE users SET status = 'rejected', approved_by = ?, approved_at = ? "
+                "WHERE id = ?", (int(approver_user_id), now, int(user_id)),
+            )
+            return {"status": "rejected", "linked": False}
+
+        conn.execute(
+            "UPDATE users SET status = 'active', approved_by = ?, approved_at = ?, "
+            "guardian_name = COALESCE(?, guardian_name), "
+            "guardian_consent_at = CASE WHEN ? THEN ? ELSE guardian_consent_at END "
+            "WHERE id = ?",
+            (int(approver_user_id), now, guardian_name,
+             bool(guardian_consent), now, int(user_id)),
+        )
+        linked = False
+        if row["student_id"] and row["chosen_coach_id"]:
+            cur = conn.execute(
+                "INSERT INTO coach_athletes (coach_id, athlete_id, is_primary, created_at) "
+                "VALUES (?,?,1,?) ON CONFLICT (coach_id, athlete_id) DO NOTHING",
+                (int(row["chosen_coach_id"]), int(row["student_id"]), now),
+            )
+            linked = cur.rowcount > 0
+    return {"status": "active", "linked": linked}

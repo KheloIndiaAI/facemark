@@ -1645,7 +1645,82 @@ async function initRegisterPage() {
             regToggle(parseInt(el.dataset.toggleStudent, 10), el.dataset.present !== 'true');
         });
     }
-    await regOpen();
+    const appr = document.getElementById('reg-approvals');
+    if (appr) {
+        appr.addEventListener('click', (e) => {
+            const el = e.target.closest('[data-approve-user]');
+            if (el) regDecide(parseInt(el.dataset.approveUser, 10),
+                              el.dataset.decision === 'approve',
+                              el.dataset.personName || '');
+        });
+    }
+    await Promise.all([regOpen(), regLoadApprovals()]);
+}
+
+async function regLoadApprovals() {
+    const card = document.getElementById('reg-approvals-card');
+    const host = document.getElementById('reg-approvals');
+    const count = document.getElementById('reg-approvals-count');
+    if (!card || !host) return;
+    try {
+        const r = await api.get('/api/approvals');
+        const list = r.pending || [];
+        card.style.display = list.length ? '' : 'none';
+        if (count) count.textContent = list.length ? `(${list.length})` : '';
+        host.innerHTML = list.map(p => {
+            const name = p.person_name || p.full_name || p.username;
+            const photo = p.photo_path
+                ? `<img src="/api/photos/${encodeURIComponent(String(p.photo_path).split(/[\\/]/).pop())}"
+                        alt="" style="width:44px;height:44px;border-radius:8px;object-fit:cover">`
+                : '<div style="width:44px;height:44px;border-radius:8px;background:var(--bg-subtle)"></div>';
+            return `
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border-subtle)">
+                ${photo}
+                <div style="flex:1;min-width:0">
+                    <div style="font-weight:600">${Charts.esc(name)}</div>
+                    <div class="text-xs text-muted font-mono">${Charts.esc(p.roll_no || '')}</div>
+                    <div class="text-xs text-muted">${p.templates || 0} face template(s)
+                        ${p.phone_verified_at ? '\u00b7 phone verified' : ''}</div>
+                </div>
+                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
+                        data-approve-user="${p.user_id}" data-decision="reject"
+                        data-person-name="${Charts.esc(name)}">Reject</button>
+                <button type="button" class="btn btn-primary" style="height:30px;font-size:12px;padding:0 10px"
+                        data-approve-user="${p.user_id}" data-decision="approve"
+                        data-person-name="${Charts.esc(name)}">Approve</button>
+            </div>`;
+        }).join('');
+    } catch (err) {
+        card.style.display = 'none';
+    }
+}
+
+async function regDecide(userId, approve, name) {
+    // Guardian consent is asked for on approval, not at signup: the coach is
+    // the person who knows whether this athlete is a minor.
+    let guardian = null;
+    if (approve) {
+        guardian = window.prompt(
+            `Approving ${name}.\n\nIf this athlete is under 18, enter the guardian's `
+            + `name to record consent. Leave blank if they are an adult.`, '');
+        if (guardian === null) return;          // cancelled
+    }
+    try {
+        const fd = new FormData();
+        fd.append('approve', approve ? 'true' : 'false');
+        if (guardian) {
+            fd.append('guardian_name', guardian);
+            fd.append('guardian_consent', 'true');
+        }
+        await api.postForm(`/api/approvals/${userId}`, fd);
+        showToast(approve ? 'Approved' : 'Rejected',
+                  approve ? `${name} can now sign in and be recognised.`
+                          : `${name} was rejected.`,
+                  approve ? 'success' : 'info');
+        await Promise.all([regLoadApprovals(), regLoad()]);
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
 }
 
 async function regOpen() {
