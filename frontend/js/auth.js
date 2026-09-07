@@ -176,7 +176,32 @@ async function submitPasswordChange() {
    they are already enrolled will turn up and be marked absent.
 --------------------------------------------------------------------------- */
 
-const suState = { token: null, centre: null };
+const suState = { token: null, centre: null, role: 'athlete' };
+
+// One panel, two applications. The steps are the same except for the coach
+// picker, which only an athlete has - a coach is approved by a super admin, so
+// there is nobody for them to choose.
+const SU_COPY = {
+    athlete: {
+        title: 'Create your account',
+        sub: 'Your coach approves it before it works.',
+        note: 'Registering as an <strong>athlete</strong>. You will pick your coach '
+            + 'next, and they approve you before you can be marked present.',
+        doneTitle: 'Sent to your coach.',
+        doneBody: 'You can sign in once they approve you. Until then you will not '
+            + 'be recognised in a capture, so keep signing the register the usual way.',
+    },
+    coach: {
+        title: 'Register as a coach',
+        sub: 'A super admin approves coach accounts.',
+        note: 'Registering as a <strong>coach</strong>. A coach account can see a '
+            + 'whole centre, so a super admin checks it - not another coach. '
+            + 'This is not instant.',
+        doneTitle: 'Sent to a super admin.',
+        doneBody: 'Coach access is approved centrally, so this is not instant. '
+            + 'You will be able to sign in once it is approved.',
+    },
+};
 
 function suMsg(text, bad = true) {
     const el = document.getElementById('su-msg');
@@ -191,7 +216,16 @@ function suShow(step) {
         });
 }
 
-async function openSignup() {
+async function openSignup(role = 'athlete') {
+    suState.role = (role === 'coach') ? 'coach' : 'athlete';
+    suState.token = null;
+    const copy = SU_COPY[suState.role];
+    const set = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
+    set('su-title', copy.title);
+    set('su-sub', copy.sub);
+    set('su-role-note', copy.note);
+    set('su-done-title', copy.doneTitle);
+    set('su-done-body', copy.doneBody);
     document.getElementById('login-gate')?.classList.add('hidden');
     document.getElementById('signup-gate')?.classList.remove('hidden');
     suShow(0); suMsg('');
@@ -219,12 +253,18 @@ async function suStart() {
     fd.append('phone', document.getElementById('su-phone').value.trim());
     suState.centre = document.getElementById('su-centre').value;
     fd.append('centre_id', suState.centre);
+    fd.append('role', suState.role);
     suMsg('');
     try {
         const res = await fetch('/api/signup', { method: 'POST', body: fd });
         const j = await res.json();
         if (!res.ok) return suMsg(j.detail || 'Could not create the account');
         suState.token = j.token;
+        // The SERVER says whether a coach has to be chosen, rather than the
+        // browser inferring it from the role it just sent. The two can only
+        // disagree if the server rejected or altered the role, and in that case
+        // the server is right.
+        if (j.needs_coach === false) return suSendCode();
         await suLoadCoaches();
         suShow(1);
     } catch { suMsg('Could not reach the server'); }
@@ -312,7 +352,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const on = (id, fn) => document.getElementById(id)?.addEventListener('click', (e) => {
         e.preventDefault(); fn();
     });
-    on('signup-open', openSignup);
+    on('signup-open', () => openSignup('athlete'));
+    on('signup-open-coach', () => openSignup('coach'));
     on('signup-cancel', closeSignup);
     on('su-next-1', suStart);
     on('su-verify', suVerify);

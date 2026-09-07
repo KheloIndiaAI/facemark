@@ -1651,7 +1651,8 @@ async function initRegisterPage() {
             const el = e.target.closest('[data-approve-user]');
             if (el) regDecide(parseInt(el.dataset.approveUser, 10),
                               el.dataset.decision === 'approve',
-                              el.dataset.personName || '');
+                              el.dataset.personName || '',
+                              el.dataset.personRole || 'athlete');
         });
     }
     await Promise.all([regOpen(), regLoadApprovals()]);
@@ -1673,20 +1674,32 @@ async function regLoadApprovals() {
                 ? `<img src="/api/photos/${encodeURIComponent(String(p.photo_path).split(/[\\/]/).pop())}"
                         alt="" style="width:44px;height:44px;border-radius:8px;object-fit:cover">`
                 : '<div style="width:44px;height:44px;border-radius:8px;background:var(--bg-subtle)"></div>';
+            // A coach application is called out rather than left looking like
+            // every other row. Only a super admin ever sees one here, and
+            // approving it hands over a whole centre - so it should not be
+            // clearable in the same rhythm as a queue of athletes.
+            const flag = p.role === 'coach'
+                ? `<div class="text-xs" style="color:#b45309;font-weight:600">
+                       Asking for COACH access to ${Charts.esc(p.centre_name || 'a centre')}</div>`
+                : '';
+            const role = Charts.esc(p.role || 'athlete');
             return `
             <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border-subtle)">
                 ${photo}
                 <div style="flex:1;min-width:0">
                     <div style="font-weight:600">${Charts.esc(name)}</div>
+                    ${flag}
                     <div class="text-xs text-muted font-mono">${Charts.esc(p.roll_no || '')}</div>
                     <div class="text-xs text-muted">${p.templates || 0} face template(s)
                         ${p.phone_verified_at ? '\u00b7 phone verified' : ''}</div>
                 </div>
                 <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
                         data-approve-user="${p.user_id}" data-decision="reject"
+                        data-person-role="${role}"
                         data-person-name="${Charts.esc(name)}">Reject</button>
                 <button type="button" class="btn btn-primary" style="height:30px;font-size:12px;padding:0 10px"
                         data-approve-user="${p.user_id}" data-decision="approve"
+                        data-person-role="${role}"
                         data-person-name="${Charts.esc(name)}">Approve</button>
             </div>`;
         }).join('');
@@ -1695,11 +1708,20 @@ async function regLoadApprovals() {
     }
 }
 
-async function regDecide(userId, approve, name) {
-    // Guardian consent is asked for on approval, not at signup: the coach is
-    // the person who knows whether this athlete is a minor.
+async function regDecide(userId, approve, name, role = 'athlete') {
     let guardian = null;
-    if (approve) {
+    if (approve && role === 'coach') {
+        // Typed, not clicked. Approving a coach grants a whole centre, and it
+        // arrives in a list where the muscle memory is to tap Approve - so the
+        // confirmation has to break that rhythm rather than join it.
+        const typed = window.prompt(
+            `Approving ${name} as a COACH.\n\nThey will see every athlete at `
+            + `their centre, take attendance, and approve athletes themselves.\n\n`
+            + `Type APPROVE to confirm.`, '');
+        if ((typed || '').trim().toUpperCase() !== 'APPROVE') return;
+    } else if (approve) {
+        // Guardian consent is asked for on approval, not at signup: the coach is
+        // the person who knows whether this athlete is a minor.
         guardian = window.prompt(
             `Approving ${name}.\n\nIf this athlete is under 18, enter the guardian's `
             + `name to record consent. Leave blank if they are an adult.`, '');
@@ -1714,7 +1736,9 @@ async function regDecide(userId, approve, name) {
         }
         await api.postForm(`/api/approvals/${userId}`, fd);
         showToast(approve ? 'Approved' : 'Rejected',
-                  approve ? `${name} can now sign in and be recognised.`
+                  approve ? (role === 'coach'
+                             ? `${name} can now sign in as a coach at their centre.`
+                             : `${name} can now sign in and be recognised.`)
                           : `${name} was rejected.`,
                   approve ? 'success' : 'info');
         await Promise.all([regLoadApprovals(), regLoad()]);

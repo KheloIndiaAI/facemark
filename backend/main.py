@@ -1921,10 +1921,19 @@ def decide_approval(
         who = auth.coach_student_id(user)
         with pgdb.connect() as conn:
             row = conn.execute(
-                "SELECT chosen_coach_id FROM users WHERE id = ?", (int(user_id),)
+                "SELECT role, chosen_coach_id FROM users WHERE id = ?", (int(user_id),)
             ).fetchone()
         if row is None:
             raise HTTPException(404, "No such account")
+        # Checked before ownership, and stated as its own rule rather than left
+        # to fall out of chosen_coach_id being NULL. Granting coach access is
+        # the largest privilege escalation this app has - it hands over a whole
+        # centre - so the one role allowed to grant it is named here explicitly
+        # and does not depend on another column happening to be empty.
+        if row["role"] != "athlete":
+            raise HTTPException(
+                403, "Only a super admin can approve an account that is asking "
+                     "for coach access")
         if row["chosen_coach_id"] is None or int(row["chosen_coach_id"]) != who:
             raise HTTPException(403, "That account did not choose you")
     try:
@@ -1960,10 +1969,18 @@ def signup_start(
     full_name: str = Form(...),
     phone: str = Form(...),
     centre_id: int = Form(...),
+    role: str = Form("athlete"),
 ):
+    """Start an athlete OR a coach application.
+
+    Defaults to athlete so an older client that does not send the field keeps
+    working, and signup.start whitelists the value - the role is the one thing
+    an unauthenticated caller must not be able to choose freely.
+    """
     try:
         return {"ok": True, **signup_mod.start(
-            username, password, full_name, phone, centre_id, _client_ip(request))}
+            username, password, full_name, phone, centre_id,
+            _client_ip(request), role)}
     except PermissionError as e:
         raise HTTPException(429, str(e))
     except ValueError as e:
@@ -2024,6 +2041,7 @@ async def signup_face(
     """
     try:
         student_id = signup_mod.student_for(token)
+        applicant_role = signup_mod.role_for(token)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -2064,7 +2082,10 @@ async def signup_face(
 
     return {"ok": True, "templates": added,
             "liveness": result.to_dict(),
-            "message": "Sent to your coach for approval."}
+            "role": applicant_role,
+            "message": ("Sent to a super admin for approval."
+                        if applicant_role == "coach"
+                        else "Sent to your coach for approval.")}
 
 
 

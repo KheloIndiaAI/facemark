@@ -163,6 +163,27 @@ coach approves them. **Only after Phase 5.**
 
 ---
 
+## Phase 7 — Coach self-registration
+
+**Done when:** a coach can register themselves the way an athlete can, and the
+account is inert until a **super admin** — never another coach — approves it.
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 7.1 | `POST /api/signup` accepts `role=coach` | `[x]` | whitelisted to athlete\|coach; super_admin/admin refused 400 |
+| 7.2 | Coach application skips the coach picker | `[x]` | server returns `needs_coach:false`; browser goes step 1 -> OTP |
+| 7.3 | OTP and face capture identical to the athlete path | `[x]` | same endpoints, same liveness gate; 7 templates stored |
+| 7.4 | Pending coach cannot sign in, face not in gallery | `[x]` | login 403; absent from `load_gallery()` |
+| 7.5 | Pending coach not offered in the athlete coach picker | `[x]` | `coaches_at()` excludes non-active; posting the id directly refused |
+| 7.6 | A coach application never enters a coach's queue | `[x]` | `pending_for_coach` filters `role='athlete'` too |
+| 7.7 | A coach cannot approve one by posting the id | `[x]` | 403 "Only a super admin can approve..."; still pending after |
+| 7.8 | Super admin approval activates it and links nothing | `[x]` | `linked:false`; nobody's athlete; can open own register |
+| 7.9 | Approving a coach needs a typed confirmation | `[x]` | must type APPROVE; 'yes' sent no request (verified in browser) |
+
+Verified by `verify_coach_signup.py` — 41/41, athlete path re-run 26/26.
+
+---
+
 ## Cross-cutting — "what breaks" (plan §6)
 
 Several of these fail **silently**. Each needs its own check.

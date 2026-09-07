@@ -99,11 +99,33 @@ def resolve_signup(token: str) -> dict:
 # The steps
 # =============================================================================
 
+SELF_SIGNUP_ROLES = ("athlete", "coach")
+
+
+def approver_for(role: str) -> str:
+    """Who decides this application.
+
+    An athlete is approved by the coach they chose. A coach cannot be, because
+    there is nobody at the centre above them to ask - and a coach approving
+    coaches would let the first person to register at a new centre wave in
+    everyone who followed. So a coach goes to a super admin, and the two never
+    appear in each other's queue.
+    """
+    return "super_admin" if role == "coach" else "coach"
+
+
 def start(username: str, password: str, full_name: str, phone: str,
-          centre_id: int, ip: str = "") -> dict:
+          centre_id: int, ip: str = "", role: str = "athlete") -> dict:
     """Create the pending account. Returns {token, user_id}."""
     if _throttled(f"signup:{ip}", SIGNUP_PER_IP_PER_HOUR, 3600):
         raise PermissionError("Too many signups from this connection. Try later.")
+
+    # Whitelisted, not merely "not super_admin". This value arrives on an
+    # unauthenticated request, and the one thing it must never be able to say
+    # is which role it becomes beyond these two.
+    role = (role or "athlete").strip().lower()
+    if role not in SELF_SIGNUP_ROLES:
+        raise ValueError("Choose whether you are registering as an athlete or a coach")
 
     username = (username or "").strip().lower()
     full_name = (full_name or "").strip()
@@ -116,29 +138,55 @@ def start(username: str, password: str, full_name: str, phone: str,
         raise ValueError("A valid phone number is required")
     if auth.get_user_by_username(username):
         raise ValueError("That username is taken")
+    with connect() as conn:
+        if conn.execute("SELECT 1 FROM centres WHERE id = ?",
+                        (int(centre_id),)).fetchone() is None:
+            raise ValueError("Choose a centre")
 
     # The person record comes first: an account with no person could never be
-    # recognised, and users.student_id is required for an athlete.
+    # recognised, and users.student_id is required for an athlete. A coach gets
+    # one too - they are recognised at capture time and sign the register with
+    # their own face, so they are a person in `students` exactly like an athlete.
     roll = f"PEND-{secrets.token_hex(4).upper()}"
     student_id = database.add_student(
-        full_name, roll, "", [], role="athlete", centre_id=centre_id, phone=phone,
+        full_name, roll, "", [], role=role, centre_id=centre_id, phone=phone,
     )
-    user_id = auth.create_user(username, password, "athlete", full_name,
+    user_id = auth.create_user(username, password, role, full_name,
                                centre_id=centre_id, phone=phone, student_id=student_id)
     with connect() as conn:
         conn.execute("UPDATE users SET status = 'pending' WHERE id = ?", (user_id,))
-    log.info("Signup started: user %s (person %s), pending", user_id, student_id)
+    log.info("Signup started: %s user %s (person %s), pending %s approval",
+             role, user_id, student_id, approver_for(role))
     return {"token": _new_token(user_id, phone), "user_id": user_id,
-            "student_id": student_id, "roll_no": roll}
+            "student_id": student_id, "roll_no": roll, "role": role,
+            "approver": approver_for(role),
+            "needs_coach": role == "athlete"}
+
+
+# A coach who has applied but not been approved is a stranger with a name in
+# the table. Every place that offers "the coaches at this centre" has to say so,
+# or the first thing self-registration buys an impostor is a queue of athletes
+# choosing them - and, on approval, a signed register.
+_APPROVED_COACH = (
+    " AND NOT EXISTS (SELECT 1 FROM users u "
+    "WHERE u.student_id = s.id AND u.status <> 'active')"
+)
 
 
 def coaches_at(centre_id: int) -> List[dict]:
-    """Coaches a new athlete may choose, with their enrolment photo."""
+    """Coaches a new athlete may choose, with their enrolment photo.
+
+    Pending, rejected and suspended coaches are excluded. Coaches with no
+    account at all are included: most were enrolled by an admin and never
+    needed one, and dropping them would empty this list at every existing
+    centre.
+    """
     with connect() as conn:
         rows = conn.execute(
             "SELECT s.id, s.name, s.photo_path, c.name AS centre_name "
             "FROM students s LEFT JOIN centres c ON c.id = s.centre_id "
-            "WHERE s.role = 'coach' AND s.centre_id = ? ORDER BY s.name",
+            "WHERE s.role = 'coach' AND s.centre_id = ?" + _APPROVED_COACH
+            + " ORDER BY s.name",
             (int(centre_id),),
         ).fetchall()
     out = []
@@ -151,13 +199,29 @@ def coaches_at(centre_id: int) -> List[dict]:
 
 
 def choose_coach(token: str, coach_id: int) -> None:
+    """Attach an ATHLETE application to the coach who will approve it.
+
+    Refused for a coach application. chosen_coach_id is what puts an account
+    into a coach's approval queue, so letting a coach applicant set it would
+    put a stranger asking for coach access in front of a coach who believes
+    that queue only ever contains athletes - and one tap would grant it.
+    A coach application is decided by a super admin, and by nobody else.
+    """
     rec = resolve_signup(token)
     with connect() as conn:
+        who = conn.execute("SELECT role FROM users WHERE id = ?",
+                           (rec["user_id"],)).fetchone()
+        if who is not None and who["role"] != "athlete":
+            raise ValueError("A coach application is approved by a super admin, "
+                             "so it does not choose a coach")
+        # Re-checked here, not just filtered in the list above: the list is a
+        # convenience for the browser, and this is the write.
         row = conn.execute(
-            "SELECT 1 FROM students WHERE id = ? AND role = 'coach'", (int(coach_id),)
+            "SELECT 1 FROM students s WHERE s.id = ? AND s.role = 'coach'"
+            + _APPROVED_COACH, (int(coach_id),)
         ).fetchone()
         if not row:
-            raise ValueError("That is not a coach")
+            raise ValueError("That coach is not available to choose")
         conn.execute("UPDATE users SET chosen_coach_id = ? WHERE id = ?",
                      (int(coach_id), rec["user_id"]))
 
@@ -250,6 +314,16 @@ def verify_otp(token: str, code: str) -> bool:
                      (config.now_stamp(), rec["user_id"]))
     rec["phone_verified"] = True
     return True
+
+
+def role_for(token: str) -> str:
+    """The role behind a signup token, so the closing copy can name the right
+    approver. Read from the row rather than from anything the caller sent."""
+    rec = resolve_signup(token)
+    with connect() as conn:
+        row = conn.execute("SELECT role FROM users WHERE id = ?",
+                           (rec["user_id"],)).fetchone()
+    return (row["role"] if row else "athlete")
 
 
 def student_for(token: str) -> int:

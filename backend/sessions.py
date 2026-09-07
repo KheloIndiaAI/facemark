@@ -566,7 +566,7 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
 def pending_for_coach(coach_student_id: Optional[int]) -> List[dict]:
     """The approval queue. None means every pending account (super admin)."""
     q = ("SELECT u.id AS user_id, u.username, u.full_name, u.email, u.phone, "
-         "       u.status, u.created_at, u.student_id, u.chosen_coach_id, "
+         "       u.status, u.role, u.created_at, u.student_id, u.chosen_coach_id, "
          "       u.phone_verified_at, u.guardian_name, "
          "       s.name AS person_name, s.roll_no, s.photo_path, s.centre_id, "
          "       c.name AS centre_name, "
@@ -577,7 +577,11 @@ def pending_for_coach(coach_student_id: Optional[int]) -> List[dict]:
          "WHERE u.status = 'pending'")
     p: list = []
     if coach_student_id is not None:
-        q += " AND u.chosen_coach_id = ?"
+        # Role as well as ownership. A coach's queue contains athletes and
+        # nothing else - an application for coach access is a super admin's
+        # decision, and must not be one tap away from a coach who is working
+        # through a list they reasonably assume is all athletes.
+        q += " AND u.role = 'athlete' AND u.chosen_coach_id = ?"
         p.append(int(coach_student_id))
     q += " ORDER BY u.created_at"
     with connect() as conn:
@@ -599,20 +603,22 @@ def decide(user_id: int, approve: bool, approver_user_id: int,
     now = config.now_stamp()
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, status, student_id, chosen_coach_id FROM users WHERE id = ?",
+            "SELECT id, status, role, student_id, chosen_coach_id FROM users WHERE id = ?",
             (int(user_id),),
         ).fetchone()
         if row is None:
             raise ValueError("No such account")
         if row["status"] != "pending":
             raise ValueError("That account is not pending")
+        role = row["role"]
 
         if not approve:
             conn.execute(
                 "UPDATE users SET status = 'rejected', approved_by = ?, approved_at = ? "
                 "WHERE id = ?", (int(approver_user_id), now, int(user_id)),
             )
-            return {"status": "rejected", "linked": False}
+            return {"status": "rejected", "linked": False,
+                    "role": row["role"]}
 
         conn.execute(
             "UPDATE users SET status = 'active', approved_by = ?, approved_at = ?, "
@@ -622,12 +628,15 @@ def decide(user_id: int, approve: bool, approver_user_id: int,
             (int(approver_user_id), now, guardian_name,
              bool(guardian_consent), now, int(user_id)),
         )
+        # A coach has no coach, so there is no link to make. Guarded on role
+        # rather than on chosen_coach_id being absent, so that a stray value in
+        # that column could never enrol an approved coach as somebody's athlete.
         linked = False
-        if row["student_id"] and row["chosen_coach_id"]:
+        if row["role"] == "athlete" and row["student_id"] and row["chosen_coach_id"]:
             cur = conn.execute(
                 "INSERT INTO coach_athletes (coach_id, athlete_id, is_primary, created_at) "
                 "VALUES (?,?,1,?) ON CONFLICT (coach_id, athlete_id) DO NOTHING",
                 (int(row["chosen_coach_id"]), int(row["student_id"]), now),
             )
             linked = cur.rowcount > 0
-    return {"status": "active", "linked": linked}
+    return {"status": "active", "linked": linked, "role": role}

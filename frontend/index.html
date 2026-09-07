@@ -50,7 +50,8 @@
           all accounts and centre management.
         </div>
         <div class="login-foot" style="margin-top:10px">
-          New athlete? <a href="#" id="signup-open">Create an account</a>
+          New here? <a href="#" id="signup-open">Register as an athlete</a>
+          &middot; <a href="#" id="signup-open-coach">Register as a coach</a>
         </div>
       </div>
     </div>
@@ -60,12 +61,13 @@
             <div class="login-head">
                 <div class="login-logo"></div>
                 <div>
-                    <h1 class="login-title">Create your account</h1>
-                    <p class="login-sub">Your coach approves it before it works.</p>
+                    <h1 class="login-title" id="su-title">Create your account</h1>
+                    <p class="login-sub" id="su-sub">Your coach approves it before it works.</p>
                 </div>
             </div>
 
             <div id="su-step-1">
+                <div class="notice notice-blue" id="su-role-note" style="margin-bottom:12px"></div>
                 <div class="form-group"><label class="form-label" for="su-name">Full name</label>
                     <input type="text" id="su-name" class="form-input" required></div>
                 <div class="form-group"><label class="form-label" for="su-centre">Centre</label>
@@ -103,8 +105,8 @@
             </div>
 
             <div id="su-done" class="hidden">
-                <div class="notice notice-blue"><strong>Sent to your coach.</strong>
-                    You can sign in once they approve you.</div>
+                <div class="notice notice-blue"><strong id="su-done-title">Sent to your coach.</strong>
+                    <span id="su-done-body">You can sign in once they approve you.</span></div>
             </div>
 
             <div id="su-msg" class="login-foot" style="color:var(--red);min-height:18px"></div>
