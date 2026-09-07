@@ -397,7 +397,11 @@ function handleRoute() {
     // Mark Attendance is the landing page: taking the register is the job the
     // app exists for and the one people open it to do. The dashboard reports on
     // work already done, which is a second question, not the first.
-    let hash = window.location.hash.slice(1) || '/mark';
+    // Role-aware default. An athlete has no business on the coach's capture
+    // screen, and landing there is how someone concludes the app is not for
+    // them. Coaches and admins keep Mark Attendance as the first thing they see.
+    const home = (typeof isAthlete === 'function' && isAthlete()) ? '/me' : '/mark';
+    let hash = window.location.hash.slice(1) || home;
 
     // Stop camera if navigating away
     if (currentCameraCapture) {
@@ -406,7 +410,7 @@ function handleRoute() {
     }
 
     // Default route
-    if (hash === '/') hash = '/mark';
+    if (hash === '/') hash = home;
     
     state.currentRoute = hash;
     
@@ -453,6 +457,12 @@ function handleRoute() {
         const tpl = document.getElementById('tpl-mark').content.cloneNode(true);
         root.appendChild(tpl);
         initMarkPage();
+    }
+    else if (hash === '/me') {
+        title.textContent = 'My attendance';
+        const tpl = document.getElementById('tpl-me').content.cloneNode(true);
+        root.appendChild(tpl);
+        initMePage();
     }
     else if (hash === '/register') {
         title.textContent = 'Register';
@@ -1818,6 +1828,119 @@ function regSubmit() {
             }
         },
     });
+}
+
+
+/* ---------------------------------------------------------------------------
+   The athlete's own page
+
+   An athlete is not a coach with fewer buttons. This is the only screen they
+   need: who their coaches are, a way to mark themselves present with one of
+   them, and their own history. A self-mark is a DRAFT - the coach still
+   confirms it - and the copy says so, because an athlete who thinks they are
+   already marked will not chase it up.
+--------------------------------------------------------------------------- */
+
+async function initMePage() {
+    const host = document.getElementById('me-coaches');
+    if (host) {
+        host.addEventListener('click', (e) => {
+            const el = e.target.closest('[data-mark-coach]');
+            if (el) meMark(parseInt(el.dataset.markCoach, 10), el.dataset.coachName || '');
+        });
+    }
+    await Promise.all([meLoadCoaches(), meLoadHistory()]);
+}
+
+async function meLoadCoaches() {
+    const host = document.getElementById('me-coaches');
+    if (!host) return;
+    try {
+        const r = await api.get('/api/me/coaches');
+        if (!r.coaches.length) {
+            host.innerHTML = `<div class="empty-state">
+                <div>You are not linked to a coach yet.</div>
+                <div class="text-xs text-muted" style="margin-top:6px">
+                    Your coach adds you to their roster.</div></div>`;
+            return;
+        }
+        host.innerHTML = r.coaches.map(c => `
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border-subtle)">
+                <div style="flex:1;min-width:0">
+                    <div style="font-weight:600">${Charts.esc(c.name)}</div>
+                    <div class="text-xs text-muted">${Charts.esc(c.centre_name || '')}</div>
+                </div>
+                <button type="button" class="btn btn-primary" style="height:32px;font-size:12px;padding:0 14px"
+                        data-mark-coach="${c.id}" data-coach-name="${Charts.esc(c.name)}">
+                    Mark me present
+                </button>
+            </div>`).join('');
+    } catch (err) {
+        host.innerHTML = `<div class="empty-state">Could not load your coaches.</div>`;
+    }
+}
+
+async function meLoadHistory() {
+    const host = document.getElementById('me-history');
+    if (!host) return;
+    try {
+        const r = await api.get('/api/me/attendance');
+        if (!r.records.length) {
+            host.innerHTML = `<div class="empty-state">No attendance recorded yet.</div>`;
+            return;
+        }
+        host.innerHTML = r.records.slice(0, 60).map(x => `
+            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-subtle)">
+                <span class="font-mono">${Charts.esc(x.date)}</span>
+                <span class="text-xs text-muted">${Charts.esc((x.marked_at || '').replace('T', ' '))}</span>
+            </div>`).join('');
+    } catch (err) {
+        host.innerHTML = `<div class="empty-state">Could not load your history.</div>`;
+    }
+}
+
+function meMark(coachId, coachName) {
+    // Location is requested but never required. A refused or missing fix still
+    // marks the athlete - it is flagged for the coach instead, because a
+    // genuine athlete with bad GPS should not lose their attendance silently.
+    const send = async (pos) => {
+        openClipCapture({
+            title: `Mark present \u2014 ${coachName}`,
+            intro: 'Record a few seconds of your own face, moving the phone slightly.',
+            onClip: async (file, ui) => {
+                ui.status('Checking\u2026');
+                try {
+                    const fd = new FormData();
+                    fd.append('clip', file);
+                    fd.append('coach_id', String(coachId));
+                    if (pos) {
+                        fd.append('latitude', pos.coords.latitude);
+                        fd.append('longitude', pos.coords.longitude);
+                        fd.append('accuracy_m', pos.coords.accuracy);
+                    }
+                    const r = await api.postForm('/api/me/attendance', fd);
+                    if (r.ok === false) {
+                        ui.status(r.message || 'Could not confirm that was you.');
+                        await ui.resume();
+                        return;
+                    }
+                    ui.close();
+                    showToast('Marked', r.message || 'Your coach will confirm it.',
+                              r.geo && r.geo.status === 'inside' ? 'success' : 'warning');
+                    await meLoadHistory();
+                } catch (err) {
+                    ui.status((err && err.message) || 'Could not mark you present.');
+                    await ui.resume();
+                }
+            },
+        });
+    };
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(send, () => send(null),
+                                                 { timeout: 6000, maximumAge: 60000 });
+    } else {
+        send(null);
+    }
 }
 
 // --- Toasts ---

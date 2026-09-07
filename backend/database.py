@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    role          TEXT NOT NULL CHECK (role IN ('super_admin','coach')),
+    role          TEXT NOT NULL CHECK (role IN ('super_admin','coach','athlete')),
     full_name     TEXT NOT NULL,
     email         TEXT,
     phone         TEXT,
@@ -244,6 +244,7 @@ def init_db() -> None:
         # After the columns exist - the swap references session_id.
         _swap_attendance_uniqueness(conn)
         _relax_session_author_fk(conn)
+        _widen_role_check(conn)
         _promote_legacy_accounts(conn)
 
 
@@ -306,6 +307,33 @@ def _relax_session_author_fk(conn: Conn) -> None:
                  "ADD CONSTRAINT attendance_sessions_opened_by_fkey "
                  "FOREIGN KEY (opened_by) REFERENCES users(id) ON DELETE SET NULL")
     log.info("Relaxed attendance_sessions.opened_by so accounts stay deletable.")
+
+
+def _widen_role_check(conn: Conn) -> None:
+    """Allow role='athlete'.
+
+    A fresh database gets the widened CHECK from SCHEMA, but an existing one
+    keeps the two-role constraint it was created with, and inserting an athlete
+    fails there with a CheckViolation. Re-created rather than edited because
+    Postgres has no ALTER CONSTRAINT for a CHECK.
+    """
+    row = conn.execute(
+        "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint "
+        "WHERE conrelid = 'users'::regclass AND contype = 'c' "
+        "  AND pg_get_constraintdef(oid) LIKE '%role%'"
+    ).fetchone()
+    if row is None or "athlete" in row["def"]:
+        return
+    name = conn.execute(
+        "SELECT conname FROM pg_constraint WHERE conrelid = 'users'::regclass "
+        "  AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%role%'"
+    ).fetchone()["conname"]
+    conn.execute(f"ALTER TABLE users DROP CONSTRAINT {name}")
+    conn.execute(
+        "ALTER TABLE users ADD CONSTRAINT users_role_check "
+        "CHECK (role IN ('super_admin','coach','athlete'))"
+    )
+    log.info("Widened users.role to allow athlete accounts.")
 
 
 def _promote_legacy_accounts(conn: Conn) -> None:

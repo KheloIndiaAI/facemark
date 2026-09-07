@@ -74,10 +74,15 @@ def create_user(
     phone: Optional[str] = None,
     student_id: Optional[int] = None,
 ) -> int:
-    if role not in ("super_admin", "coach"):
+    if role not in ("super_admin", "coach", "athlete"):
         raise ValueError(f"Unknown role: {role}")
     if role == "coach" and centre_id is None:
         raise ValueError("A coach must be assigned to a centre")
+    if role == "athlete" and student_id is None:
+        # An athlete account with no person behind it could never mark itself
+        # present - there would be no templates to verify against and no roster
+        # entry to draft. Refuse at creation rather than at first use.
+        raise ValueError("An athlete account must be linked to an enrolled person")
     # Display-only stamp, never compared - so it uses the centre's clock like
     # every other stored timestamp. The session expiry below deliberately does
     # NOT: those datetime.now() calls are only ever compared against each
@@ -364,6 +369,32 @@ def scope_coach(user: dict, coach_id: Optional[int]) -> Optional[int]:
     if coach_id is not None and int(coach_id) != own:
         raise HTTPException(403, "You can only work on your own register")
     return own
+
+
+def scope_self(user: dict, student_id: Optional[int]) -> int:
+    """The person this request may read or write attendance for.
+
+    An athlete is NOT a coach with fewer buttons: they may only ever reach
+    their own record. A super admin may act for anyone; a coach may not use
+    this path at all, because a coach acting for an athlete goes through the
+    register, where it is reviewed and signed for.
+    """
+    if user["role"] == "super_admin":
+        if student_id is None:
+            raise HTTPException(400, "A person is required")
+        return int(student_id)
+    own = user.get("student_id")
+    if not own:
+        raise HTTPException(400, "This account is not linked to a person record")
+    if student_id is not None and int(student_id) != int(own):
+        raise HTTPException(403, "You can only see your own attendance")
+    return int(own)
+
+
+def require_athlete(user: dict = Depends(current_user)) -> dict:
+    if user["role"] not in ("athlete", "super_admin"):
+        raise HTTPException(403, "This is for athlete accounts")
+    return user
 
 
 def bootstrap_default_admin() -> Optional[str]:

@@ -16,7 +16,7 @@ the Notes column. "Compiles" is not evidence.
 |---|---|---|
 | 1 | Coach mapping and the session flow | `[x]` **done** |
 | 2 | Submit with coach verification | `[x]` **done** |
-| 3 | Athlete accounts and self-marking | `[ ]` |
+| 3 | Athlete accounts and self-marking | `[x]` **done** |
 | 4 | Super-admin oversight | `[ ]` |
 | 5 | Pending accounts and approval | `[ ]` |
 | 6 | Self-signup with OTP | `[ ]` |
@@ -92,19 +92,19 @@ but flagged with the distance.
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 3.1 | `users.role` CHECK widened to include `athlete` | `[ ]` | |
-| 3.2 | `scope_self` helper | `[ ]` | |
-| 3.3 | Athlete login works; sees only own data | `[ ]` | |
-| 3.4 | `GET /api/me/coaches` | `[ ]` | |
-| 3.5 | `GET /api/me/attendance` own history | `[ ]` | |
-| 3.6 | `POST /api/me/attendance` — liveness **mandatory** | `[ ]` | |
-| 3.7 | 1:1 match vs athlete's own templates (`SELF_VERIFY_THRESHOLD`) | `[ ]` | |
-| 3.8 | Draft into the coach's session, `origin='self_marked'` | `[ ]` | |
-| 3.9 | Creates the session if the coach has not captured yet | `[ ]` | |
-| 3.10 | Geo `outside`/`no_fix` accepted but badged with distance | `[ ]` | |
-| 3.11 | Rate limit: one accepted per athlete per coach per day | `[ ]` | |
-| 3.12 | Cooldown between failures | `[ ]` | |
-| 3.13 | Athlete own-history page in the frontend | `[ ]` | |
+| 3.1 | `users.role` CHECK widened to include `athlete` | `[x]` | CHECK widened + migration for existing DBs |
+| 3.2 | `scope_self` helper | `[x]` | verify_phase3 26/26 |
+| 3.3 | Athlete login works; sees only own data | `[x]` | lands on /me; /api/users -> 403 |
+| 3.4 | `GET /api/me/coaches` | `[x]` | verify_phase3 26/26 |
+| 3.5 | `GET /api/me/attendance` own history | `[x]` | verify_phase3 26/26 |
+| 3.6 | `POST /api/me/attendance` — liveness **mandatory** | `[x]` | non-video refused, nothing written |
+| 3.7 | 1:1 match vs athlete's own templates (`SELF_VERIFY_THRESHOLD`) | `[x]` | self 0.80 vs impostor 0.295, threshold 0.363 |
+| 3.8 | Draft into the coach's session, `origin='self_marked'` | `[x]` | draft, origin=self_marked, right coach |
+| 3.9 | Creates the session if the coach has not captured yet | `[x]` | session created by the self-mark |
+| 3.10 | Geo `outside`/`no_fix` accepted but badged with distance | `[x]` | geo outside accepted, distance stored |
+| 3.11 | Rate limit: one accepted per athlete per coach per day | `[x]` | second mark -> 409 |
+| 3.12 | Cooldown between failures | `[x]` | immediate retry -> 429 |
+| 3.13 | Athlete own-history page in the frontend | `[x]` | athlete page driven in browser |
 
 ---
 
@@ -176,13 +176,13 @@ Several of these fail **silently**. Each needs its own check.
 | C5 | Dashboard tiles filter `status='confirmed'` | `[x]` | verify_phase1 27/27 |
 | C6 | `stats().present_today` → `COUNT(DISTINCT student_id)` | `[x]` | COUNT(DISTINCT student_id) |
 | C7 | `load_gallery()` excludes pending accounts | `[ ]` | Phase 5 |
-| C8 | `users.role` CHECK widened; every `role ==` reviewed | `[ ]` | |
+| C8 | `users.role` CHECK widened; every `role ==` reviewed | `[x]` | roleLabel/roleShort; nav gated; landing route fixed |
 | C9 | Unique constraint swapped | `[x]` | verify_p1_schema 20/20 |
 | C10 | Every read handles `session_id IS NULL` (pre-migration rows) | `[x]` | legacy rows still read; suites 16/16 12/12 23/23 |
 | C11 | Geo reads prefer `session_captures`, fall back to `attendance` | `[ ]` | |
 | C12 | OTP throttled per number **and** per address | `[ ]` | Phase 6 |
 | C13 | Self-marking rate-limited per athlete/coach/day | `[ ]` | Phase 3 |
-| C14 | `scope_coach` / `scope_self` on every new endpoint | `[x]` | verify_phase1 27/27 |
+| C14 | `scope_coach` / `scope_self` on every new endpoint | `[x]` | verify_phase1 27/2 | scope_self on every /api/me route |
 | C15 | `DELETE /api/students/{id}` widened: account, links, captures | `[ ]` | |
 | C16 | `scripts/live_test.py` `Row`-unpack bug fixed | `[ ]` | Blocks §7 measurement |
 | C17 | CI green + smoke assertion that drafts never reach `/api/stats` | `[ ]` | |
@@ -196,7 +196,7 @@ Several of these fail **silently**. Each needs its own check.
 | T1 | Fix `live_test.py`, re-run `evaluate.py --sweep` | `[ ]` | Same as C16 |
 | T2 | Re-measure and pick `MATCH_THRESHOLD` deliberately | `[ ]` | Do **not** just lower it |
 | T3 | `COACH_VERIFY_THRESHOLD` chosen (1:1, ~0.363 published) | `[x]` | Phase | 0.363; measured separation 0.80 vs 0.30 |
-| T4 | `SELF_VERIFY_THRESHOLD` chosen (1:1) | `[ ]` | Phase 3 |
+| T4 | `SELF_VERIFY_THRESHOLD` chosen (1:1) | `[x]` | Phase | 0.363 (SFace 1:1) |
 
 ---
 

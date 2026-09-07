@@ -9,6 +9,20 @@ const session = { user: null };
 
 function isSuperAdmin() { return session.user && session.user.role === 'super_admin'; }
 function isCoach() { return session.user && session.user.role === 'coach'; }
+function isAthlete() { return session.user && session.user.role === 'athlete'; }
+
+// Three roles now, so "not super admin" no longer means coach. Every
+// label below went through that assumption and would have called an
+// athlete a Coach.
+function roleLabel(role, centreName) {
+    if (role === 'super_admin') return 'Super Admin';
+    if (role === 'athlete') return 'Athlete';
+    return 'Coach - ' + (centreName || 'unassigned');
+}
+function roleShort(role) {
+    return role === 'super_admin' ? 'Super Admin'
+         : role === 'athlete' ? 'Athlete' : 'Coach';
+}
 
 async function checkSession() {
     try {
@@ -59,11 +73,14 @@ async function doLogin(ev) {
         hideLogin();
         applyRoleChrome();
         await initApp();
-        // Signing in lands on Mark Attendance, the job the app is opened to do.
-        // Set here as well as in the router: this assignment overrides whatever
-        // default handleRoute() would have picked, so changing one without the
-        // other silently keeps the old landing page.
-        window.location.hash = '#/mark';
+        // Signing in lands on the job that role opens the app to do: Mark
+        // Attendance for a coach or admin, their own page for an athlete.
+        // Set here as well as in the router - this assignment overrides
+        // whatever default handleRoute() would have picked, so changing one
+        // without the other silently keeps the old landing page. That is
+        // exactly what happened when the router learned about athletes and
+        // this line did not.
+        window.location.hash = isAthlete() ? '#/me' : '#/mark';
         handleRoute();
         showToast('Welcome', `Signed in as ${data.user.full_name}`, 'success');
     } catch {
@@ -96,14 +113,15 @@ function applyRoleChrome() {
             <div class="user-chip-avatar">${Charts.esc(u.full_name.charAt(0).toUpperCase())}</div>
             <div class="user-chip-text">
                 <div class="user-chip-name">${Charts.esc(u.full_name)}</div>
-                <div class="user-chip-role">${u.role === 'super_admin' ? 'Super Admin'
-                    : 'Coach - ' + Charts.esc(u.centre_name || 'unassigned')}</div>
+                <div class="user-chip-role">${Charts.esc(
+                    roleLabel(u.role, u.centre_name))}</div>
             </div>`;
     }
     const badge = document.getElementById('role-badge');
     if (badge) {
-        badge.textContent = u.role === 'super_admin' ? 'Super Admin' : 'Coach';
-        badge.className = 'badge ' + (u.role === 'super_admin' ? 'badge-blue' : 'badge-green');
+        badge.textContent = roleShort(u.role);
+        badge.className = 'badge ' + (u.role === 'super_admin' ? 'badge-blue'
+                                    : u.role === 'athlete' ? 'badge-amber' : 'badge-green');
     }
 }
 

@@ -271,8 +271,9 @@ async function renderUsersPage() {
         </tr></thead><tbody>${u.users.map(x => `<tr>
           <td>${E(x.full_name)}</td>
           <td class="font-mono text-sm">${E(x.username)}</td>
-          <td><span class="badge ${x.role === 'super_admin' ? 'badge-blue' : 'badge-green'}">
-            ${x.role === 'super_admin' ? 'Super Admin' : 'Coach'}</span></td>
+          <td><span class="badge ${x.role === 'super_admin' ? 'badge-blue'
+              : x.role === 'athlete' ? 'badge-amber' : 'badge-green'}">
+            ${E(roleShort(x.role))}</span></td>
           <td>${E(x.centre_name || '-')}</td>
           <td class="text-sm text-muted">${E(x.last_login ? x.last_login.replace('T', ' ') : 'never')}</td>
           <td>${x.is_active ? '<span class="badge badge-green">active</span>'

@@ -1757,6 +1757,129 @@ def unlink_athlete(coach_id: int, athlete_id: int,
     return {"ok": True, "removed": sessions_mod.unlink_athlete(int(scoped), athlete_id)}
 
 
+
+# =============================================================================
+# Athlete self-marking
+# =============================================================================
+#
+# A self-mark creates a DRAFT in the coach's register, never a confirmed row.
+# If it wrote confirmed attendance there would be two routes to a register and
+# one of them would have no human check, which undoes the reason the review
+# step exists. The coach still submits.
+
+
+@app.get("/api/me/coaches")
+def my_coaches(user: dict = Depends(auth.current_user)):
+    """Which coaches this athlete trains under."""
+    me = auth.scope_self(user, None)
+    return {"ok": True, "student_id": me, "coaches": sessions_mod.coaches_of(me)}
+
+
+@app.get("/api/me/attendance")
+def my_attendance(user: dict = Depends(auth.current_user)):
+    """This athlete's own confirmed history."""
+    me = auth.scope_self(user, None)
+    st = database.get_student(me)
+    return {
+        "ok": True,
+        "student_id": me,
+        "name": st["name"] if st else None,
+        "records": database.student_attendance_history(me),
+    }
+
+
+@app.post("/api/me/attendance")
+async def mark_myself(
+    clip: UploadFile = File(...),
+    coach_id: int = Form(...),
+    latitude: Optional[float] = Form(None),
+    longitude: Optional[float] = Form(None),
+    accuracy_m: Optional[float] = Form(None),
+    user: dict = Depends(auth.current_user),
+):
+    """Mark yourself present from a short clip.
+
+    Liveness is MANDATORY here, with no photo path and no exceptions. A coach's
+    group capture may be a photo because a person reviews and signs for it; a
+    self-mark has no such witness, so the clip is the only evidence there is.
+
+    Geo-fencing carries real weight for the same reason - an athlete marking
+    themselves from home is the obvious abuse. A bad or missing fix does NOT
+    reject the attempt: a genuine athlete with poor GPS should not lose their
+    attendance silently. It is accepted as a draft and badged loudly, with the
+    distance, in the coach's review list.
+    """
+    me = auth.scope_self(user, None)
+    if int(coach_id) == me:
+        raise HTTPException(400, "You cannot mark yourself under your own name")
+
+    # Must actually be this athlete's coach, or anyone could post into any
+    # register they can name.
+    if int(coach_id) not in {int(c["id"]) for c in sessions_mod.coaches_of(me)}:
+        raise HTTPException(403, "That is not one of your coaches")
+
+    day = config.today_str()
+    if sessions_mod.already_self_marked(me, int(coach_id), day):
+        # The database constraint would refuse the duplicate anyway; this is so
+        # the athlete gets an answer rather than a silent no-op.
+        raise HTTPException(409, "You are already on today's register for this coach")
+
+    wait = sessions_mod.self_mark_cooldown(me, int(coach_id))
+    if wait:
+        raise HTTPException(429, f"Too many attempts - wait {wait}s and try again")
+
+    data = await clip.read()
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    detector = get_detector()
+    result = liveness.analyse(data, detector)
+    if result.verdict != "live" or result.best_frame is None:
+        sessions_mod.note_self_failure(me, int(coach_id))
+        return {"ok": False, "reason": "liveness", "message": result.reason,
+                "liveness": result.to_dict()}
+
+    v = sessions_mod.verify_face(result.best_frame, me)
+    score = float(v.get("score") or 0.0)
+    if not v["ok"] or score < config.SELF_VERIFY_THRESHOLD:
+        sessions_mod.note_self_failure(me, int(coach_id))
+        return {"ok": False, "reason": "face",
+                "message": v.get("reason") or "That face does not match your record",
+                "score": round(score, 4), "liveness": result.to_dict()}
+
+    coach = database.get_student(int(coach_id))
+    centre_id = (coach or {}).get("centre_id")
+    geo = centres_mod.evaluate_location(centre_id, latitude, longitude)
+
+    # Opens the coach's register if they have not captured yet, so they arrive
+    # to a partly-filled one rather than an empty screen.
+    sess = sessions_mod.get_or_create(centre_id, int(coach_id), int(user["id"]), day)
+    if sess["status"] != "draft":
+        raise HTTPException(409, "Your coach has already submitted today's register")
+
+    ts = utils.timestamp()
+    frame_name = f"self_{me}_{ts}.jpg"
+    utils.save_image(result.best_frame, "uploads", frame_name)
+
+    added = sessions_mod.draft(
+        sess["id"], me, day, score, origin="self_marked", image_path=frame_name,
+        centre_id=centre_id, latitude=latitude, longitude=longitude,
+        accuracy_m=accuracy_m, geo_status=geo["geo_status"],
+        distance_m=geo["distance_m"], marked_by=int(user["id"]),
+    )
+    return {
+        "ok": True, "added": added, "session_id": sess["id"],
+        "status": "draft", "origin": "self_marked",
+        "score": round(score, 4),
+        "liveness": result.to_dict(),
+        "geo": {"status": geo["geo_status"], "distance_m": geo["distance_m"]},
+        "message": ("Marked - your coach will confirm it."
+                    if geo["geo_status"] == "inside" else
+                    "Marked, but you appear to be away from the centre. "
+                    "Your coach will see that when they confirm it."),
+    }
+
+
 @app.get("/api/attendance/suggest")
 def suggest_for_face(
     face_url: str,

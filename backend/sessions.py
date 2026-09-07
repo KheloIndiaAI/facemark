@@ -402,3 +402,45 @@ def submit(session_id: int, verified: bool, score: float,
              session_id),
         )
     return {"promoted": promoted, "verified": verified, "score": score}
+
+
+# =============================================================================
+# Athlete self-marking
+# =============================================================================
+
+# Failure cooldown, per (athlete, coach). In-process, like the login throttle:
+# N workers allow N times the burst, accepted deliberately because the
+# alternative is letting a caller write a row per attempt. The ACCEPTED-once
+# rule does not rely on this - it is enforced in the database by the
+# (student_id, session_id) constraint, which no amount of process-restarting
+# gets around.
+_self_fail: Dict[tuple, float] = {}
+_SELF_COOLDOWN_S = 20
+
+
+def self_mark_cooldown(athlete_id: int, coach_id: int) -> int:
+    """Seconds still to wait after a recent failure, or 0."""
+    import time
+    left = _self_fail.get((int(athlete_id), int(coach_id)), 0) - time.time()
+    return int(left) if left > 0 else 0
+
+
+def note_self_failure(athlete_id: int, coach_id: int) -> None:
+    import time
+    _self_fail[(int(athlete_id), int(coach_id))] = time.time() + _SELF_COOLDOWN_S
+    if len(_self_fail) > 4096:
+        now = time.time()
+        for k in [k for k, v in _self_fail.items() if v < now]:
+            _self_fail.pop(k, None)
+
+
+def already_self_marked(athlete_id: int, coach_id: int, day: str) -> bool:
+    """Has this athlete already been recorded in this coach's register today?"""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM attendance a "
+            "JOIN attendance_sessions s ON s.id = a.session_id "
+            "WHERE a.student_id = ? AND s.coach_id = ? AND s.date = ?",
+            (int(athlete_id), int(coach_id), day),
+        ).fetchone()
+        return row is not None
