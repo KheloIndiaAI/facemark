@@ -390,10 +390,11 @@ def remove_student(student_id: int, user: dict = Depends(auth.current_user)):
     # Without this a coach can delete any athlete at any centre in the country,
     # and ON DELETE CASCADE takes their templates and attendance history too.
     auth.scope_centre(user, student.get("centre_id"))
-    database.delete_student(student_id)
+    removed = database.delete_student(student_id)
     if student.get("photo_path"):
         storage.delete("students", Path(student["photo_path"]).name)
-    return {"ok": True}
+    log.info("Deleted person %s: %s", student_id, removed)
+    return {"ok": True, "removed": removed}
 
 
 # --- attendance -------------------------------------------------------------

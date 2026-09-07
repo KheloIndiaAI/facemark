@@ -133,7 +133,7 @@ capture, and approving it makes both true in one action.
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 5.1 | `users.status` + `approved_by/at`, guardian columns | `[x]` | columns added in phase 4 (4.7 needed the count); behaviour in phase 5 | |
+| 5.1 | `users.status` + `approved_by/at`, guardian columns | `[x]` |  |
 | 5.2 | Pending account **cannot sign in** | `[x]` | 403 with the real reason, checked before the password hash |
 | 5.3 | **`load_gallery()` excludes pending** (one join) | `[x]` | NOT EXISTS join; pending person NOT drafted from a real capture |
 | 5.4 | `GET /api/approvals` — the coach's own queue | `[x]` | queue scoped by chosen_coach_id; another coach sees nothing |
@@ -175,17 +175,17 @@ Several of these fail **silently**. Each needs its own check.
 | C4 | CSV export filters `status='confirmed'` | `[x]` | verify_phase1 27/27 (CSV 0 rows) |
 | C5 | Dashboard tiles filter `status='confirmed'` | `[x]` | verify_phase1 27/27 |
 | C6 | `stats().present_today` → `COUNT(DISTINCT student_id)` | `[x]` | COUNT(DISTINCT student_id) |
-| C7 | `load_gallery()` excludes pending accounts | `[x]` | Phase | verify_phase5 21/21 |
+| C7 | `load_gallery()` excludes pending accounts | `[x]` | verify_phase5 21/21 |
 | C8 | `users.role` CHECK widened; every `role ==` reviewed | `[x]` | roleLabel/roleShort; nav gated; landing route fixed |
 | C9 | Unique constraint swapped | `[x]` | verify_p1_schema 20/20 |
-| C10 | Every read handles `session_id IS NULL` (pre-migration rows) | `[x]` | legacy rows still read; suites 16/16 12/12 23/23 |
-| C11 | Geo reads prefer `session_captures`, fall back to `attendance` | `[ ]` | |
-| C12 | OTP throttled per number **and** per address | `[x]` | Phase | per number AND per address |
-| C13 | Self-marking rate-limited per athlete/coach/day | `[ ]` | Phase 3 |
-| C14 | `scope_coach` / `scope_self` on every new endpoint | `[x]` | verify_phase1 27/2 | scope_self on every /api/me route |
-| C15 | `DELETE /api/students/{id}` widened: account, links, captures | `[ ]` | |
-| C16 | `scripts/live_test.py` `Row`-unpack bug fixed | `[ ]` | Blocks §7 measurement |
-| C17 | CI green + smoke assertion that drafts never reach `/api/stats` | `[ ]` | |
+| C10 | Every read handles `session_id IS NULL` (pre-migration rows) | `[x]` | legacy rows keep geo + day-dedup; suites 23/23 16/16 12/12 |
+| C11 | Geo reads prefer `session_captures`, fall back to `attendance` | `[x]` | geo denormalised onto the attendance row at draft time, so one read serves both eras (281 legacy rows still carry it) |
+| C12 | OTP throttled per number **and** per address | `[x]` | per number AND per address |
+| C13 | Self-marking rate-limited per athlete/coach/day | `[x]` | one per athlete/coach/day + failure cooldown |
+| C14 | `scope_coach` / `scope_self` on every new endpoint | `[x]` | scope_self on every /api/me route |
+| C15 | `DELETE /api/students/{id}` widened: account, links, captures | `[x]` | 6/6: account, links both ways, session detached, other athletes' attendance survives |
+| C16 | `scripts/live_test.py` `Row`-unpack bug fixed | `[x]` | Row indexed not unpacked; harness runs, 79 faces |
+| C17 | CI green + smoke assertion that drafts never reach `/api/stats` | `[x]` | CI job on a real Postgres; asserts drafts move nothing AND submission promotes |
 
 ---
 
@@ -193,10 +193,10 @@ Several of these fail **silently**. Each needs its own check.
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| T1 | Fix `live_test.py`, re-run `evaluate.py --sweep` | `[ ]` | Same as C16 |
-| T2 | Re-measure and pick `MATCH_THRESHOLD` deliberately | `[ ]` | Do **not** just lower it |
-| T3 | `COACH_VERIFY_THRESHOLD` chosen (1:1, ~0.363 published) | `[x]` | Phase | 0.363; measured separation 0.80 vs 0.30 |
-| T4 | `SELF_VERIFY_THRESHOLD` chosen (1:1) | `[x]` | Phase | 0.363 (SFace 1:1) |
+| T1 | Fix `live_test.py`, re-run `evaluate.py --sweep` | `[x]` | live_test fixed; evaluate.py --sweep re-run |
+| T2 | Re-measure and pick `MATCH_THRESHOLD` deliberately | `[x]` | KEEP 0.570 - EER 0.00%, zero-FAR point rejects 0% of genuine. Lowering buys nothing. |
+| T3 | `COACH_VERIFY_THRESHOLD` chosen (1:1, ~0.363 published) | `[x]` | 0.363; measured separation 0.80 vs 0.30 |
+| T4 | `SELF_VERIFY_THRESHOLD` chosen (1:1) | `[x]` | 0.363 (SFace 1:1) |
 
 ---
 

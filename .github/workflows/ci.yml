@@ -47,6 +47,91 @@ jobs:
           ruff check --select F401 \
             --exclude scripts/archive --output-format=github .
 
+  drafts:
+    name: Drafts never count as attendance
+    runs-on: ubuntu-latest
+
+    # A real database, not a mock. The whole risk here lives in SQL, and a
+    # mocked connection would simply agree with whatever the query claimed.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: facemark
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+          pip install -r requirements.txt
+
+      # Blocking. A draft that reaches /api/stats is the failure this release
+      # is most exposed to, and it is invisible without an assertion.
+      - name: A draft must not move any count
+        env:
+          DATABASE_URL: postgresql://postgres:ci@localhost:5432/facemark
+          FACEMARK_TIMEZONE: Asia/Kolkata
+        run: |
+          python - <<'PY'
+          import sys
+          from backend import config, database, db as pgdb, sessions as sm
+
+          database.init_db()
+
+          with pgdb.connect() as c:
+              # conn.insert appends RETURNING id itself - adding it here
+              # produces "RETURNING id RETURNING id" and a syntax error.
+              cid = c.insert(
+                  "INSERT INTO centres (code, name, created_at) VALUES (?,?,?)",
+                  ("CI-1", "CI Centre", config.now_stamp()))
+          coach = database.add_student("CI Coach", "CI-COACH", "x.jpg", [],
+                                       role="coach", centre_id=cid)
+          ath = database.add_student("CI Athlete", "CI-ATH", "x.jpg", [],
+                                     role="athlete", centre_id=cid)
+          sm.link_athlete(coach, ath, is_primary=True)
+
+          before = database.stats()
+          day = config.today_str()
+          sess = sm.get_or_create(cid, coach, 1, day)
+          sm.draft(sess["id"], ath, day, 0.9, origin="recognised", centre_id=cid)
+          after = database.stats()
+
+          bad = []
+          for k in ("present_today", "total_records"):
+              if before.get(k) != after.get(k):
+                  bad.append(f"{k}: {before.get(k)} -> {after.get(k)}")
+          if database.attendance_for_day(day):
+              bad.append("attendance_for_day returned a draft")
+
+          # And the other half: submitting MUST move them, or the assertion
+          # above could pass simply because nothing counts at all.
+          sm.submit(sess["id"], True, 0.9, "live")
+          done = database.stats()
+          if done.get("total_records") != after.get("total_records") + 1:
+              bad.append("submission did not promote the draft "
+                         f"({after.get('total_records')} -> {done.get('total_records')})")
+
+          if bad:
+              print("FAIL:")
+              for b in bad:
+                  print("  " + b)
+              sys.exit(1)
+          print("ok: drafts are invisible to the counts, and submission promotes them")
+          PY
+
   imports:
     name: Import check
     runs-on: ubuntu-latest

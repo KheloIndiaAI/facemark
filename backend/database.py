@@ -504,9 +504,45 @@ def _insert_templates(conn: Conn, student_id: int, templates: List[dict], now: s
     return rows
 
 
-def delete_student(student_id: int) -> None:
+def delete_student(student_id: int) -> dict:
+    """Remove a person and everything that points at them.
+
+    A person is no longer just a students row. Since v1 they may also have an
+    ACCOUNT, coach links in both directions, and registers they opened as a
+    coach. Templates and attendance cascade from the foreign keys; the rest
+    does not, and two of them would have blocked the delete outright with a
+    ForeignKeyViolation rather than failing quietly.
+
+    Returns what was removed, so a caller can report it rather than guess.
+    """
+    removed = {}
     with connect() as conn:
-        conn.execute("DELETE FROM students WHERE id = ?", (student_id,))
+        # Registers this person opened AS A COACH. The rows inside them are
+        # real attendance for OTHER people, so the session is detached rather
+        # than deleted - coach_id goes NULL and the register survives, the same
+        # reasoning as opened_by. Losing other athletes' attendance because
+        # their coach left would be a far worse outcome than an unattributed
+        # register.
+        removed["sessions_detached"] = conn.execute(
+            "UPDATE attendance_sessions SET coach_id = NULL WHERE coach_id = ?",
+            (student_id,),
+        ).rowcount
+        # Links in both directions: they may be somebody's coach and somebody
+        # else's athlete.
+        removed["coach_links"] = conn.execute(
+            "DELETE FROM coach_athletes WHERE coach_id = ? OR athlete_id = ?",
+            (student_id, student_id),
+        ).rowcount
+        # Their account. users.student_id is ON DELETE SET NULL, so without
+        # this the login would survive the person - an account that can sign in
+        # and has no identity behind it.
+        removed["accounts"] = conn.execute(
+            "DELETE FROM users WHERE student_id = ?", (student_id,)
+        ).rowcount
+        removed["student"] = conn.execute(
+            "DELETE FROM students WHERE id = ?", (student_id,)
+        ).rowcount
+    return removed
 
 
 def list_students(centre_id: Optional[int] = None, role: Optional[str] = None) -> List[dict]:
