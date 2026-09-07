@@ -1,148 +1,336 @@
 # FaceMark
 
-Attendance for Khelo India sports centres. A coach photographs the group, the
-system recognises who is present and marks the register — with the capture
-geo-tagged against the centre's location so attendance can be shown to have been
-taken where it was claimed.
+Attendance for Khelo India sports centres. A coach records a two-second clip of
+the group; the system checks the clip shows a live scene rather than a screen,
+recognises who is present, and marks the register — geo-tagged against the
+centre's location, so attendance can be shown to have been taken where it was
+claimed.
 
-Detection is YOLO11s-face fused with SCRFD; recognition is a three-model
-ArcFace/AdaFace ensemble matched against a multi-template gallery.
+Detection is YuNet, recognition is SFace, both from the OpenCV Zoo and both
+permissively licensed. Liveness comes from motion parallax rather than
+appearance. Everything runs on CPU; a group clip takes well under a second.
+
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** — running it on AWS, end to end
+- **[DEVELOPMENT.md](DEVELOPMENT.md)** — local setup, and the traps to know before changing code
+- **[DATA-HANDLING.md](DATA-HANDLING.md)** — what is stored, and the obligations that come with it
+- **[IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md)** — the next version: athletes attached to coaches, attendance as a reviewed register, athlete self-marking
 
 ---
 
 ## Quick start
 
+You need **PostgreSQL**. There is deliberately no SQLite fallback — see
+[Database](#database).
+
 ```bash
-python -m venv .venv
-.venv\Scripts\activate            # Linux/macOS: source .venv/bin/activate
+docker run -d --name attendance-db \
+  -e POSTGRES_DB=attendance -e POSTGRES_USER=attendance \
+  -e POSTGRES_PASSWORD=attendance \
+  -p 5432:5432 postgres:16-alpine
+
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python -m scripts.download_models  # ~450 MB, see the note below
+python -m scripts.download_models        # 37 MB, once
+cp .env.example .env                     # then set DATABASE_URL
 python run.py
 ```
 
 Open **http://127.0.0.1:8000**. On first run the console prints a generated
-`admin` password once — sign in with it and change it immediately from the
-sidebar. Set `FACEMARK_ADMIN_PASSWORD` beforehand to choose your own.
+`admin` password once; sign in and change it from the sidebar. Set
+`FACEMARK_ADMIN_PASSWORD` beforehand to choose your own.
 
-### Models
+`http://localhost` counts as a secure context, so the camera works there. It
+will **not** work over `http://<your-lan-ip>:8000` — browsers refuse
+`getUserMedia` outside a secure context, so testing on a phone needs HTTPS.
 
-Weights total about 1 GB and three files exceed GitHub's 100 MB limit, so they
-are not in the repo. `scripts/download_models.py` fetches four of them from
-public mirrors that were verified SHA-256-identical to known-good copies.
-`adaface_ir101.onnx` and `gfpgan_v1.4.onnx` have no usable public mirror — host
-them yourself and set `MODEL_ASSET_BASE` (see `DEPLOYMENT.md`). Both are
-optional: the ensemble renormalises over whichever models load.
+Optionally, `python -m scripts.fetch_frontend_models` downloads MediaPipe's face
+landmarker (~27 MB) for the on-device mesh overlay during enrolment. Without it
+the overlay falls back to server-drawn boxes; nothing else changes.
+
+---
+
+## What it does
+
+### Marking attendance
+
+The coach picks a centre, points the rear camera at the group, and records a
+**two-second clip**. There is no photo-upload path, deliberately: a still frame
+cannot distinguish a group from a photograph of a group.
+
+The clip is checked for liveness, the sharpest frame is pulled out, faces are
+detected and embedded, and identities are assigned. Every recognised person at
+the selected centre is marked present. People recognised from *other* centres
+are named but **not** marked — they were not at this centre's session, and a row
+saying otherwise would be false.
+
+The result screen shows the liveness verdict, photo quality with advice, the
+geo-fence status, who was recognised with match confidence, and every face that
+was not. Each unknown face has a **Who is this?** button that ranks the roster by
+similarity and lets the coach confirm in one click — which also stores that crop
+as a new template, so the same person matches unaided next time.
+
+### Enrolling someone
+
+Enrolment is a guided video recording, not a photo. The app shows a live mesh
+over the face, then prompts in sequence:
+
+> Hold still, looking at the camera → turn LEFT → turn RIGHT → tilt UP → tilt DOWN
+
+Each prompt is **verified before advancing**, using the same pose endpoint that
+drives the framing hints — so the clip is as long as the turns take (about
+three seconds at best, with a 45-second backstop) rather than a fixed timer that
+cannot guarantee the motion actually happened.
+
+One template is stored per distinct view. Views that land too close to one
+already captured are rejected by embedding similarity rather than by geometry,
+because yaw cannot be measured reliably from five landmarks.
+
+**Nothing is written unless the clip passes liveness.** A registration that
+fails leaves no roster row and no templates — the whole thing is one request so
+a partial failure cannot strand a person with no face data.
+
+### Liveness
+
+A photograph is a **plane**. Under camera movement every point on a plane maps
+through one homography — that is projective geometry, not a heuristic. A real
+face is not planar: the nose is centimetres nearer the lens than the ears, so no
+single homography fits, and the residual *is* depth, measured rather than
+inferred from appearance.
+
+Two earlier approaches were tried and abandoned, and the reasons are worth
+keeping:
+
+| Approach | Why it failed |
+|---|---|
+| Moiré + bezel detection | Assumes a lit screen in a dark surround. A phone held up in a bright office defeats it. |
+| MediaPipe 3D landmarks | It infers z from 2D appearance, so a photo of a face yields the same mesh. Measured: 0.1244 real vs 0.1239 replay — no separation. |
+
+**What this does not catch.** A video replayed on a screen is still a plane, so
+it is caught. A mask or a second live person is a genuine 3D artefact and would
+pass. This stops someone holding up a phone; it is not solved liveness and must
+not be described as such.
+
+**Parallax needs motion.** With no viewpoint change there is no depth
+information in the clip at all, so the answer is `inconclusive` — not `live`.
+That is a third outcome the UI surfaces honestly, because reporting "live" there
+would pass a photograph held perfectly still.
+
+### Geo-marking
+
+The browser's position is attached to each capture and compared against the
+centre's coordinates by haversine distance. Each record gets `inside`,
+`outside`, `no_fix` (browser gave no position) or `unknown` (no coordinates on
+file), with the distance in metres. **A refusal never blocks attendance** — it
+is recorded as unverified, not rejected.
 
 ---
 
 ## Roles
 
-Two roles, and the difference is enforced in SQL, not by hiding buttons.
+Two account roles, and the difference is enforced in SQL rather than by hiding
+buttons.
 
 | | Super admin | Coach |
 |---|---|---|
-| Centres | All, plus create/edit/import | Own centre only |
+| Centres | All, plus create / edit / import | Own centre only |
 | Athletes and coaches | All centres | Own centre only |
 | Attendance | All centres | Own centre only |
 | Login accounts | Full management | No access |
 
 A coach passing another centre's `centre_id` in a query string gets a 403 —
-`auth.scope_centre` narrows every query server-side.
+`auth.scope_centre` narrows every query server-side. The centre selector on the
+Mark page is not even rendered for a coach, because they are pinned regardless.
+
+Separately, enrolled **people** have a role of `athlete` or `coach`; both are in
+the recognition gallery, and the result screen counts them separately.
+
+Passwords are PBKDF2-HMAC-SHA256, 600,000 iterations, per-user salt. Sessions
+are opaque server-side tokens, so logout and deactivation take effect
+immediately. Login is throttled two ways — per account (8 failures, then a
+15-minute lock, shared across workers via the database) and per address (30
+attempts per 5 minutes, in-process). **Both checks run before any hashing**,
+which is the point: 600k PBKDF2 rounds with unlimited attempts is a way to
+saturate every worker from one laptop.
 
 ---
 
 ## How it works
 
-### Detection
+### Detection — YuNet
 
-Two detectors run and their boxes are merged by weighted box fusion. A box only
-one detector found must clear a higher confidence bar, because single-detector
-low-confidence boxes are almost always background texture — foliage, brick,
-clothing folds — rather than faces.
+MIT licensed, 227 KB, shipping inside OpenCV. Three modes trade recall against
+false positives: `fast` (score 0.85), `fused` (0.80, the default) and `accurate`
+(0.70).
 
-| Mode | What runs | Use for |
-|---|---|---|
-| `fast` | YOLO11s only | Large groups, speed priority |
-| `fused` | YOLO11s + SCRFD + WBF | Default |
-| `accurate` | YOLO with flip TTA + SCRFD | Hard photos |
+The 0.80 default was measured, not guessed. Across 81 detections in five test
+photographs, real faces never scored below **0.892** — including 21-pixel faces,
+so confidence is not merely tracking size — while a hand resting on a shoulder,
+detected as a face, sat at **0.632**. The face count is identical anywhere from
+0.70 to 0.89 and only collapses at 0.92 where real faces start dropping.
 
-### Recognition
+**Printed faces are rejected.** Group photos at sports centres are routinely
+taken in front of a banner carrying a printed portrait, which detects as a face
+and appears as a phantom attendee. A vinyl print under bright light loses colour
+saturation and gains brightness in a way real skin does not. All three
+conditions must hold before a face is dropped — any one alone can legitimately
+describe a badly-lit real face. Calibrated on 68 faces across four photos: it
+fired on the one poster and none of the 67 real faces. That is a single poster
+example, so check the `filtered_faces` count in the response rather than
+assuming it is right.
 
-Each face is aligned to the canonical 112×112 template, embedded by all three
-models with horizontal-flip TTA, and scored by cosine similarity. Per-model
-scores are max-pooled across each student's templates, then fused with
-renormalised weights.
+### Recognition — SFace
 
-A student owns several templates — the raw enrolment photo, a GFPGAN-restored
-version, an optional live photo, and any adapted from daily photos — so old and
-current appearances are both represented.
+Apache-2.0, 128-dimensional, L2-normalised, with alignment handled by OpenCV's
+own `alignCrop` from the detector's five landmarks.
 
-### Assignment
+A person owns several templates — one per view from guided capture, plus any
+confirmed through *Who is this?*, plus any adapted from daily clips. Matching
+max-pools over all of them, so an older reference and a current one are both
+represented.
 
-Faces are assigned to identities by the Hungarian algorithm, so no student can
-be marked present twice in one photo. Sub-threshold pairs are masked *before*
-the solve: `linear_sum_assignment` always returns `min(N, M)` pairs, so an
-unenrolled visitor left in the matrix would be handed an identity, and because
-the solver optimises the sum it would happily move a real student onto that
-stranger's face. Masking first means a face that cannot legitimately match
-anyone simply goes unassigned.
+**Threshold is 0.570.** SFace publishes 0.363 for 1:1 verification, but
+attendance is open-set — most faces in a group belong to nobody enrolled — and
+at 0.363 six strangers were accepted. 0.570 is the measured equal-error point
+and the lowest value that admits no stranger. It costs one genuine match in 45;
+that person appears under *Unregistered* and is confirmed in one click, whereas
+a stranger marked present is a false attendance record for a minor that nobody
+is prompted to check.
 
-### Geo-marking
+Faces narrower than 32 px must clear a bar 0.05 higher, because a small face
+carries a weaker identity signal.
 
-The browser's location is attached to each capture and compared against the
-centre's coordinates. Each record gets `inside`, `outside`, `no_fix` (browser
-gave no position) or `unknown` (centre has no coordinates), with the haversine
-distance. A refusal never blocks attendance.
+### Assignment — Hungarian
+
+Faces are assigned to identities by `linear_sum_assignment`, so nobody is marked
+present twice from one clip.
+
+Sub-threshold pairs are masked **before** the solve, not filtered after. The
+solver always returns `min(N, M)` pairs, so an unenrolled visitor left in the
+matrix would be handed an identity — and because it optimises the *sum*, it will
+happily move a real student onto that stranger's face when doing so buys a
+fraction of a point elsewhere, turning one stranger into two errors. Masking
+first means a face that cannot legitimately match anyone simply goes unassigned.
+
+### Continual learning
+
+A high-confidence match can be stored as a new `adapted` template, so the
+gallery tracks how people actually look at this centre. Three gates, all
+required: confidence ≥ 0.62, a margin of ≥ 0.20 over the runner-up, and a face
+at least 60 px. Confidence alone is not enough — a face scoring 0.65 against the
+right person and 0.60 against the wrong one is ambiguous, and a template learned
+from it raises impostor scores for everyone thereafter.
 
 ---
 
-## Testing
+## Database
 
-Three reusable harnesses. Run the server first for the security suite.
+**PostgreSQL, required.** `DATABASE_URL` must be set; the app refuses to start
+without it. A fallback that silently engaged would let a deployment come up
+writing to a container-local file that vanishes on the next deploy, which is
+exactly the failure the migration removed.
+
+`backend/db.py` is a thin shim rather than an ORM: it rewrites SQLite's `?`
+placeholders to `%s`, and provides a row type addressable by both name and
+position, because the codebase uses both. See [DEVELOPMENT.md](DEVELOPMENT.md)
+for the sharp edges — there are two, and both are silent.
+
+Migrating an existing SQLite install:
 
 ```bash
-python -m scripts.evaluate --sweep                        # FAR/FRR/EER, d-prime, per-person
-python -m scripts.robustness                              # degradation envelope
-python -m scripts.security_test --password <admin-pw>     # 48 checks
+python -m scripts.migrate_to_postgres --dry-run
+python -m scripts.migrate_to_postgres --photos
 ```
 
-`evaluate.py` deliberately **excludes `adapted` templates** by default. Those are
-built from processed group photos, so scoring those photos against them is
-self-matching — it returns similarities of 1.000 and a meaningless 100%.
+It preserves row ids so foreign keys stay valid, resets the `SERIAL` sequences
+afterwards, and deliberately does not carry sessions over.
 
-Measured on 13 enrolled athletes (see the validation report for the full
-caveats — 13 identities in one lighting condition is a narrow evidence base):
+## Photo storage
 
-| | |
-|---|---|
-| Identification | 26/26 across two frames |
-| False accepts, 16 strangers | 0 |
-| Separation d′ | 4.91 |
-| Equal error rate | 0.10% at threshold 0.385 |
-| Security checks | 48/48 |
+`FACEMARK_STORAGE=local` keeps photos under `data/`; `FACEMARK_STORAGE=s3` puts
+them in any S3-compatible bucket — AWS, Cloudflare R2, MinIO. Two prefixes:
+`students/` for enrolment portraits, `uploads/` for capture frames, annotated
+output and face crops.
 
-Robustness holds through 0.35–2.2× brightness, JPEG quality down to 15, tilt to
-22°, and half-size faces. **Motion blur is the weak axis** — matches start
-dropping at 5 px of blur. Across all 35 degraded variants there were no false
-matches: the system misses people rather than marking the wrong one.
+Photos are **streamed through the application**, not redirected to a presigned
+URL, so the session check gates every photograph of a minor.
 
 ---
 
 ## Configuration
 
-Everything lives in `backend/config.py`; these are the ones worth knowing.
+`.env.example` lists every variable with commentary. The ones worth knowing:
 
 | Setting | Default | Notes |
 |---|---|---|
-| `MATCH_THRESHOLD` | `0.38` | Measured 0.005 off the equal-error point. Don't move it without re-running `scripts/evaluate.py --sweep`. |
-| `TTA_SCALES` | `(1.0,)` | Flip TTA only. The second warp scale cost 12 s per photo *and* lost a match. |
-| `DETECTOR_CONF` / `SCRFD_CONF` | `0.25` / `0.50` | SCRFD below ~0.45 emits background boxes YOLO never confirms. |
-| `CONTINUAL_LEARNING` | `True` | Gated on confidence **and** margin over the runner-up **and** face size. Confidence alone let ambiguous faces poison the gallery. |
-| `GFPGAN_ENABLED` | `True` | `0` saves ~325 MB RAM. |
+| `DATABASE_URL` | *(none)* | Required. No fallback. |
+| `FACEMARK_STORAGE` | `local` | `local` or `s3`. |
+| `S3_REGION` | `auto` | Correct for R2, **wrong for AWS** — set the real region. |
+| `FACEMARK_TIMEZONE` | `Asia/Kolkata` | Decides what "today" means. Not cosmetic: a 5 AM session on a UTC server files under yesterday. |
+| `COOKIE_SECURE` | `0` | `1` in production, and only with working TLS. |
+| `DETECTION_MODE` | `fused` | `fast` \| `fused` \| `accurate`. |
 
-Environment overrides: `FACEMARK_DATA_DIR`, `FACEMARK_MODELS_DIR`,
-`FACEMARK_ADMIN_PASSWORD`, `CORS_ORIGINS`, `COOKIE_SECURE`, `DETECTION_MODE`,
-`ORT_THREADS`. See `DEPLOYMENT.md`.
+Recognition thresholds live in `backend/config.py`, each next to the measurement
+that produced it. `MATCH_THRESHOLD` is not an environment variable — moving it
+should mean re-running the evaluation, not editing a deploy config.
+
+---
+
+## Testing and evidence
+
+```bash
+python -m scripts.evaluate --sweep                      # FAR/FRR/EER, d-prime, per-person
+python -m scripts.robustness                            # degradation envelope
+python -m scripts.security_test --password <admin-pw>   # ~40 checks, needs a running server
+python -m scripts.calibrate_liveness --live DIR --spoof DIR
+```
+
+`evaluate.py` excludes `adapted` templates by default. Those are built from
+processed capture frames, so scoring those frames against them is self-matching
+— it returns similarities of 1.000 and a meaningless 100%.
+
+### What the evidence actually supports
+
+Read this before quoting a number.
+
+**Face size is the measured driver of accuracy**, obtained by shrinking one
+photo and re-testing the same people:
+
+| Median face width | Recall |
+|---|---|
+| 50 px | 100% |
+| 42 px | 92% |
+| 32 px | 77% |
+| 24 px | 23% |
+
+This is the finding the product acts on — it is why the result screen rates
+photo quality and tells a coach at capture time when a register should not be
+trusted.
+
+**Liveness thresholds** were re-measured on real people through real browser VP8
+encoding after synthetic clips proved misleading:
+
+| | depth | motion |
+|---|---|---|
+| Flat photo, real VP8 | 0.0038 – 0.0055 | 0.17 – 0.21 |
+| Real face, small natural motion | 0.0072 – 0.0097 | 0.098 – 0.099 |
+| Real face, deliberate pose change | 0.17 – 0.32 | 0.20 – 0.37 |
+
+`LIVENESS_MIN_DEPTH` is 0.006, between the two clusters and biased toward the
+flat side on purpose. The margin is thin — two people, one capture pipeline —
+and needs more real clips before it can be called settled.
+
+**Caveats that matter.** The identification numbers come from roughly 13
+enrolled athletes in one lighting condition. `data/eval_labels.json` has three
+photos, one of which is a second frame of the same burst — a repeatability
+check, not an independent sample. At that N, an "equal error rate of 0.00%" is
+not a measurable quantity, whatever the sweep prints. And `scripts/live_test.py`
+— the harness whose threshold table justifies `MATCH_THRESHOLD` — currently
+crashes, so that table is not reproducible today. See
+[DEVELOPMENT.md](DEVELOPMENT.md#script-status).
+
+The defensible claim is: *this identified a small number of known athletes under
+one set of conditions and rejected the strangers it was shown.* That is a
+promising pilot result, not a validated accuracy figure.
 
 ---
 
@@ -150,48 +338,54 @@ Environment overrides: `FACEMARK_DATA_DIR`, `FACEMARK_MODELS_DIR`,
 
 ```
 backend/
-  main.py         attendance pipeline, enrolment, static host
-  routes.py       auth, users, centres, people
-  auth.py         PBKDF2 passwords, server-side sessions, role scoping
-  centres.py      centre registry, search, haversine geo-fencing
-  detector.py     YOLO + SCRFD + weighted box fusion
-  recognizer.py   ensemble embedding and score fusion
-  metaheuristics.py  Hungarian assignment
-  database.py     SQLite schema and migrations
-frontend/         vanilla SPA, no build step
-scripts/
-  download_models.py  fetch weights
-  evaluate.py         biometric metrics
-  robustness.py       degradation envelope
-  security_test.py    security and input validation
-  cleanup_gallery.py  purge adapted templates / template-less students
-  archive/            broken one-off scripts, kept for reference
+  main.py           video + photo pipelines, enrolment, static host
+  routes.py         auth, users, centres, people
+  auth.py           PBKDF2 passwords, sessions, role scoping, login throttling
+  db.py             PostgreSQL pool, placeholder translation, advisory locks
+  database.py       schema, gallery, attendance, analytics
+  storage.py        switchable photo storage (local | S3)
+  liveness.py       parallax depth from a short clip
+  detector.py       YuNet, quality gates, printed-face rejection
+  recognizer.py     SFace embedding and score fusion
+  metaheuristics.py Hungarian assignment
+  centres.py        centre registry, search, haversine geo-fencing
+frontend/           vanilla SPA, no build step, installable PWA
+scripts/            models, migration, evaluation, calibration  (see DEVELOPMENT.md)
+.github/workflows/  CI on every push, deploy to EC2 on dev
 ```
 
 ---
 
 ## Known issues
 
-- **Legacy adapted templates.** The 40 currently in the database were written
-  under the old loose gate. Measured effect: no accuracy benefit, one false
-  positive, and separation d′ down from 4.91 to 3.67. Clear them with
-  `python -m scripts.cleanup_gallery --apply --keep-ghosts`.
-- **Latency.** About 16 s per group photo on CPU. A GPU with `onnxruntime-gpu`
-  should bring that to a few seconds, but that is projected, not measured.
-- **Demo centres.** First run seeds eight placeholder centres, every one flagged
-  `is_demo` and prefixed `DEMO-`. They are **not** real Khelo India records.
-  Replace them via Centres → Import, or delete with Centres → Remove demo.
+- **Demo centres.** First run seeds eight placeholders, each flagged `is_demo`
+  and prefixed `DEMO-`. They are **not** real Khelo India records. Replace via
+  Centres → Import, or delete with Centres → Remove demo.
+- **Several scripts are stale or broken**, including two that are destructive.
+  [DEVELOPMENT.md](DEVELOPMENT.md#script-status) has the current status of each;
+  check it before running anything in `scripts/`.
+- **`/api/health` returns 200 even when the database is unreachable** — it
+  reports `"database": "unreachable"` in the body. That is deliberate, so an
+  operator can see *why*, but it means container health checks do not catch a
+  database outage.
+- **The still-photo endpoints remain** (`POST /api/attendance/process`,
+  `POST /api/students`) and are unauthenticated against liveness by nature. The
+  frontend no longer calls them; `scripts/enroll_from_pdf.py` and
+  `scripts/bulk_assign.py` still do.
 
 ---
 
 ## Handling biometric data
 
-This stores face embeddings and photographs of children. Face templates are not
-revocable the way a password is. Before real deployment: obtain informed consent
-from guardians, publish a retention period and honour it, restrict who holds
-super-admin accounts, and check your obligations under the DPDP Act 2023.
-Nothing in this codebase discharges those duties.
+This stores face embeddings and photographs of children. A face template is not
+revocable the way a password is. Before any real deployment, read
+**[DATA-HANDLING.md](DATA-HANDLING.md)** — obtaining informed consent from
+guardians, publishing and enforcing a retention period, restricting super-admin
+accounts, and checking your obligations under the DPDP Act 2023 are all
+prerequisites, and nothing in this codebase discharges them.
 
-## License
+## Licence
 
-MIT.
+MIT. Every model and dependency permits commercial use — see
+[DEPLOYMENT.md](DEPLOYMENT.md) for the full licence table and what was removed
+to get there.
