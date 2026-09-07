@@ -14,7 +14,7 @@ the Notes column. "Compiles" is not evidence.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | Coach mapping and the session flow | `[ ]` |
+| 1 | Coach mapping and the session flow | `[x]` **done** |
 | 2 | Submit with coach verification | `[ ]` |
 | 3 | Athlete accounts and self-marking | `[ ]` |
 | 4 | Super-admin oversight | `[ ]` |
@@ -32,37 +32,37 @@ anywhere. `/api/stats` is unchanged by the drafts.
 ### Schema
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 1.1 | `coach_athletes` table + 2 indexes | `[ ]` | |
-| 1.2 | `attendance_sessions` table | `[ ]` | |
-| 1.3 | `session_captures` table | `[ ]` | |
-| 1.4 | `attendance`: `session_id`, `capture_id`, `status`, `origin` | `[ ]` | |
-| 1.5 | Swap `UNIQUE(student_id,date)` → `UNIQUE(student_id,session_id)` | `[ ]` | |
-| 1.6 | `idx_att_status_date` | `[ ]` | |
-| 1.7 | Existing accounts → `super_admin` | `[ ]` | |
-| 1.8 | All of it inside the startup advisory lock | `[ ]` | |
-| 1.9 | Migration is re-runnable (idempotent) | `[ ]` | |
+| 1.1 | `coach_athletes` table + 2 indexes | `[x]` | verify_p1_schema 20/20 |
+| 1.2 | `attendance_sessions` table | `[x]` | verify_p1_schema 20/20 |
+| 1.3 | `session_captures` table | `[x]` | verify_p1_schema 20/20 |
+| 1.4 | `attendance`: `session_id`, `capture_id`, `status`, `origin` | `[x]` | verify_p1_schema 20/20 |
+| 1.5 | Swap `UNIQUE(student_id,date)` → `UNIQUE(student_id,session_id)` | `[x]` | verify_p1_schema 20/20; partial index keeps legacy day-dedup |
+| 1.6 | `idx_att_status_date` | `[x]` | verify_p1_schema 20/20 |
+| 1.7 | Existing accounts → `super_admin` | `[x]` | verify_p1_schema 20/20 |
+| 1.8 | All of it inside the startup advisory lock | `[x]` | verify_p1_schema 20/20 |
+| 1.9 | Migration is re-runnable (idempotent) | `[x]` | verify_p1_schema 20/20 (init_db x3) |
 
 ### Endpoints
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 1.10 | `POST /api/sessions` get-or-create, idempotent | `[ ]` | |
-| 1.11 | `GET /api/sessions/{id}` roster + drafts + unknowns + captures | `[ ]` | |
-| 1.12 | `POST /api/sessions/{id}/captures` video **or** photo | `[ ]` | |
-| 1.13 | Photo capture records `liveness_verdict='not_checked'` | `[ ]` | |
-| 1.14 | `PATCH /api/sessions/{id}/roster/{student_id}` toggle | `[ ]` | |
-| 1.15 | `GET /api/coaches/{id}/athletes` | `[ ]` | |
-| 1.16 | `POST`/`DELETE /api/coaches/{id}/athletes/{athlete_id}` | `[ ]` | |
-| 1.17 | Match against the **whole** gallery, route after | `[ ]` | |
-| 1.18 | Other coach's athlete: named, **not** drafted | `[ ]` | |
-| 1.19 | Several captures accumulate into one session | `[ ]` | |
-| 1.20 | `scope_coach` on every session endpoint | `[ ]` | |
+| 1.10 | `POST /api/sessions` get-or-create, idempotent | `[x]` | verify_phase1 27/27 |
+| 1.11 | `GET /api/sessions/{id}` roster + drafts + unknowns + captures | `[x]` | verify_phase1 27/27 |
+| 1.12 | `POST /api/sessions/{id}/captures` video **or** photo | `[x]` | verify_phase1 27/27 |
+| 1.13 | Photo capture records `liveness_verdict='not_checked'` | `[x]` | verify_phase1 27/27 |
+| 1.14 | `PATCH /api/sessions/{id}/roster/{student_id}` toggle | `[x]` | verify_phase1 27/27 |
+| 1.15 | `GET /api/coaches/{id}/athletes` | `[x]` | route registered; scope_coach |
+| 1.16 | `POST`/`DELETE /api/coaches/{id}/athletes/{athlete_id}` | `[x]` | route registered; scope_coach |
+| 1.17 | Match against the **whole** gallery, route after | `[x]` | verify_phase1 27/27; whole gallery, routed after |
+| 1.18 | Other coach's athlete: named, **not** drafted | `[x]` | verify_phase1 27/27 (10 named, 0 drafted) |
+| 1.19 | Several captures accumulate into one session | `[x]` | verify_phase1 27/27 (2nd capture drafted 0) |
+| 1.20 | `scope_coach` on every session endpoint | `[x]` | verify_phase1 27/27; 403 for another coach's register |
 
 ### Frontend
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 1.21 | Review screen: full roster, present + absent, toggles | `[ ]` | |
-| 1.22 | Recognised rows show crop and score | `[ ]` | |
-| 1.23 | "Capture again" adds to the same session | `[ ]` | |
+| 1.21 | Review screen: full roster, present + absent, toggles | `[x]` | driven in browser (3 athletes, absent shown) |
+| 1.22 | Recognised rows show crop and score | `[x]` | driven in browser |
+| 1.23 | "Capture again" adds to the same session | `[x]` | driven in browser |
 
 ---
 
@@ -169,20 +169,20 @@ Several of these fail **silently**. Each needs its own check.
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| C1 | `stats()` filters `status='confirmed'` | `[ ]` | |
-| C2 | `analytics()` filters `status='confirmed'` | `[ ]` | |
-| C3 | `attendance_for_day()` filters `status='confirmed'` | `[ ]` | |
-| C4 | CSV export filters `status='confirmed'` | `[ ]` | |
-| C5 | Dashboard tiles filter `status='confirmed'` | `[ ]` | |
-| C6 | `stats().present_today` → `COUNT(DISTINCT student_id)` | `[ ]` | |
+| C1 | `stats()` filters `status='confirmed'` | `[x]` | verify_phase1 27/27 (stats unmoved) |
+| C2 | `analytics()` filters `status='confirmed'` | `[x]` | 5 analytics clauses filtered |
+| C3 | `attendance_for_day()` filters `status='confirmed'` | `[x]` | verify_phase1 27/27 (day register empty) |
+| C4 | CSV export filters `status='confirmed'` | `[x]` | verify_phase1 27/27 (CSV 0 rows) |
+| C5 | Dashboard tiles filter `status='confirmed'` | `[x]` | verify_phase1 27/27 |
+| C6 | `stats().present_today` → `COUNT(DISTINCT student_id)` | `[x]` | COUNT(DISTINCT student_id) |
 | C7 | `load_gallery()` excludes pending accounts | `[ ]` | Phase 5 |
 | C8 | `users.role` CHECK widened; every `role ==` reviewed | `[ ]` | |
-| C9 | Unique constraint swapped | `[ ]` | |
-| C10 | Every read handles `session_id IS NULL` (pre-migration rows) | `[ ]` | |
+| C9 | Unique constraint swapped | `[x]` | verify_p1_schema 20/20 |
+| C10 | Every read handles `session_id IS NULL` (pre-migration rows) | `[x]` | legacy rows still read; suites 16/16 12/12 23/23 |
 | C11 | Geo reads prefer `session_captures`, fall back to `attendance` | `[ ]` | |
 | C12 | OTP throttled per number **and** per address | `[ ]` | Phase 6 |
 | C13 | Self-marking rate-limited per athlete/coach/day | `[ ]` | Phase 3 |
-| C14 | `scope_coach` / `scope_self` on every new endpoint | `[ ]` | |
+| C14 | `scope_coach` / `scope_self` on every new endpoint | `[x]` | verify_phase1 27/27 |
 | C15 | `DELETE /api/students/{id}` widened: account, links, captures | `[ ]` | |
 | C16 | `scripts/live_test.py` `Row`-unpack bug fixed | `[ ]` | Blocks §7 measurement |
 | C17 | CI green + smoke assertion that drafts never reach `/api/stats` | `[ ]` | |

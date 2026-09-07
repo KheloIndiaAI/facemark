@@ -454,6 +454,12 @@ function handleRoute() {
         root.appendChild(tpl);
         initMarkPage();
     }
+    else if (hash === '/register') {
+        title.textContent = 'Register';
+        const tpl = document.getElementById('tpl-register').content.cloneNode(true);
+        root.appendChild(tpl);
+        initRegisterPage();
+    }
     else if (hash === '/students') {
         title.textContent = 'Students';
         actions.innerHTML = `
@@ -512,10 +518,14 @@ const api = {
             throw err;
         }
     },
-    async postForm(endpoint, formData) {
+    // `method` exists because the register toggle is a PATCH. Without it the
+    // third argument was silently ignored and every toggle POSTed to a route
+    // that only accepts PATCH, which is a 405 the caller reports as a generic
+    // failure.
+    async postForm(endpoint, formData, method = 'POST') {
         try {
             const res = await fetch(endpoint, {
-                method: 'POST',
+                method,
                 body: formData
             });
             if (res.status === 401) { handleUnauthorized(); throw new Error('Unauthorized'); }
@@ -1585,6 +1595,167 @@ async function executeDeleteStudent(id) {
     } catch (err) {
         // Error handled in api
     }
+}
+
+
+/* ---------------------------------------------------------------------------
+   The register (v1)
+
+   The coach's review screen. Attendance is no longer whatever the recogniser
+   returned - it is this list, after a human has looked at it.
+
+   Two things this screen must do that a results panel does not:
+     * show athletes who are ABSENT as well as present, because a register you
+       cannot use to notice who is missing is not a register; and
+     * make every row togglable, since the recogniser is the draft and the
+       coach is the authority.
+--------------------------------------------------------------------------- */
+
+let regSession = null;
+
+async function initRegisterPage() {
+    const btn = document.getElementById('reg-capture-btn');
+    if (btn) btn.addEventListener('click', regCapture);
+
+    // Delegated, not per-row: the roster is re-rendered after every toggle and
+    // per-row listeners would leak one per render.
+    const host = document.getElementById('reg-roster');
+    if (host) {
+        host.addEventListener('click', (e) => {
+            const el = e.target.closest('[data-toggle-student]');
+            if (!el) return;
+            regToggle(parseInt(el.dataset.toggleStudent, 10), el.dataset.present !== 'true');
+        });
+    }
+    await regOpen();
+}
+
+async function regOpen() {
+    try {
+        const fd = new FormData();
+        if (state.user && state.user.centre_id) fd.append('centre_id', state.user.centre_id);
+        const r = await api.postForm('/api/sessions', fd);
+        regSession = r.session;
+        await regLoad();
+    } catch (err) {
+        const meta = document.getElementById('reg-session-meta');
+        if (meta) meta.textContent = (err && err.message) || 'Could not open a register.';
+    }
+}
+
+async function regLoad() {
+    if (!regSession) return;
+    const data = await api.get(`/api/sessions/${regSession.id}`);
+    regSession = data.session;
+
+    const meta = document.getElementById('reg-session-meta');
+    if (meta) {
+        meta.textContent =
+            `${data.session.date} \u00b7 ${data.present_count} of ${data.roster_count} present`
+            + ` \u00b7 ${data.captures.length} capture${data.captures.length === 1 ? '' : 's'}`
+            + ` \u00b7 ${data.session.status}`;
+    }
+
+    const host = document.getElementById('reg-roster');
+    if (!host) return;
+    if (!data.roster.length) {
+        host.innerHTML = `<div class="empty-state">
+            <div>No athletes are linked to you yet.</div>
+            <div class="text-xs text-muted" style="margin-top:6px">
+                A super admin links athletes to a coach.</div></div>`;
+        return;
+    }
+
+    host.innerHTML = data.roster.map(e => {
+        const on = e.present;
+        const badge = !on ? ''
+            : e.origin === 'self_marked'
+                ? '<span class="badge badge-blue">Self-marked</span>'
+                : e.origin === 'coach_added'
+                    ? '<span class="badge badge-blue">Added by you</span>'
+                    : `<span class="badge badge-green">Recognised${
+                        e.confidence ? ' \u00b7 ' + Math.round(e.confidence * 100) + '%' : ''}</span>`;
+        const geo = (on && e.geo_status && e.geo_status !== 'inside')
+            ? `<span class="badge badge-amber">${Charts.esc(e.geo_status)}${
+                e.distance_m ? ' \u00b7 ' + Math.round(e.distance_m) + 'm' : ''}</span>` : '';
+        const crop = e.crop_url
+            ? `<img src="${e.crop_url}" alt="" style="width:40px;height:40px;border-radius:8px;object-fit:cover">`
+            : '<div style="width:40px;height:40px;border-radius:8px;background:var(--bg-subtle)"></div>';
+        return `
+        <div class="list-row" style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border-subtle)">
+            ${crop}
+            <div style="flex:1;min-width:0">
+                <div style="font-weight:600">${Charts.esc(e.name)}</div>
+                <div class="text-xs text-muted font-mono">${Charts.esc(e.roll_no || '')}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">${badge}${geo}</div>
+            <button type="button" class="btn ${on ? 'btn-secondary' : 'btn-primary'}"
+                    style="height:30px;font-size:12px;padding:0 12px"
+                    data-toggle-student="${e.student_id}" data-present="${on}">
+                ${on ? 'Present' : 'Mark present'}
+            </button>
+        </div>`;
+    }).join('');
+
+    const namedCard = document.getElementById('reg-named-card');
+    const named = document.getElementById('reg-named');
+    if (namedCard && named) {
+        const list = regLastNamed || [];
+        namedCard.style.display = list.length ? '' : 'none';
+        named.innerHTML = list.map(x => `
+            <div style="padding:6px 0;border-bottom:1px solid var(--border-subtle)">
+                <span style="font-weight:600">${Charts.esc(x.name || '')}</span>
+                <span class="text-xs text-muted font-mono"> ${Charts.esc(x.roll_no || '')}</span>
+                <span class="text-xs text-muted"> \u2014 ${
+                    (x.coaches || []).map(c => Charts.esc(c.coach_name)).join(', ') || 'no coach'}</span>
+            </div>`).join('');
+    }
+}
+
+let regLastNamed = [];
+
+async function regToggle(studentId, present) {
+    try {
+        const fd = new FormData();
+        fd.append('present', present ? 'true' : 'false');
+        await api.postForm(`/api/sessions/${regSession.id}/roster/${studentId}`, fd, 'PATCH');
+        await regLoad();
+    } catch (err) {
+        showToast('Could not change that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+function regCapture() {
+    if (!regSession) return;
+    openClipCapture({
+        title: 'Capture the group',
+        intro: 'Point the camera at the group and record a few seconds, moving the '
+             + 'phone slightly. Capture again for anyone missed.',
+        onClip: async (file, ui) => {
+            ui.status('Checking the clip\u2026');
+            try {
+                const fd = new FormData();
+                fd.append('media', file);
+                fd.append('kind', 'video');
+                const r = await api.postForm(`/api/sessions/${regSession.id}/captures`, fd);
+                if (r.ok === false) {
+                    ui.status(livenessBanner(r.liveness, r.message), true);
+                    showToast('Not accepted', r.message || 'The clip was refused', 'error');
+                    await ui.resume();
+                    return;
+                }
+                regLastNamed = r.other_coach || [];
+                ui.close();
+                showToast('Capture added',
+                          `${r.newly_drafted} added \u00b7 ${r.recognized_count} recognised`,
+                          'success');
+                await regLoad();
+            } catch (err) {
+                ui.status((err && err.message) || 'Could not add that capture.');
+                await ui.resume();
+            }
+        },
+    });
 }
 
 // --- Toasts ---

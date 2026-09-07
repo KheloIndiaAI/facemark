@@ -127,7 +127,13 @@ CREATE TABLE IF NOT EXISTS attendance_sessions (
     id                 SERIAL PRIMARY KEY,
     centre_id          INTEGER NOT NULL REFERENCES centres(id),
     coach_id           INTEGER REFERENCES students(id),  -- NULL = super-admin sweep
-    opened_by          INTEGER NOT NULL REFERENCES users(id),
+    -- Nullable, ON DELETE SET NULL, deliberately against the plan's DDL.
+    -- With NOT NULL and no delete action, removing a coach account that
+    -- had ever opened a register raised ForeignKeyViolation - so either
+    -- accounts became undeletable or the register had to be destroyed
+    -- with them. A register losing its author is recoverable; losing
+    -- the attendance is not.
+    opened_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
     date               TEXT NOT NULL,
     status             TEXT NOT NULL DEFAULT 'draft',    -- draft | submitted | expired
     created_at         TEXT NOT NULL,
@@ -237,6 +243,7 @@ def init_db() -> None:
         _drop_age_columns(conn)
         # After the columns exist - the swap references session_id.
         _swap_attendance_uniqueness(conn)
+        _relax_session_author_fk(conn)
         _promote_legacy_accounts(conn)
 
 
@@ -275,6 +282,30 @@ def _swap_attendance_uniqueness(conn: Conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_att_status_date ON attendance(status, date)"
     )
+
+
+def _relax_session_author_fk(conn: Conn) -> None:
+    """Let a user be deleted without taking their registers with them.
+
+    The table was first created with `opened_by INTEGER NOT NULL REFERENCES
+    users(id)` and no delete action, which made any coach who had opened a
+    register undeletable. Repairs a database created before that was fixed.
+    """
+    row = conn.execute(
+        "SELECT confdeltype FROM pg_constraint "
+        "WHERE conrelid = 'attendance_sessions'::regclass "
+        "  AND conname = 'attendance_sessions_opened_by_fkey'"
+    ).fetchone()
+    if not row or row[0] == "n":          # 'n' = SET NULL, already done
+        return
+    conn.execute("ALTER TABLE attendance_sessions "
+                 "DROP CONSTRAINT attendance_sessions_opened_by_fkey")
+    conn.execute("ALTER TABLE attendance_sessions "
+                 "ALTER COLUMN opened_by DROP NOT NULL")
+    conn.execute("ALTER TABLE attendance_sessions "
+                 "ADD CONSTRAINT attendance_sessions_opened_by_fkey "
+                 "FOREIGN KEY (opened_by) REFERENCES users(id) ON DELETE SET NULL")
+    log.info("Relaxed attendance_sessions.opened_by so accounts stay deletable.")
 
 
 def _promote_legacy_accounts(conn: Conn) -> None:
