@@ -331,6 +331,41 @@ def scope_centre(user: dict, requested: Optional[int] = None) -> Optional[int]:
     return user["centre_id"]
 
 
+def coach_student_id(user: dict) -> int:
+    """The students row this coach IS, not the athletes they coach.
+
+    A coach is a person in `students` as well as an account in `users`, because
+    they have a face and get recognised like anyone else. Sessions and
+    coach_athletes both key on that students id, so an account without one
+    cannot open a register - and that is a configuration error worth naming
+    rather than a foreign-key violation deep in an insert.
+    """
+    sid = user.get("student_id")
+    if not sid:
+        raise HTTPException(
+            400,
+            "This account is not linked to a person record, so it cannot take "
+            "attendance. A super admin needs to link it to an enrolled coach.",
+        )
+    return int(sid)
+
+
+def scope_coach(user: dict, coach_id: Optional[int]) -> Optional[int]:
+    """The coach id this request may act as.
+
+    A coach may only ever act on their own register - passing someone else's
+    coach_id must not widen access, the same way scope_centre refuses a
+    different centre. A super admin may act as any coach, or as None for a
+    centre-wide sweep.
+    """
+    if user["role"] == "super_admin":
+        return coach_id
+    own = coach_student_id(user)
+    if coach_id is not None and int(coach_id) != own:
+        raise HTTPException(403, "You can only work on your own register")
+    return own
+
+
 def bootstrap_default_admin() -> Optional[str]:
     """Create the first super admin if no users exist yet.
 

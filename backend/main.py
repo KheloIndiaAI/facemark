@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import (auth, centres as centres_mod, config, database, db as pgdb,
+               sessions as sessions_mod,
                liveness, metaheuristics, routes, storage, utils)
 from .detector import Face, estimate_landmarks, get_detector
 from .enhancer import get_enhancer, sharpness_quality
@@ -1369,6 +1370,315 @@ async def enroll_from_video(
     )
     response["liveness"] = liveness_payload
     return response
+
+
+
+# =============================================================================
+# v1 registers - sessions, captures, review
+# =============================================================================
+#
+# These live here rather than in routes.py because a capture needs the whole
+# recognition pipeline, and main.py is where that already is. The CRUD half
+# could sit in routes.py, but splitting one flow across two modules to satisfy
+# a filing rule makes it harder to follow, not easier.
+#
+# The invariant for this phase: NOTHING here writes a confirmed row. Captures
+# produce drafts. Promotion happens on submit, which is phase 2.
+
+
+def _session_or_404(session_id: int) -> dict:
+    sess = sessions_mod.get(session_id)
+    if not sess:
+        raise HTTPException(404, "No such register")
+    return sess
+
+
+def _may_touch(user: dict, sess: dict) -> None:
+    """A coach may only work on their own register."""
+    if user["role"] == "super_admin":
+        return
+    own = auth.coach_student_id(user)
+    if sess.get("coach_id") is None or int(sess["coach_id"]) != own:
+        raise HTTPException(403, "You can only work on your own register")
+
+
+@app.post("/api/sessions")
+def open_session(
+    centre_id: Optional[int] = Form(None),
+    coach_id: Optional[int] = Form(None),
+    date_str: Optional[str] = Form(None),
+    user: dict = Depends(auth.current_user),
+):
+    """Get or create today's register. Idempotent - calling it twice is safe."""
+    scoped_centre = auth.scope_centre(user, centre_id)
+    if scoped_centre is None:
+        raise HTTPException(400, "A centre is required to open a register")
+    scoped_coach = auth.scope_coach(user, coach_id)
+    sess = sessions_mod.get_or_create(
+        scoped_centre, scoped_coach, int(user["id"]), date_str
+    )
+    return {"ok": True, "session": sess}
+
+
+@app.get("/api/sessions/{session_id}")
+def read_session(session_id: int, user: dict = Depends(auth.current_user)):
+    """The register: every athlete of this coach, present and absent.
+
+    Absent athletes are returned too, deliberately. A review screen that only
+    lists who was recognised cannot be used to notice who is missing, which is
+    the entire reason a human looks at it.
+    """
+    sess = _session_or_404(session_id)
+    _may_touch(user, sess)
+
+    rows = sessions_mod.rows_of(session_id)
+    coach_id = sess.get("coach_id")
+    if coach_id is not None:
+        roster = sessions_mod.athletes_of(int(coach_id))
+    else:
+        # Admin sweep: the centre's whole roster.
+        roster = [s for s in database.list_students()
+                  if s.get("centre_id") == sess["centre_id"]]
+
+    entries = []
+    for st in roster:
+        row = rows.get(int(st["id"]))
+        entries.append({
+            "student_id": int(st["id"]),
+            "name": st["name"],
+            "roll_no": st.get("roll_no"),
+            "role": st.get("role", "athlete"),
+            "photo_url": (f"/api/photos/{Path(st['photo_path']).name}"
+                          if st.get("photo_path") else None),
+            "present": row is not None,
+            "status": row["status"] if row else None,
+            "origin": row.get("origin") if row else None,
+            "confidence": row.get("confidence") if row else None,
+            "crop_url": (f"/api/uploads/{Path(row['image_path']).name}"
+                         if row and row.get("image_path") else None),
+            "geo_status": row.get("geo_status") if row else None,
+            "distance_m": row.get("distance_m") if row else None,
+        })
+
+    # Anyone drafted who is NOT on this coach's roster - an admin sweep, or a
+    # link removed after the capture. Showing them prevents a silent orphan.
+    known = {e["student_id"] for e in entries}
+    extra = []
+    for sid, row in rows.items():
+        if sid in known:
+            continue
+        st = database.get_student(sid)
+        if not st:
+            continue
+        extra.append({
+            "student_id": sid, "name": st["name"], "roll_no": st.get("roll_no"),
+            "present": True, "status": row["status"], "origin": row.get("origin"),
+            "confidence": row.get("confidence"), "off_roster": True,
+        })
+
+    return {
+        "ok": True,
+        "session": sess,
+        "roster": entries,
+        "off_roster": extra,
+        "captures": sessions_mod.captures_of(session_id),
+        "present_count": sum(1 for e in entries if e["present"]) + len(extra),
+        "roster_count": len(entries),
+    }
+
+
+@app.post("/api/sessions/{session_id}/captures")
+async def add_session_capture(
+    session_id: int,
+    media: UploadFile = File(...),
+    kind: Optional[str] = Form(None),
+    threshold: Optional[float] = Form(None),
+    detection_mode: Optional[str] = Form(None),
+    latitude: Optional[float] = Form(None),
+    longitude: Optional[float] = Form(None),
+    accuracy_m: Optional[float] = Form(None),
+    user: dict = Depends(auth.current_user),
+):
+    """Add one capture to a register. Video or photo.
+
+    Video runs the parallax liveness check. A photo cannot be checked at all -
+    a still frame is exactly what a replay reproduces - so it is recorded as
+    `not_checked` rather than pretended about. That is acceptable here only
+    because a human submits the register under their own face afterwards.
+
+    Capturing again ADDS to the session. Recall is 100% at 50-pixel faces and
+    23% at 24 pixels, so one frame across a hall loses most of a large group -
+    several captures is the normal case, not an edge case.
+    """
+    sess = _session_or_404(session_id)
+    _may_touch(user, sess)
+    if sess["status"] != "draft":
+        raise HTTPException(409, "This register has already been submitted")
+
+    data = await media.read()
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    filename = (media.filename or "").lower()
+    is_video = (kind or "").lower() == "video" or filename.endswith(
+        (".webm", ".mp4", ".mkv", ".mov", ".m4v")
+    )
+
+    detector = get_detector()
+    verdict = "not_checked"
+    depth = None
+
+    if is_video:
+        result = liveness.analyse(data, detector)
+        verdict = result.verdict
+        depth = result.depth_score
+        if verdict != "live":
+            return {
+                "ok": False, "session_id": session_id,
+                "message": result.reason,
+                "liveness": result.to_dict(),
+            }
+        img = result.best_frame
+        if img is None:
+            raise HTTPException(400, "No usable frame in that clip")
+        media_bytes = utils.encode_jpeg(img) if hasattr(utils, "encode_jpeg") else None
+    else:
+        try:
+            img = utils.decode_image(data)
+        except ValueError:
+            raise HTTPException(400, "That file is not an image")
+        media_bytes = data
+
+    ts = utils.timestamp()
+    media_name = f"capture_{session_id}_{ts}.jpg"
+    utils.save_image(img, "uploads", media_name)
+
+    active_centre = sess["centre_id"]
+    geo = centres_mod.evaluate_location(active_centre, latitude, longitude)
+
+    thr = threshold if threshold is not None else config.MATCH_THRESHOLD
+    det_mode = detection_mode or config.DETECTION_MODE
+
+    # WHOLE gallery, filtered afterwards - see sessions.route_recognised.
+    gallery = database.load_gallery()
+    if not gallery:
+        raise HTTPException(400, "Nobody is enrolled yet")
+    recognizer = get_recognizer()
+    weights = {m.name: m.weight for m in recognizer.models}
+
+    faces = detector.detect(img, mode=det_mode)
+    recognised: List[dict] = []
+    if faces:
+        queries = recognizer.embed_faces(img, faces)
+        fused, gallery_ids = fuse_scores(queries, gallery, weights)
+        if fused is not None and len(gallery_ids):
+            n_f, n_g = len(faces), len(gallery_ids)
+            thr_matrix = np.full((n_f, n_g), float(thr), dtype=np.float64)
+            for i, f in enumerate(faces):
+                if min(f.width, f.height) < config.SMALL_FACE_PX:
+                    thr_matrix[i, :] += config.SMALL_FACE_THRESHOLD_BUMP
+            from .metaheuristics import GlobalMatchOptimizer
+            pairs = GlobalMatchOptimizer.optimize_assignments(
+                fused, gallery_ids, threshold=thr_matrix
+            )
+            by_id = database.get_students(sid for _, sid, _ in pairs)
+            for face_idx, sid, sim in pairs:
+                st = by_id.get(int(sid))
+                if not st:
+                    continue
+                crop_name = f"face_{ts}_{face_idx}.jpg"
+                utils.save_image(utils.crop_face(img, faces[face_idx]), "uploads", crop_name)
+                recognised.append({
+                    "student_id": int(sid), "name": st["name"],
+                    "roll_no": st.get("roll_no"), "centre_id": st.get("centre_id"),
+                    "similarity": float(sim), "crop": crop_name,
+                    "confidence": utils.similarity_to_confidence(float(sim), thr),
+                })
+
+    routed = sessions_mod.route_recognised(
+        sess.get("coach_id"), recognised, active_centre
+    )
+
+    capture_id = sessions_mod.add_capture(
+        session_id, media_name, "video" if is_video else "photo",
+        liveness_verdict=verdict, liveness_depth=depth,
+        faces_detected=len(faces), recognised=len(recognised),
+        latitude=latitude, longitude=longitude,
+        geo_status=geo["geo_status"], distance_m=geo["distance_m"],
+    )
+
+    drafted = 0
+    for r in routed["draft"]:
+        if sessions_mod.draft(
+            session_id, int(r["student_id"]), sess["date"], float(r["similarity"]),
+            origin="recognised", image_path=r.get("crop"), capture_id=capture_id,
+            centre_id=active_centre, latitude=latitude, longitude=longitude,
+            accuracy_m=accuracy_m, geo_status=geo["geo_status"],
+            distance_m=geo["distance_m"], marked_by=int(user["id"]),
+        ):
+            drafted += 1
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "capture_id": capture_id,
+        "kind": "video" if is_video else "photo",
+        "liveness": {"verdict": verdict, "depth_score": depth},
+        "faces_detected": len(faces),
+        "recognized_count": len(recognised),
+        "newly_drafted": drafted,
+        "drafted": routed["draft"],
+        "other_coach": routed["other_coach"],
+        "other_centre": routed["other_centre"],
+        "unknown_count": max(0, len(faces) - len(recognised)),
+        "geo": {"status": geo["geo_status"], "distance_m": geo["distance_m"]},
+    }
+
+
+@app.patch("/api/sessions/{session_id}/roster/{student_id}")
+def toggle_roster(
+    session_id: int,
+    student_id: int,
+    present: bool = Form(...),
+    user: dict = Depends(auth.current_user),
+):
+    """Tick or untick one person by hand. Drafts only."""
+    sess = _session_or_404(session_id)
+    _may_touch(user, sess)
+    if sess["status"] != "draft":
+        raise HTTPException(409, "This register has already been submitted")
+    action = sessions_mod.set_present(
+        session_id, student_id, present, sess["date"],
+        sess["centre_id"], int(user["id"]),
+    )
+    return {"ok": True, "action": action, "present": present}
+
+
+@app.get("/api/coaches/{coach_id}/athletes")
+def coach_roster(coach_id: int, user: dict = Depends(auth.current_user)):
+    scoped = auth.scope_coach(user, coach_id)
+    return {"ok": True, "coach_id": scoped,
+            "athletes": sessions_mod.athletes_of(int(scoped))}
+
+
+@app.post("/api/coaches/{coach_id}/athletes/{athlete_id}")
+def link_athlete(coach_id: int, athlete_id: int,
+                 user: dict = Depends(auth.current_user)):
+    scoped = auth.scope_coach(user, coach_id)
+    if not database.get_student(athlete_id):
+        raise HTTPException(404, "No such person")
+    try:
+        created = sessions_mod.link_athlete(int(scoped), athlete_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "created": created}
+
+
+@app.delete("/api/coaches/{coach_id}/athletes/{athlete_id}")
+def unlink_athlete(coach_id: int, athlete_id: int,
+                   user: dict = Depends(auth.current_user)):
+    scoped = auth.scope_coach(user, coach_id)
+    return {"ok": True, "removed": sessions_mod.unlink_athlete(int(scoped), athlete_id)}
 
 
 @app.get("/api/attendance/suggest")

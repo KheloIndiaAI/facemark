@@ -8,6 +8,8 @@ Learning ADDS templates rather than overwriting, so nothing is lost.
 """
 from __future__ import annotations
 
+import logging
+
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -15,6 +17,8 @@ import numpy as np
 
 from . import config
 from .db import Conn, IntegrityError, Row, connect  # noqa: F401 - re-exported
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS students (
@@ -101,6 +105,65 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE INDEX IF NOT EXISTS idx_users_centre ON users(centre_id);
 
+-- ---------------------------------------------------------------- v1: links
+-- An athlete may train under more than one coach - a strength coach at 6am and
+-- a sport coach at 4pm are two real sessions - so this is a join table rather
+-- than a column on students.
+CREATE TABLE IF NOT EXISTS coach_athletes (
+    id         SERIAL PRIMARY KEY,
+    coach_id   INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    athlete_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    is_primary INTEGER NOT NULL DEFAULT 0,   -- the coach who approved them
+    created_at TEXT NOT NULL,
+    UNIQUE (coach_id, athlete_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ca_coach   ON coach_athletes(coach_id);
+CREATE INDEX IF NOT EXISTS idx_ca_athlete ON coach_athletes(athlete_id);
+
+-- ------------------------------------------------------------ v1: registers
+-- A register the coach builds from one or more captures and then submits under
+-- their own face. Attendance is no longer written by the recogniser directly.
+CREATE TABLE IF NOT EXISTS attendance_sessions (
+    id                 SERIAL PRIMARY KEY,
+    centre_id          INTEGER NOT NULL REFERENCES centres(id),
+    coach_id           INTEGER REFERENCES students(id),  -- NULL = super-admin sweep
+    opened_by          INTEGER NOT NULL REFERENCES users(id),
+    date               TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'draft',    -- draft | submitted | expired
+    created_at         TEXT NOT NULL,
+    expires_at         TEXT NOT NULL,
+    submitted_at       TEXT,
+    submitter_verified INTEGER,
+    submitter_score    DOUBLE PRECISION,
+    submitter_liveness TEXT
+);
+-- Partial, not a table constraint: a NULL coach_id (super-admin sweep) must not
+-- collide with itself, and Postgres treats NULLs in a UNIQUE constraint as
+-- distinct - which would silently allow two coach registers for the same day
+-- if the column were ever NULL for a coach. Two indexes state the rule exactly.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_coach_day
+    ON attendance_sessions(centre_id, coach_id, date) WHERE coach_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sweep_day
+    ON attendance_sessions(centre_id, date) WHERE coach_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_date ON attendance_sessions(date, status);
+
+CREATE TABLE IF NOT EXISTS session_captures (
+    id               SERIAL PRIMARY KEY,
+    session_id       INTEGER NOT NULL REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+    media_key        TEXT NOT NULL,
+    kind             TEXT NOT NULL,            -- video | photo
+    liveness_verdict TEXT,                     -- live | screen | inconclusive | not_checked
+    liveness_depth   DOUBLE PRECISION,
+    faces_detected   INTEGER,
+    recognised       INTEGER,
+    latitude         DOUBLE PRECISION,
+    longitude        DOUBLE PRECISION,
+    geo_status       TEXT,
+    distance_m       DOUBLE PRECISION,
+    created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_captures_session ON session_captures(session_id);
+
 CREATE TABLE IF NOT EXISTS auth_sessions (
     token      TEXT PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -156,6 +219,12 @@ def init_db() -> None:
         })
         _drop_removed_tables(conn)
         _ensure_columns(conn, "attendance", {
+            "session_id": "INTEGER REFERENCES attendance_sessions(id) ON DELETE CASCADE",
+            "capture_id": "INTEGER REFERENCES session_captures(id) ON DELETE SET NULL",
+            # Existing rows take the default and are therefore 'confirmed',
+            # which is what they are - they predate the review step.
+            "status": "TEXT NOT NULL DEFAULT 'confirmed'",   # draft | confirmed
+            "origin": "TEXT",                 # recognised | self_marked | coach_added
             "centre_id": "INTEGER REFERENCES centres(id) ON DELETE SET NULL",
             "latitude": "DOUBLE PRECISION",
             "longitude": "DOUBLE PRECISION",
@@ -166,6 +235,62 @@ def init_db() -> None:
         })
         # Runs last: dropping before _ensure_columns would let it re-add them.
         _drop_age_columns(conn)
+        # After the columns exist - the swap references session_id.
+        _swap_attendance_uniqueness(conn)
+        _promote_legacy_accounts(conn)
+
+
+def _swap_attendance_uniqueness(conn: Conn) -> None:
+    """Move attendance uniqueness from (student, day) to (student, session).
+
+    An athlete under two coaches attends two sessions in one day and both are
+    real attendance, so the day-scoped constraint rejects the second - which
+    looks like a silent failure to mark someone present.
+
+    The legacy path is preserved deliberately. Rows written before sessions (and
+    by the pre-session /api/attendance/process route, which stays alive during
+    migration) carry session_id IS NULL, and Postgres treats NULLs in a UNIQUE
+    constraint as distinct - so (student_id, session_id) would place no
+    restriction on them at all and the same person could be marked ten times in
+    a day. The partial index below keeps exactly the old rule for exactly those
+    rows, and mark_attendance's ON CONFLICT infers it via the same predicate.
+    """
+    have = {
+        r["conname"]
+        for r in conn.execute(
+            "SELECT conname FROM pg_constraint WHERE conrelid = 'attendance'::regclass"
+        ).fetchall()
+    }
+    if "attendance_student_id_date_key" in have:
+        conn.execute("ALTER TABLE attendance DROP CONSTRAINT attendance_student_id_date_key")
+    if "attendance_student_session_key" not in have:
+        conn.execute(
+            "ALTER TABLE attendance ADD CONSTRAINT attendance_student_session_key "
+            "UNIQUE (student_id, session_id)"
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_att_legacy_day "
+        "ON attendance(student_id, date) WHERE session_id IS NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_att_status_date ON attendance(status, date)"
+    )
+
+
+def _promote_legacy_accounts(conn: Conn) -> None:
+    """Existing accounts become super admins, per the v1 brief.
+
+    Guarded on there being no super admin yet, so it fires once on the upgrade
+    and never re-promotes a coach who was deliberately created later.
+    """
+    already = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE role = 'super_admin'"
+    ).fetchone()[0]
+    if already:
+        return
+    n = conn.execute("UPDATE users SET role = 'super_admin' WHERE role = 'coach'").rowcount
+    if n:
+        log.warning("Promoted %d existing account(s) to super_admin for v1.", n)
 
 
 def _drop_removed_tables(conn: Conn) -> None:
@@ -302,7 +427,8 @@ def list_students(centre_id: Optional[int] = None, role: Optional[str] = None) -
         # with 2 attendance rows and 12 templates reports 24 of each.
         rows = conn.execute(
             "SELECT s.id, s.name, s.roll_no, s.photo_path, s.created_at, "
-            "(SELECT COUNT(*) FROM attendance a WHERE a.student_id = s.id) AS total_present, "
+            "(SELECT COUNT(*) FROM attendance a WHERE a.student_id = s.id "
+            " AND a.status = 'confirmed') AS total_present, "
             "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id) AS templates, "
             "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id AND t.source = 'adapted') AS adapted, "
             "s.role, s.centre_id, s.gender, s.sport, s.phone "
@@ -488,7 +614,12 @@ def mark_attendance(
             "INSERT INTO attendance (student_id, date, confidence, image_path, "
             "marked_at, centre_id, latitude, longitude, accuracy_m, geo_status, distance_m, marked_by) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT (student_id, date) DO NOTHING",
+            # The predicate is required, not decoration: uniqueness on
+            # (student_id, date) is now a PARTIAL index covering only legacy
+            # rows, and Postgres will not infer a partial index unless the
+            # ON CONFLICT clause repeats its WHERE. Without it this raises
+            # InvalidColumnReference on every insert.
+            "ON CONFLICT (student_id, date) WHERE session_id IS NULL DO NOTHING",
             (
                 student_id, day, confidence, image_path,
                 config.now_stamp(),
@@ -506,7 +637,10 @@ def attendance_for_day(day: str, centre_id: Optional[int] = None) -> List[dict]:
             "s.name, s.roll_no, s.photo_path, s.role, s.sport, c.name AS centre_name "
             "FROM attendance a JOIN students s ON s.id = a.student_id "
             "LEFT JOIN centres c ON c.id = a.centre_id "
-            "WHERE a.date = ?" + (" AND a.centre_id = ?" if centre_id is not None else "") +
+            # Drafts belong to a register nobody has submitted yet, so they
+            # are not attendance and must not appear in one.
+            "WHERE a.status = 'confirmed' AND a.date = ?"
+            + (" AND a.centre_id = ?" if centre_id is not None else "") +
             " ORDER BY a.marked_at DESC",
             (day,) if centre_id is None else (day, centre_id),
         ).fetchall()
@@ -518,7 +652,8 @@ def student_attendance_history(student_id: int) -> List[dict]:
     with connect() as conn:
         rows = conn.execute(
             "SELECT a.id, a.date, a.confidence, a.marked_at "
-            "FROM attendance a WHERE a.student_id = ? ORDER BY a.date DESC",
+            "FROM attendance a WHERE a.student_id = ? AND a.status = 'confirmed' "
+            "ORDER BY a.date DESC",
             (student_id,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -553,21 +688,29 @@ def stats(centre_id: Optional[int] = None) -> dict:
             + (" AND s.centre_id = ?" if centre_id is not None else ""), cp
         ).fetchone()[0]
         acs = " AND a.centre_id = ?" if centre_id is not None else ""
+        # COUNT(DISTINCT student_id), not COUNT(*): an athlete under two
+        # coaches legitimately appears in two sessions on the same day, and a
+        # plain count would report them as two people present.
         present_today = conn.execute(
-            "SELECT COUNT(*) FROM attendance a JOIN students s ON s.id = a.student_id "
-            "WHERE a.date = ? AND s.role = 'athlete'" + acs, [today] + cp
+            "SELECT COUNT(DISTINCT a.student_id) FROM attendance a "
+            "JOIN students s ON s.id = a.student_id "
+            "WHERE a.status = 'confirmed' AND a.date = ? AND s.role = 'athlete'"
+            + acs, [today] + cp
         ).fetchone()[0]
         coaches_present_today = conn.execute(
-            "SELECT COUNT(*) FROM attendance a JOIN students s ON s.id = a.student_id "
-            "WHERE a.date = ? AND s.role = 'coach'" + acs, [today] + cp
+            "SELECT COUNT(DISTINCT a.student_id) FROM attendance a "
+            "JOIN students s ON s.id = a.student_id "
+            "WHERE a.status = 'confirmed' AND a.date = ? AND s.role = 'coach'"
+            + acs, [today] + cp
         ).fetchone()[0]
         total_rows = conn.execute(
-            "SELECT COUNT(*) FROM attendance a WHERE 1=1" + acs, cp
+            "SELECT COUNT(*) FROM attendance a WHERE a.status = 'confirmed'" + acs, cp
         ).fetchone()[0]
         recent = conn.execute(
             "SELECT a.date, a.marked_at, a.confidence, s.name, s.roll_no "
             "FROM attendance a JOIN students s ON s.id = a.student_id "
-            "WHERE 1=1" + (" AND a.centre_id = ?" if centre_id is not None else "") +
+            "WHERE a.status = 'confirmed'"
+            + (" AND a.centre_id = ?" if centre_id is not None else "") +
             " ORDER BY a.marked_at DESC LIMIT 8", cp
         ).fetchall()
     return {
@@ -675,7 +818,7 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
             for r in conn.execute(
                 "SELECT a.date, COUNT(DISTINCT a.student_id) "
                 "FROM attendance a JOIN students s ON s.id = a.student_id "
-                "WHERE s.role = 'athlete'" + acs +
+                "WHERE a.status = 'confirmed' AND s.role = 'athlete'" + acs +
                 " GROUP BY a.date ORDER BY a.date DESC LIMIT ?", cp + [days]
             )
         ][::-1]                      # oldest first for the chart's x-axis
@@ -683,7 +826,8 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
         geo_rows = conn.execute(
             "SELECT COALESCE(a.geo_status, 'unverified'), COUNT(*) "
             "FROM attendance a JOIN students s ON s.id = a.student_id "
-            "WHERE s.role = 'athlete'" + acs + " GROUP BY 1", cp
+            "WHERE a.status = 'confirmed' AND s.role = 'athlete'" + acs
+            + " GROUP BY 1", cp
         ).fetchall()
         geo = {r[0]: r[1] for r in geo_rows}
 
@@ -692,7 +836,8 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
             for r in conn.execute(
                 "SELECT c.code, c.name, "
                 "  (SELECT COUNT(*) FROM attendance a JOIN students s2 ON s2.id = a.student_id "
-                "     WHERE a.centre_id = c.id AND s2.role = 'athlete'), "
+                "     WHERE a.status = 'confirmed' AND a.centre_id = c.id "
+                "       AND s2.role = 'athlete'), "
                 "  (SELECT COUNT(*) FROM students s3 WHERE s3.centre_id = c.id AND s3.role = 'athlete') "
                 "FROM centres c ORDER BY 3 DESC"
             ) if r[2] or r[3]
@@ -710,14 +855,16 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
                 # float8 keeps the bucket a JSON number, as the chart expects.
                 "SELECT CAST(a.confidence * 20 AS INT) / 20.0::double precision, COUNT(*) "
                 "FROM attendance a JOIN students s ON s.id = a.student_id "
-                "WHERE s.role = 'athlete' AND a.confidence IS NOT NULL" + acs +
+                "WHERE a.status = 'confirmed' AND s.role = 'athlete' "
+                "  AND a.confidence IS NOT NULL" + acs +
                 " GROUP BY 1 ORDER BY 1", cp
             )
         ]
 
         sessions = conn.execute(
             "SELECT COUNT(DISTINCT a.date) FROM attendance a "
-            "JOIN students s ON s.id = a.student_id WHERE s.role = 'athlete'" + acs, cp
+            "JOIN students s ON s.id = a.student_id "
+            "WHERE a.status = 'confirmed' AND s.role = 'athlete'" + acs, cp
         ).fetchone()[0]
 
         # Per-athlete reliability, worst first: this is the list a coach acts on.
@@ -726,7 +873,14 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
              "rate": round(100.0 * r[2] / sessions, 1) if sessions else 0.0}
             for r in conn.execute(
                 "SELECT s.name, s.roll_no, COUNT(DISTINCT a.date) "
-                "FROM students s LEFT JOIN attendance a ON a.student_id = s.id "
+                # The status filter belongs in the JOIN, not the WHERE. This is
+                # a LEFT JOIN so that an athlete with no attendance still
+                # appears with a count of zero - and this list is ordered worst
+                # first, so those are precisely the rows a coach needs. Moving
+                # the condition to WHERE would turn it into an inner join and
+                # silently drop them.
+                "FROM students s LEFT JOIN attendance a "
+                "  ON a.student_id = s.id AND a.status = 'confirmed' "
                 "WHERE s.role = 'athlete' "
                 "AND EXISTS (SELECT 1 FROM templates t WHERE t.student_id = s.id)" + cs +
                 " GROUP BY s.id ORDER BY 3 ASC", cp
