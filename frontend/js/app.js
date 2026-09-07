@@ -1616,6 +1616,8 @@ let regSession = null;
 async function initRegisterPage() {
     const btn = document.getElementById('reg-capture-btn');
     if (btn) btn.addEventListener('click', regCapture);
+    const sub = document.getElementById('reg-submit-btn');
+    if (sub) sub.addEventListener('click', regSubmit);
 
     // Delegated, not per-row: the roster is re-rendered after every toggle and
     // per-row listeners would leak one per render.
@@ -1654,6 +1656,17 @@ async function regLoad() {
             `${data.session.date} \u00b7 ${data.present_count} of ${data.roster_count} present`
             + ` \u00b7 ${data.captures.length} capture${data.captures.length === 1 ? '' : 's'}`
             + ` \u00b7 ${data.session.status}`;
+    }
+
+    const submitted = data.session.status === 'submitted';
+    const capBtn = document.getElementById('reg-capture-btn');
+    const subBtn = document.getElementById('reg-submit-btn');
+    if (capBtn) capBtn.disabled = submitted;
+    if (subBtn) {
+        subBtn.disabled = submitted;
+        subBtn.textContent = submitted
+            ? (data.session.submitter_verified ? 'Submitted' : 'Submitted (unverified)')
+            : 'Submit register';
     }
 
     const host = document.getElementById('reg-roster');
@@ -1752,6 +1765,55 @@ function regCapture() {
                 await regLoad();
             } catch (err) {
                 ui.status((err && err.message) || 'Could not add that capture.');
+                await ui.resume();
+            }
+        },
+    });
+}
+
+
+/* Submitting is what turns drafts into attendance, so it asks for the coach's
+   own face. A failed check may be retried; after config.VERIFY_MAX_RETRIES the
+   server submits anyway and records it as unverified for an admin to see. The
+   attempt counter is tracked here because the server is stateless about it. */
+let regAttempt = 1;
+
+function regSubmit() {
+    if (!regSession) return;
+    regAttempt = 1;
+    openClipCapture({
+        title: 'Confirm it is you',
+        intro: 'Record a few seconds of your own face to sign this register. '
+             + 'Move the phone slightly while recording.',
+        onClip: async (file, ui) => {
+            ui.status('Checking\u2026');
+            try {
+                const fd = new FormData();
+                fd.append('clip', file);
+                fd.append('attempt', String(regAttempt));
+                const r = await api.postForm(`/api/sessions/${regSession.id}/submit`, fd);
+
+                if (r.submitted === false) {
+                    regAttempt += 1;
+                    ui.status(`${r.message}. ${r.retries_left} attempt`
+                              + `${r.retries_left === 1 ? '' : 's'} left.`);
+                    await ui.resume();
+                    return;
+                }
+                ui.close();
+                if (r.verified) {
+                    showToast('Register submitted',
+                              `${r.promoted} marked present`, 'success');
+                } else {
+                    // Not an error: the register IS submitted. Saying otherwise
+                    // would leave a coach re-recording something already done.
+                    showToast('Submitted, unverified',
+                              'Your face could not be verified, so this has been '
+                              + 'flagged for an administrator.', 'warning');
+                }
+                await regLoad();
+            } catch (err) {
+                ui.status((err && err.message) || 'Could not submit.');
                 await ui.resume();
             }
         },

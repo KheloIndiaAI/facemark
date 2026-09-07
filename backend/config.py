@@ -355,6 +355,27 @@ ORT_THREADS = max(1, (os.cpu_count() or 4) // 2)
 ORT_GRAPH_OPT = True
 WARMUP_ON_START = True         # pre-run models once to avoid first-request JIT lag
 
+# --- 1:1 verification -------------------------------------------------------
+# NOT MATCH_THRESHOLD, deliberately. That number (0.570) is tuned for open-set
+# identification: one face against a whole roster, where the job is to keep out
+# a stranger who resembles somebody. These two are 1:1 checks - the person has
+# already said who they are and the question is only whether the face agrees -
+# so the same figure would be far stricter than necessary, and the cost of that
+# strictness lands on somebody trying to do their job.
+#
+# SFace publishes 0.363 as its cosine threshold for verification, which is what
+# these start from. Re-measure before trusting them in the field; they have not
+# been calibrated on this population.
+COACH_VERIFY_THRESHOLD = float(os.environ.get("COACH_VERIFY_THRESHOLD") or 0.363)
+SELF_VERIFY_THRESHOLD  = float(os.environ.get("SELF_VERIFY_THRESHOLD") or 0.363)
+
+# How many times somebody may retry a failed verification before the register
+# is submitted anyway and flagged. A genuine person refused is worse than a
+# spoof let through: an unverified register that exists and is visible to an
+# admin beats a verified register that was never taken.
+VERIFY_MAX_RETRIES = int(os.environ.get("VERIFY_MAX_RETRIES") or 3)
+
+
 # --- Attendance ------------------------------------------------------------
 ATTENDANCE_DATE_FORMAT = "%Y-%m-%d"
 

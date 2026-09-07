@@ -23,6 +23,8 @@ import logging
 from datetime import timedelta
 from typing import Dict, List, Optional
 
+import numpy as np
+
 from . import config
 from .db import Conn, connect
 
@@ -324,3 +326,79 @@ def route_recognised(coach_id: Optional[int], recognised: List[dict],
         r["coaches"] = owners
         out["other_coach"].append(r)
     return out
+
+
+# =============================================================================
+# 1:1 verification and submission
+# =============================================================================
+
+def verify_face(img, student_id: int) -> dict:
+    """Does this face belong to this specific person?
+
+    Scored through the SAME fuse_scores path as open-set recognition, on a
+    gallery narrowed to one person, so the number means the same thing on both
+    sides and the two thresholds are comparable. Returns the best similarity
+    over that person's templates.
+    """
+    from .detector import get_detector
+    from .recognizer import fuse_scores, get_recognizer
+    from . import database
+
+    detector, recognizer = get_detector(), get_recognizer()
+    faces = detector.detect(img)
+    if not faces:
+        return {"ok": False, "score": 0.0, "reason": "No face found in that clip"}
+
+    # The largest face: the person holding the phone at arm's length is nearer
+    # the lens than anyone behind them.
+    face = max(faces, key=lambda f: f.width * f.height)
+
+    gallery = database.load_gallery()
+    narrowed = {}
+    for model, (tids, sids, mat) in gallery.items():
+        keep = np.asarray(sids).astype(int) == int(student_id)
+        if keep.any():
+            narrowed[model] = (np.asarray(tids)[keep], np.asarray(sids)[keep], mat[keep])
+    if not narrowed:
+        return {"ok": False, "score": 0.0,
+                "reason": "This person has no enrolled face to check against"}
+
+    queries = recognizer.embed_faces(img, [face])
+    weights = {m.name: m.weight for m in recognizer.models}
+    fused, ids = fuse_scores(queries, narrowed, weights)
+    if fused is None or not len(ids):
+        return {"ok": False, "score": 0.0, "reason": "Could not read that face"}
+    score = float(np.max(fused[0]))
+    return {"ok": True, "score": score, "reason": ""}
+
+
+def submit(session_id: int, verified: bool, score: float,
+           liveness_verdict: str) -> dict:
+    """Promote every draft in this register to confirmed, in ONE transaction.
+
+    All-or-nothing on purpose. A partial promotion would leave a register that
+    is half real and half not, with nothing on screen to say which half - and
+    the coach has already signed for the whole thing.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM attendance_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("No such register")
+        if row["status"] != "draft":
+            raise ValueError("This register has already been submitted")
+
+        promoted = conn.execute(
+            "UPDATE attendance SET status = 'confirmed' "
+            "WHERE session_id = ? AND status = 'draft'",
+            (session_id,),
+        ).rowcount
+        conn.execute(
+            "UPDATE attendance_sessions SET status = 'submitted', submitted_at = ?, "
+            "submitter_verified = ?, submitter_score = ?, submitter_liveness = ? "
+            "WHERE id = ?",
+            (config.now_stamp(), 1 if verified else 0, score, liveness_verdict,
+             session_id),
+        )
+    return {"promoted": promoted, "verified": verified, "score": score}

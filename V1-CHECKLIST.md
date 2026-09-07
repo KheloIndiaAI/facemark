@@ -15,7 +15,7 @@ the Notes column. "Compiles" is not evidence.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Coach mapping and the session flow | `[x]` **done** |
-| 2 | Submit with coach verification | `[ ]` |
+| 2 | Submit with coach verification | `[x]` **done** |
 | 3 | Athlete accounts and self-marking | `[ ]` |
 | 4 | Super-admin oversight | `[ ]` |
 | 5 | Pending accounts and approval | `[ ]` |
@@ -74,13 +74,13 @@ after submission.
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 2.1 | `COACH_VERIFY_THRESHOLD` (not `MATCH_THRESHOLD`) | `[ ]` | |
-| 2.2 | `POST /api/sessions/{id}/submit` self-clip | `[ ]` | |
-| 2.3 | Liveness + **1:1** match vs the coach's own templates | `[ ]` | |
-| 2.4 | Promotion of all drafts in **one transaction** | `[ ]` | |
-| 2.5 | Failed verification still submits, recorded unverified | `[ ]` | |
-| 2.6 | `submitter_verified/score/liveness` stored | `[ ]` | |
-| 2.7 | Session closes on submit | `[ ]` | |
+| 2.1 | `COACH_VERIFY_THRESHOLD` (not `MATCH_THRESHOLD`) | `[x]` | 0.363 (SFace 1:1), separate from MATCH_THRESHOLD |
+| 2.2 | `POST /api/sessions/{id}/submit` self-clip | `[x]` | verify_phase2 20/20 |
+| 2.3 | Liveness + **1:1** match vs the coach's own templates | `[x]` | self 0.796 vs impostor 0.295, threshold 0.363 |
+| 2.4 | Promotion of all drafts in **one transaction** | `[x]` | one UPDATE; 3 promoted atomically |
+| 2.5 | Failed verification still submits, recorded unverified | `[x]` | submits on attempt 3, verified=0 |
+| 2.6 | `submitter_verified/score/liveness` stored | `[x]` | verified/score/liveness all stored |
+| 2.7 | Session closes on submit | `[x]` | status submitted; resubmit + toggle both 409 |
 
 ---
 
@@ -195,7 +195,7 @@ Several of these fail **silently**. Each needs its own check.
 |---|---|---|---|
 | T1 | Fix `live_test.py`, re-run `evaluate.py --sweep` | `[ ]` | Same as C16 |
 | T2 | Re-measure and pick `MATCH_THRESHOLD` deliberately | `[ ]` | Do **not** just lower it |
-| T3 | `COACH_VERIFY_THRESHOLD` chosen (1:1, ~0.363 published) | `[ ]` | Phase 2 |
+| T3 | `COACH_VERIFY_THRESHOLD` chosen (1:1, ~0.363 published) | `[x]` | Phase | 0.363; measured separation 0.80 vs 0.30 |
 | T4 | `SELF_VERIFY_THRESHOLD` chosen (1:1) | `[ ]` | Phase 3 |
 
 ---

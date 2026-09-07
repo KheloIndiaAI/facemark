@@ -1635,6 +1635,82 @@ async def add_session_capture(
     }
 
 
+
+@app.post("/api/sessions/{session_id}/submit")
+async def submit_session(
+    session_id: int,
+    clip: UploadFile = File(...),
+    attempt: int = Form(1),
+    user: dict = Depends(auth.current_user),
+):
+    """Close the register under the submitter's own face.
+
+    Liveness plus a 1:1 check against that person's own templates. On pass,
+    every draft is promoted in one transaction.
+
+    On FAILURE the caller may retry. After config.VERIFY_MAX_RETRIES attempts
+    the register is submitted anyway and recorded as unverified, with the score
+    and the liveness verdict, for the admin dashboard. That asymmetry is
+    deliberate and runs through this whole system: a genuine person refused is
+    worse than a spoof let through, and an unverified register that exists and
+    is flagged beats a verified register that was never taken.
+    """
+    sess = _session_or_404(session_id)
+    _may_touch(user, sess)
+    if sess["status"] != "draft":
+        raise HTTPException(409, "This register has already been submitted")
+
+    who = auth.coach_student_id(user)
+    data = await clip.read()
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    detector = get_detector()
+    result = liveness.analyse(data, detector)
+    img = result.best_frame
+
+    verified, score, reason = False, 0.0, ""
+    if result.verdict != "live" or img is None:
+        reason = result.reason or "Could not confirm this was live"
+    else:
+        v = sessions_mod.verify_face(img, who)
+        score = float(v.get("score") or 0.0)
+        if not v["ok"]:
+            reason = v["reason"]
+        elif score >= config.COACH_VERIFY_THRESHOLD:
+            verified = True
+        else:
+            reason = "That face does not match your enrolled photo"
+
+    last_attempt = int(attempt) >= config.VERIFY_MAX_RETRIES
+    if not verified and not last_attempt:
+        return {
+            "ok": False, "verified": False, "submitted": False,
+            "attempt": int(attempt), "retries_left": config.VERIFY_MAX_RETRIES - int(attempt),
+            "score": round(score, 4), "liveness": result.to_dict(),
+            "message": reason or "Verification failed - try again",
+        }
+
+    try:
+        out = sessions_mod.submit(session_id, verified, score, result.verdict)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+    if not verified:
+        log.warning(
+            "Register %s submitted UNVERIFIED by user %s (score %.4f, liveness %s)",
+            session_id, user["id"], score, result.verdict,
+        )
+    return {
+        "ok": True, "submitted": True, "verified": verified,
+        "promoted": out["promoted"], "score": round(score, 4),
+        "liveness": result.to_dict(),
+        "message": ("Register submitted" if verified else
+                    "Register submitted, but your face could not be verified - "
+                    "this has been flagged for an administrator"),
+    }
+
+
 @app.patch("/api/sessions/{session_id}/roster/{student_id}")
 def toggle_roster(
     session_id: int,
