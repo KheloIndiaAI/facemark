@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import (auth, centres as centres_mod, config, database, db as pgdb,
-               sessions as sessions_mod,
+               sessions as sessions_mod, signup as signup_mod,
                liveness, metaheuristics, routes, storage, utils)
 from .detector import Face, estimate_landmarks, get_detector
 from .enhancer import get_enhancer, sharpness_quality
@@ -1932,6 +1932,155 @@ def decide_approval(
     except ValueError as e:
         raise HTTPException(409, str(e))
     return {"ok": True, **out}
+
+
+
+# =============================================================================
+# Self-signup (unauthenticated)
+# =============================================================================
+#
+# The only unauthenticated write path in the app. Every step after the first
+# requires the opaque token the first returns, so nobody can post a face into
+# somebody else's pending account or read a centre's coach roster uninvited.
+# What comes out is INERT: it cannot sign in and its face is excluded from the
+# gallery until a coach approves it.
+
+
+def _client_ip(request: Request) -> str:
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return fwd or (request.client.host if request.client else "")
+
+
+@app.post("/api/signup")
+def signup_start(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    full_name: str = Form(...),
+    phone: str = Form(...),
+    centre_id: int = Form(...),
+):
+    try:
+        return {"ok": True, **signup_mod.start(
+            username, password, full_name, phone, centre_id, _client_ip(request))}
+    except PermissionError as e:
+        raise HTTPException(429, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/signup/coaches")
+def signup_coaches(token: str, centre_id: int):
+    """Coaches to choose from. Behind the token: a centre's coach roster with
+    photographs is not something to hand out to anyone who asks."""
+    try:
+        signup_mod.resolve_signup(token)
+    except ValueError as e:
+        raise HTTPException(401, str(e))
+    return {"ok": True, "coaches": signup_mod.coaches_at(centre_id)}
+
+
+@app.post("/api/signup/coach")
+def signup_choose_coach(token: str = Form(...), coach_id: int = Form(...)):
+    try:
+        signup_mod.choose_coach(token, coach_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/signup/otp/send")
+def signup_otp_send(request: Request, token: str = Form(...)):
+    try:
+        return {"ok": True, **signup_mod.send_otp(token, _client_ip(request))}
+    except PermissionError as e:
+        raise HTTPException(429, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/signup/otp/verify")
+def signup_otp_verify(token: str = Form(...), code: str = Form(...)):
+    try:
+        good = signup_mod.verify_otp(token, code)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not good:
+        raise HTTPException(400, "That code is not right")
+    return {"ok": True, "verified": True}
+
+
+@app.post("/api/signup/face")
+async def signup_face(
+    token: str = Form(...),
+    video: UploadFile = File(...),
+):
+    """The guided capture, into a pending account.
+
+    Reuses the enrolment path unchanged, including its liveness requirement -
+    a signup nobody is watching is exactly where a photograph of a photograph
+    would be tried.
+    """
+    try:
+        student_id = signup_mod.student_for(token)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    data = await video.read()
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    detector = get_detector()
+    result = liveness.analyse(data, detector)
+    if result.verdict != "live":
+        return {"ok": False, "message": result.reason, "liveness": result.to_dict()}
+
+    # The enrolment pipeline per frame. enroll_multiview cannot be reused here:
+    # it takes an authenticated user, and this caller has no account yet by
+    # definition. _enroll_photo_templates is the same underlying path.
+    best = result.best_frame if result.best_frame is not None else result.frames[0]
+    templates, face, info = _enroll_photo_templates(best, "id")
+    if not templates or face is None:
+        return {"ok": False,
+                "message": "No usable face in that clip - try again in better light",
+                "liveness": result.to_dict()}
+
+    ts = utils.timestamp()
+    photo_name = f"signup_{student_id}_{ts}.jpg"
+    utils.save_image(best, "students", photo_name)
+
+    added = 0
+    for frame in result.frames[: config.LIVENESS_STORE_FRAMES]:
+        more, f2, _ = _enroll_photo_templates(frame, "live")
+        if more:
+            database.add_templates(student_id, more)
+            added += len(more)
+    database.add_templates(student_id, templates)
+    added += len(templates)
+    with pgdb.connect() as conn:
+        conn.execute("UPDATE students SET photo_path = ? WHERE id = ?",
+                     (photo_name, student_id))
+
+    return {"ok": True, "templates": added,
+            "liveness": result.to_dict(),
+            "message": "Sent to your coach for approval."}
+
+
+
+# NOT /api/centres/public: routes.py registers /centres/{centre_id} first,
+# so that path matches it as centre_id="public" and answers 401 from its
+# auth dependency. Under /api/signup it also sits with the rest of the flow.
+@app.get("/api/signup/centres")
+def public_centres():
+    """Centre names for the signup form, before any account exists.
+
+    Deliberately minimal: id and name of government centres, which is not
+    personal data. The COACH list is not public - that needs a signup token,
+    because a centre's coach roster with photographs is not something to hand
+    to anyone who asks.
+    """
+    rows = centres_mod.search_centres(limit=1000)
+    return {"ok": True, "centres": [{"id": r["id"], "name": r["name"]} for r in rows]}
 
 
 @app.get("/api/attendance/suggest")

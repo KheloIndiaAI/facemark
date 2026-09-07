@@ -165,3 +165,157 @@ async function submitPasswordChange() {
         setTimeout(doLogout, 1200);
     } catch { /* api layer already surfaced the error */ }
 }
+
+
+/* ---------------------------------------------------------------------------
+   Self-signup
+
+   Four steps, each gated by the token the first returns. The account that
+   comes out cannot sign in and its face is not recognised until a coach
+   approves it - the copy says so at every step, because someone who thinks
+   they are already enrolled will turn up and be marked absent.
+--------------------------------------------------------------------------- */
+
+const suState = { token: null, centre: null };
+
+function suMsg(text, bad = true) {
+    const el = document.getElementById('su-msg');
+    if (el) { el.textContent = text || ''; el.style.color = bad ? 'var(--red)' : 'var(--text-secondary)'; }
+}
+
+function suShow(step) {
+    ['su-step-1', 'su-step-2', 'su-step-3', 'su-step-4', 'su-done']
+        .forEach((id, i) => {
+            const el = document.getElementById(id);
+            if (el) el.classList.toggle('hidden', i !== step);
+        });
+}
+
+async function openSignup() {
+    document.getElementById('login-gate')?.classList.add('hidden');
+    document.getElementById('signup-gate')?.classList.remove('hidden');
+    suShow(0); suMsg('');
+    // Centres are needed before an account exists, so this one list is public.
+    // It carries no personal data - names and codes of government centres.
+    try {
+        const r = await fetch('/api/signup/centres');
+        const j = await r.json();
+        const sel = document.getElementById('su-centre');
+        if (sel) sel.innerHTML = (j.centres || [])
+            .map(c => `<option value="${c.id}">${Charts.esc(c.name)}</option>`).join('');
+    } catch { suMsg('Could not load centres. Try again later.'); }
+}
+
+function closeSignup() {
+    document.getElementById('signup-gate')?.classList.add('hidden');
+    document.getElementById('login-gate')?.classList.remove('hidden');
+}
+
+async function suStart() {
+    const fd = new FormData();
+    fd.append('full_name', document.getElementById('su-name').value.trim());
+    fd.append('username', document.getElementById('su-user').value.trim());
+    fd.append('password', document.getElementById('su-pw').value);
+    fd.append('phone', document.getElementById('su-phone').value.trim());
+    suState.centre = document.getElementById('su-centre').value;
+    fd.append('centre_id', suState.centre);
+    suMsg('');
+    try {
+        const res = await fetch('/api/signup', { method: 'POST', body: fd });
+        const j = await res.json();
+        if (!res.ok) return suMsg(j.detail || 'Could not create the account');
+        suState.token = j.token;
+        await suLoadCoaches();
+        suShow(1);
+    } catch { suMsg('Could not reach the server'); }
+}
+
+async function suLoadCoaches() {
+    const host = document.getElementById('su-coaches');
+    if (!host) return;
+    const r = await fetch(`/api/signup/coaches?token=${encodeURIComponent(suState.token)}`
+                          + `&centre_id=${encodeURIComponent(suState.centre)}`);
+    const j = await r.json();
+    const list = j.coaches || [];
+    if (!list.length) {
+        host.innerHTML = '<div class="empty-state">No coaches at that centre yet.</div>';
+        return;
+    }
+    host.innerHTML = list.map(c => `
+        <button type="button" class="btn btn-secondary" data-su-coach="${c.id}"
+                style="display:flex;align-items:center;gap:10px;width:100%;height:auto;padding:8px;margin-bottom:8px;justify-content:flex-start">
+            ${c.photo_url ? `<img src="${c.photo_url}" alt="" style="width:36px;height:36px;border-radius:8px;object-fit:cover">`
+                          : '<div style="width:36px;height:36px;border-radius:8px;background:var(--bg-subtle)"></div>'}
+            <span>${Charts.esc(c.name)}</span>
+        </button>`).join('');
+    host.querySelectorAll('[data-su-coach]').forEach(b => {
+        b.addEventListener('click', () => suPickCoach(b.dataset.suCoach));
+    });
+}
+
+async function suPickCoach(coachId) {
+    const fd = new FormData();
+    fd.append('token', suState.token);
+    fd.append('coach_id', coachId);
+    const r = await fetch('/api/signup/coach', { method: 'POST', body: fd });
+    if (!r.ok) return suMsg('Could not select that coach');
+    await suSendCode();
+}
+
+async function suSendCode() {
+    const fd = new FormData();
+    fd.append('token', suState.token);
+    const r = await fetch('/api/signup/otp/send', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) return suMsg(j.detail || 'Could not send a code');
+    suShow(2); suMsg('');
+}
+
+async function suVerify() {
+    const fd = new FormData();
+    fd.append('token', suState.token);
+    fd.append('code', document.getElementById('su-code').value.trim());
+    const r = await fetch('/api/signup/otp/verify', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) return suMsg(j.detail || 'That code is not right');
+    suShow(3); suMsg('');
+}
+
+function suFace() {
+    openClipCapture({
+        title: 'Record your face',
+        intro: 'Follow the prompts and turn your head as asked.',
+        onClip: async (file, ui) => {
+            ui.status('Checking\u2026');
+            try {
+                const fd = new FormData();
+                fd.append('token', suState.token);
+                fd.append('video', file);
+                const res = await fetch('/api/signup/face', { method: 'POST', body: fd });
+                const j = await res.json();
+                if (!res.ok || j.ok === false) {
+                    ui.status(j.message || j.detail || 'Could not use that clip');
+                    await ui.resume();
+                    return;
+                }
+                ui.close();
+                suShow(4);
+            } catch {
+                ui.status('Could not reach the server');
+                await ui.resume();
+            }
+        },
+    });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const on = (id, fn) => document.getElementById(id)?.addEventListener('click', (e) => {
+        e.preventDefault(); fn();
+    });
+    on('signup-open', openSignup);
+    on('signup-cancel', closeSignup);
+    on('su-next-1', suStart);
+    on('su-verify', suVerify);
+    on('su-resend', suSendCode);
+    on('su-face', suFace);
+});

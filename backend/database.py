@@ -170,6 +170,21 @@ CREATE TABLE IF NOT EXISTS session_captures (
 );
 CREATE INDEX IF NOT EXISTS idx_captures_session ON session_captures(session_id);
 
+-- ------------------------------------------------------------- v1: OTP
+-- Codes are stored HASHED and salted with the number. A leaked database must
+-- not hand over live one-time codes, and one rainbow table must not cover
+-- every number.
+CREATE TABLE IF NOT EXISTS otp_challenges (
+    id          SERIAL PRIMARY KEY,
+    phone       TEXT NOT NULL,
+    code_hash   TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    consumed_at TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_otp_phone ON otp_challenges(phone, created_at);
+
 CREATE TABLE IF NOT EXISTS auth_sessions (
     token      TEXT PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

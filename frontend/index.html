@@ -49,7 +49,68 @@
           Coaches see only their own centre. Super admins see every centre,
           all accounts and centre management.
         </div>
+        <div class="login-foot" style="margin-top:10px">
+          New athlete? <a href="#" id="signup-open">Create an account</a>
+        </div>
       </div>
+    </div>
+
+    <div id="signup-gate" class="login-gate hidden">
+        <div class="login-card" style="max-width:460px">
+            <div class="login-head">
+                <div class="login-logo"></div>
+                <div>
+                    <h1 class="login-title">Create your account</h1>
+                    <p class="login-sub">Your coach approves it before it works.</p>
+                </div>
+            </div>
+
+            <div id="su-step-1">
+                <div class="form-group"><label class="form-label" for="su-name">Full name</label>
+                    <input type="text" id="su-name" class="form-input" required></div>
+                <div class="form-group"><label class="form-label" for="su-centre">Centre</label>
+                    <select id="su-centre" class="form-input form-select"></select></div>
+                <div class="form-row">
+                    <div class="form-group"><label class="form-label" for="su-user">Username</label>
+                        <input type="text" id="su-user" class="form-input" required></div>
+                    <div class="form-group"><label class="form-label" for="su-phone">Phone</label>
+                        <input type="tel" id="su-phone" class="form-input" required
+                               placeholder="+91..."></div>
+                </div>
+                <div class="form-group"><label class="form-label" for="su-pw">Password</label>
+                    <input type="password" id="su-pw" class="form-input" required></div>
+                <button type="button" class="btn btn-primary" style="width:100%" id="su-next-1">Continue</button>
+            </div>
+
+            <div id="su-step-2" class="hidden">
+                <div class="form-group"><label class="form-label">Choose your coach</label>
+                    <div id="su-coaches"></div></div>
+            </div>
+
+            <div id="su-step-3" class="hidden">
+                <p class="login-foot">We sent a 6-digit code to your phone.</p>
+                <div class="form-group"><label class="form-label" for="su-code">Code</label>
+                    <input type="text" id="su-code" class="form-input" inputmode="numeric"
+                           maxlength="6"></div>
+                <button type="button" class="btn btn-primary" style="width:100%" id="su-verify">Verify</button>
+                <button type="button" class="btn btn-secondary" style="width:100%;margin-top:8px" id="su-resend">Send again</button>
+            </div>
+
+            <div id="su-step-4" class="hidden">
+                <p class="login-foot">Last step: record your face so you can be recognised
+                   at the centre.</p>
+                <button type="button" class="btn btn-primary" style="width:100%" id="su-face">Record my face</button>
+            </div>
+
+            <div id="su-done" class="hidden">
+                <div class="notice notice-blue"><strong>Sent to your coach.</strong>
+                    You can sign in once they approve you.</div>
+            </div>
+
+            <div id="su-msg" class="login-foot" style="color:var(--red);min-height:18px"></div>
+            <p class="login-foot" style="margin-top:8px">
+                <a href="#" id="signup-cancel">Back to sign in</a></p>
+        </div>
     </div>
 
     <div class="app-layout hidden" id="app-shell">

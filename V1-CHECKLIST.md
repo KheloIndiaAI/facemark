@@ -19,7 +19,7 @@ the Notes column. "Compiles" is not evidence.
 | 3 | Athlete accounts and self-marking | `[x]` **done** |
 | 4 | Super-admin oversight | `[x]` **done** |
 | 5 | Pending accounts and approval | `[x]` **done** |
-| 6 | Self-signup with OTP | `[ ]` |
+| 6 | Self-signup with OTP | `[x]` **done** (6.9 blocked: procurement) |
 
 ---
 
@@ -151,14 +151,14 @@ coach approves them. **Only after Phase 5.**
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 6.1 | `otp_challenges` table + index | `[ ]` | |
-| 6.2 | `POST /api/signup` creates `status='pending'` | `[ ]` | |
-| 6.3 | Coach selector shows name + enrolment photo | `[ ]` | |
-| 6.4 | `POST /api/signup/otp/send` — codes stored **hashed** | `[ ]` | |
-| 6.5 | `POST /api/signup/otp/verify` — expiry + attempt counter | `[ ]` | |
-| 6.6 | Throttled **per number and per address** | `[ ]` | |
-| 6.7 | `POST /api/signup/face` guided capture into pending account | `[ ]` | |
-| 6.8 | Signup screens in the frontend | `[ ]` | |
+| 6.1 | `otp_challenges` table + index | `[x]` | otp_challenges + idx_otp_phone |
+| 6.2 | `POST /api/signup` creates `status='pending'` | `[x]` | verify_phase6 26/26; status=pending, login 403 |
+| 6.3 | Coach selector shows name + enrolment photo | `[x]` | name + photo_url, behind the signup token |
+| 6.4 | `POST /api/signup/otp/send` — codes stored **hashed** | `[x]` | sha256 salted with the number; 64 hex, never returned |
+| 6.5 | `POST /api/signup/otp/verify` — expiry + attempt counter | `[x]` | expiry, attempt counter incremented before compare, single use |
+| 6.6 | Throttled **per number and per address** | `[x]` | per-number and per-address, plus a resend cooldown |
+| 6.7 | `POST /api/signup/face` guided capture into pending account | `[x]` | guided capture into the pending person; 7 templates |
+| 6.8 | Signup screens in the frontend | `[x]` | full flow driven in browser to the face step |
 | 6.9 | DLT/SMS registration started (procurement, not code) | `[!]` | Not mine to do — needs someone with authority to register the org. Ship with email verification if not ready. |
 
 ---
@@ -180,7 +180,7 @@ Several of these fail **silently**. Each needs its own check.
 | C9 | Unique constraint swapped | `[x]` | verify_p1_schema 20/20 |
 | C10 | Every read handles `session_id IS NULL` (pre-migration rows) | `[x]` | legacy rows still read; suites 16/16 12/12 23/23 |
 | C11 | Geo reads prefer `session_captures`, fall back to `attendance` | `[ ]` | |
-| C12 | OTP throttled per number **and** per address | `[ ]` | Phase 6 |
+| C12 | OTP throttled per number **and** per address | `[x]` | Phase | per number AND per address |
 | C13 | Self-marking rate-limited per athlete/coach/day | `[ ]` | Phase 3 |
 | C14 | `scope_coach` / `scope_self` on every new endpoint | `[x]` | verify_phase1 27/2 | scope_self on every /api/me route |
 | C15 | `DELETE /api/students/{id}` widened: account, links, captures | `[ ]` | |
