@@ -103,9 +103,17 @@ jobs:
                                      role="athlete", centre_id=cid)
           sm.link_athlete(coach, ath, is_primary=True)
 
+
+          # A REAL account: attendance_sessions.opened_by is a foreign key to
+          # users, and a fresh database has no user 1. Passing an id that does
+          # not exist made the insert fail for a reason unrelated to what this
+          # job tests - and exposed that the recovery path was broken.
+          from backend import auth
+          opener = auth.create_user("ci_admin", "ci-password-only",
+                                    "super_admin", "CI Admin")
           before = database.stats()
           day = config.today_str()
-          sess = sm.get_or_create(cid, coach, 1, day)
+          sess = sm.get_or_create(cid, coach, opener, day)
           sm.draft(sess["id"], ath, day, 0.9, origin="recognised", centre_id=cid)
           after = database.stats()
 

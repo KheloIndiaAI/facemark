@@ -146,8 +146,17 @@ def get_or_create(centre_id: int, coach_id: Optional[int], opened_by: int,
         if row:
             return dict(row)
         # ON CONFLICT cannot be used here: the uniqueness is two partial
-        # indexes, and which one applies depends on coach_id being NULL. A
-        # re-read after IntegrityError is simpler than inferring either.
+        # indexes, and which one applies depends on coach_id being NULL. So the
+        # insert is attempted and, if it loses a race, the row is re-read.
+        #
+        # The SAVEPOINT is what makes that work. In PostgreSQL a failed
+        # statement aborts the WHOLE transaction, and every statement after it
+        # raises InFailedSqlTransaction - so `try: insert / except: pass`
+        # followed by a re-read never recovered anything. It swallowed the real
+        # error and then failed on the next line with a message about the
+        # transaction rather than about the insert. Rolling back to a savepoint
+        # returns the transaction to a usable state so the re-read can run.
+        conn.execute("SAVEPOINT open_session")
         try:
             conn.execute(
                 "INSERT INTO attendance_sessions "
@@ -156,11 +165,23 @@ def get_or_create(centre_id: int, coach_id: Optional[int], opened_by: int,
                 (centre_id, coach_id, opened_by, day,
                  config.now_stamp(), expires),
             )
-        except Exception:
-            pass
+            conn.execute("RELEASE SAVEPOINT open_session")
+        except Exception as e:
+            conn.execute("ROLLBACK TO SAVEPOINT open_session")
+            insert_error = e
+        else:
+            insert_error = None
+
         row = _find(conn, centre_id, coach_id, day)
         if row is None:
-            raise RuntimeError("Could not open a session for this centre and day")
+            # Losing the race is the only reason a failed insert is acceptable.
+            # If nothing is there afterwards, the insert failed for its own
+            # reasons - a missing centre, an opened_by that is not a real user -
+            # and that error is worth showing rather than a generic one.
+            raise RuntimeError(
+                "Could not open a register for this centre and day"
+                + (f": {insert_error}" if insert_error else "")
+            )
         return dict(row)
 
 
