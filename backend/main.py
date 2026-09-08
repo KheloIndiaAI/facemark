@@ -2480,7 +2480,15 @@ def export_attendance(
 # --- static files & sample images -------------------------------------------
 
 @app.get("/api/sample-images/download")
-def download_test_suite():
+def download_test_suite(user: dict = Depends(auth.current_user)):
+    """Zip of the demo images, for anyone trying the system out.
+
+    Authenticated, like the single-image route below it. It zips whatever .jpg
+    files are sitting in samples/test_suite/, and "whatever is in that folder"
+    is not a promise anybody can keep - the rest of this repo's test images are
+    photographs of real athletes. The directory is empty today; the guard is
+    for the day it is not.
+    """
     import zipfile
     test_dir = config.ROOT_DIR / "samples" / "test_suite"
     if not test_dir.exists():

@@ -117,12 +117,6 @@ function applyRoleChrome() {
                     roleLabel(u.role, u.centre_name))}</div>
             </div>`;
     }
-    const badge = document.getElementById('role-badge');
-    if (badge) {
-        badge.textContent = roleShort(u.role);
-        badge.className = 'badge ' + (u.role === 'super_admin' ? 'badge-blue'
-                                    : u.role === 'athlete' ? 'badge-amber' : 'badge-green');
-    }
 }
 
 /* Any 401 from anywhere drops straight back to the login gate. */

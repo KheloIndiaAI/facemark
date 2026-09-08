@@ -1,5 +1,27 @@
 # v1 — Coaches, athletes, and confirmed registers
 
+> **STATUS — this is the plan as written, not a description of the build.**
+>
+> It is kept unedited so the reasoning behind each decision stays readable. Where
+> the finished system differs, the build is right and this is history:
+>
+> - **Phone verification (OTP) was never shipped.** Sending SMS in India needs DLT
+>   registration, which is procurement and is not done, so a code could never
+>   reach anybody. The endpoints, the `otp_challenges` table and the SMS provider
+>   were removed rather than left dormant. Signup is: details → choose a coach →
+>   record your face. See DEVELOPMENT.md.
+> - **Coach self-registration was added**, which this plan does not cover, gated
+>   by a per-centre join code and approved by a super admin rather than a coach.
+> - **`MATCH_THRESHOLD` stayed at 0.570**, not the 0.55 suggested here — measured
+>   EER on this corpus is 0.00% at 0.570.
+> - **`RATIO_TEST_THRESHOLD` was removed.** Measured over 988 assignments it
+>   never fires at either polarity; see the note in `backend/config.py`.
+> - **Roles are three, not two** — athlete accounts exist, and a centre scope is
+>   not a role check.
+>
+> `V1-CHECKLIST.md` tracks what was actually built, phase by phase, with the
+> verification counts.
+
 Work plan for the next version. Every open question from the design review is
 settled below; this document is the answer, not the proposal.
 

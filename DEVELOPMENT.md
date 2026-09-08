@@ -44,7 +44,7 @@ backend/
   main.py          FastAPI app, recognition and register endpoints
   routes.py        auth, users, centres, people
   sessions.py      registers: sessions, captures, drafts, approvals, rosters
-  signup.py        self-registration, OTP, password reset
+  signup.py        self-registration: pending accounts, coach choice, face
   maintenance.py   expiry and retention sweeps
   database.py      schema, migrations, gallery, attendance
   db.py            Postgres layer and the `?` -> `%s` shim
