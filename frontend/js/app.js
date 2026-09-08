@@ -1823,8 +1823,7 @@ async function regLoadApprovals() {
                     ${orphan}
                     ${phoneShared}
                     <div class="text-xs text-muted font-mono">${Charts.esc(p.roll_no || '')}</div>
-                    <div class="text-xs text-muted">${p.templates || 0} face template(s)
-                        ${p.phone_verified_at ? '\u00b7 phone verified' : ''}</div>
+                    <div class="text-xs text-muted">${p.templates || 0} face template(s)</div>
                 </div>
                 ${reassignBtn}
                 ${mergeBtn}

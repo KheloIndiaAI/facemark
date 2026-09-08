@@ -176,7 +176,7 @@ async function submitPasswordChange() {
    they are already enrolled will turn up and be marked absent.
 --------------------------------------------------------------------------- */
 
-const suState = { token: null, centre: null, role: 'athlete', needsOtp: false };
+const suState = { token: null, centre: null, role: 'athlete' };
 
 // One panel, two applications. The steps are the same except for the coach
 // picker, which only an athlete has - a coach is approved by a super admin, so
@@ -209,7 +209,7 @@ function suMsg(text, bad = true) {
 }
 
 function suShow(step) {
-    ['su-step-1', 'su-step-2', 'su-step-3', 'su-step-4', 'su-done']
+    ['su-step-1', 'su-step-2', 'su-step-4', 'su-done']
         .forEach((id, i) => {
             const el = document.getElementById(id);
             if (el) el.classList.toggle('hidden', i !== step);
@@ -272,7 +272,6 @@ async function suStart() {
         // chosen, and whether the phone gets verified. The browser inferring
         // either would be a second copy of the answer, and the two would
         // disagree the first time one changed.
-        suState.needsOtp = j.needs_otp !== false;
         if (j.needs_coach === false) return suAfterCoach();
         await suLoadCoaches();
         suShow(1);
@@ -315,39 +314,8 @@ async function suPickCoach(coachId) {
    while there is no way to deliver a code, and when it comes back this is the
    only line that changes. */
 async function suAfterCoach() {
-    if (suState.needsOtp) return suSendCode();
-    suShow(3);          // straight to the face capture
+    suShow(2);          // the face capture; there is no code step any more
     suMsg('');
-}
-
-async function suSendCode() {
-    const fd = new FormData();
-    fd.append('token', suState.token);
-    const r = await fetch('/api/signup/otp/send', { method: 'POST', body: fd });
-    const j = await r.json();
-    if (!r.ok) return suMsg(j.detail || 'Could not send a code');
-    suShow(2);
-    // The server says whether a message actually went anywhere. Telling
-    // somebody to check their phone when no SMS provider is configured leaves
-    // them waiting for a message that is never coming, and blaming their signal.
-    const note = document.getElementById('su-otp-note');
-    if (note) {
-        note.textContent = j.sent
-            ? 'We sent a 6-digit code to your phone.'
-            : 'Text messages are not switched on yet at this centre. Ask your '
-              + 'coach or administrator for the code from the system.';
-    }
-    suMsg('');
-}
-
-async function suVerify() {
-    const fd = new FormData();
-    fd.append('token', suState.token);
-    fd.append('code', document.getElementById('su-code').value.trim());
-    const r = await fetch('/api/signup/otp/verify', { method: 'POST', body: fd });
-    const j = await r.json();
-    if (!r.ok) return suMsg(j.detail || 'That code is not right');
-    suShow(3); suMsg('');
 }
 
 function suFace() {
@@ -368,7 +336,7 @@ function suFace() {
                     return;
                 }
                 ui.close();
-                suShow(4);
+                suShow(3);
             } catch {
                 ui.status('Could not reach the server');
                 await ui.resume();
@@ -385,94 +353,5 @@ document.addEventListener('DOMContentLoaded', () => {
     on('signup-open-coach', () => openSignup('coach'));
     on('signup-cancel', closeSignup);
     on('su-next-1', suStart);
-    on('su-verify', suVerify);
-    on('su-resend', suSendCode);
     on('su-face', suFace);
-});
-
-
-/* ---------------------------------------------------------------------------
-   Password reset
-
-   The account already carries a phone number that was verified at signup, and
-   there is already a one-time-code mechanism next to it. Before this, a
-   forgotten password meant finding somebody with admin access.
---------------------------------------------------------------------------- */
-
-function rsMsg(text, bad = true) {
-    const el = document.getElementById('rs-msg');
-    if (el) {
-        el.textContent = text || '';
-        el.style.color = bad ? 'var(--red)' : 'var(--text-secondary)';
-    }
-}
-
-function rsShow(step) {
-    ['rs-step-1', 'rs-step-2', 'rs-ok'].forEach((id, i) => {
-        const el = document.getElementById(id);
-        if (el) el.classList.toggle('hidden', i !== step);
-    });
-}
-
-function openReset() {
-    document.getElementById('login-gate')?.classList.add('hidden');
-    document.getElementById('reset-gate')?.classList.remove('hidden');
-    rsShow(0); rsMsg('');
-}
-
-function closeReset() {
-    document.getElementById('reset-gate')?.classList.add('hidden');
-    document.getElementById('login-gate')?.classList.remove('hidden');
-}
-
-async function rsSend() {
-    const u = document.getElementById('rs-user').value.trim();
-    if (!u) return rsMsg('Enter your username');
-    const fd = new FormData();
-    fd.append('username', u);
-    try {
-        const r = await fetch('/api/auth/reset/start', { method: 'POST', body: fd });
-        const j = await r.json();
-        if (!r.ok) return rsMsg(j.detail || 'Could not send a code');
-        rsShow(1);
-        // Deliberately the same words whether or not that username exists -
-        // the server answers identically, and so must this.
-        rsMsg(j.sent
-            ? 'If that account exists, a code is on its way to the phone on it.'
-            : 'Text messages are not switched on yet. Ask your coach or '
-              + 'administrator for the code from the system.', false);
-    } catch { rsMsg('Could not reach the server'); }
-}
-
-async function rsComplete() {
-    const fd = new FormData();
-    fd.append('username', document.getElementById('rs-user').value.trim());
-    fd.append('code', document.getElementById('rs-code').value.trim());
-    const pw = document.getElementById('rs-pw').value;
-    if (pw.length < 6) return rsMsg('Use at least 6 characters');
-    fd.append('new_password', pw);
-    try {
-        const r = await fetch('/api/auth/reset/complete', { method: 'POST', body: fd });
-        const j = await r.json();
-        if (!r.ok) return rsMsg(j.detail || 'That did not work');
-        rsShow(2); rsMsg('');
-    } catch { rsMsg('Could not reach the server'); }
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-    const on = (id, fn) => document.getElementById(id)?.addEventListener('click', (e) => {
-        e.preventDefault(); fn();
-    });
-    // Offering a reset that answers 503 is worse than not offering it: somebody
-    // tries it, is told to ask an administrator, and has lost the time.
-    fetch('/api/config').then(r => r.json()).then(cfg => {
-        const can = !!(cfg && cfg.password_reset_available);
-        document.getElementById('reset-link-wrap')?.classList.toggle('hidden', !can);
-        document.getElementById('reset-unavailable')?.classList.toggle('hidden', can);
-    }).catch(() => { /* leave the "ask an administrator" line showing */ });
-
-    on('reset-open', openReset);
-    on('reset-cancel', closeReset);
-    on('rs-send', rsSend);
-    on('rs-done', rsComplete);
 });

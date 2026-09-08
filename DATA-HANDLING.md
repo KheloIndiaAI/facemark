@@ -17,15 +17,15 @@ If you change any of it, change this file in the same commit.
 | Enrolment photographs | `data/students/` (or S3 `students/`) | Shown to a coach so they can confirm the system means the right person. |
 | Group captures and face crops | `data/uploads/` (or S3 `uploads/`) | Evidence for a register: it must be possible to see why somebody was marked present. |
 | Name, NSRS ID, gender, sport, centre | `students` table | The roster. |
-| Phone number | `students.phone`, `users.phone` | So a coach can contact an athlete. Verification is **off** while there is no SMS provider, so this is an unverified claim — see DEVELOPMENT.md. |
+| Phone number | `students.phone`, `users.phone` | So a coach can contact an athlete. **Never verified** — phone verification was removed with the SMS provider it needed, so this is a claim, not identity. |
 | Guardian name and consent timestamp | `users.guardian_name`, `guardian_consent_at` | Recorded by the coach at approval, for athletes under 18. |
 | Attendance rows | `attendance` table | The record the centre exists to produce. |
 | Account credentials | `users.password_hash` | PBKDF2-HMAC-SHA256, 600k iterations, per-user salt. No plaintext is ever written. |
-| One-time codes | `otp_challenges.code_hash` | SHA-256 salted with the phone number. The code itself is never stored and never returned by any endpoint. None are issued while phone verification is off. |
 
-**Not stored:** raw images inside the database, plaintext passwords, plaintext
-one-time codes, location history beyond the single geo fix attached to a
-capture.
+**Not stored:** raw images inside the database, plaintext passwords, or
+location history beyond the single geo fix attached to a capture. One-time
+codes are not stored at all any more — phone verification was removed and the
+`otp_challenges` table with it.
 
 ---
 
@@ -65,8 +65,8 @@ form the programme requires; the app records that it happened and when.
 
 ## What approval is doing
 
-With phone verification off, **approval is the only thing standing between a
-stranger and the register.** It is worth being explicit about what it covers:
+There is no phone verification, so **approval is the only thing standing
+between a stranger and the register.** It is worth being explicit about what it covers:
 
 - A pending account cannot sign in.
 - Its face is excluded from the recognition gallery, so it cannot be recognised
@@ -89,7 +89,6 @@ Nothing used to be deleted, ever. That is now bounded.
 |---|---|---|
 | A registration nobody decided | 30 days from signup | `FACEMARK_PENDING_TTL_DAYS` |
 | A registration that was refused | 30 days from the decision | `FACEMARK_REJECTED_TTL_DAYS` |
-| Spent one-time codes | 2 days | fixed |
 | Registers nobody submitted | 18 hours, then expired and their drafts deleted | `sessions.SESSION_TTL_HOURS` |
 | Enrolled people and their attendance | Indefinitely, until deleted by an admin | — |
 

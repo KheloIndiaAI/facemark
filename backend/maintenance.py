@@ -125,21 +125,12 @@ def purge_abandoned_signups() -> Dict[str, int]:
     return out
 
 
-def purge_spent_otps() -> int:
-    """Drop one-time codes that can no longer be used."""
-    with connect() as conn:
-        return conn.execute(
-            "DELETE FROM otp_challenges WHERE created_at < ?", (_cutoff(2),)
-        ).rowcount
-
-
 def run_all() -> Dict[str, int]:
     """Every sweep, unconditionally. Safe to call at any time."""
     drafts = expire_drafts()
     purged = purge_abandoned_signups()
-    otps = purge_spent_otps()
     return {"expired_registers": drafts, "purged_pending": purged["pending"],
-            "purged_rejected": purged["rejected"], "purged_otps": otps}
+            "purged_rejected": purged["rejected"]}
 
 
 def run_due(force: bool = False) -> Dict[str, int]:

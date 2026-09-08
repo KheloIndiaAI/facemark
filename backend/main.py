@@ -2156,27 +2156,6 @@ def signup_choose_coach(token: str = Form(...), coach_id: int = Form(...)):
     return {"ok": True}
 
 
-@app.post("/api/signup/otp/send")
-def signup_otp_send(request: Request, token: str = Form(...)):
-    try:
-        return {"ok": True, **signup_mod.send_otp(token, _client_ip(request))}
-    except PermissionError as e:
-        raise HTTPException(429, str(e))
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-
-@app.post("/api/signup/otp/verify")
-def signup_otp_verify(token: str = Form(...), code: str = Form(...)):
-    try:
-        good = signup_mod.verify_otp(token, code)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    if not good:
-        raise HTTPException(400, "That code is not right")
-    return {"ok": True, "verified": True}
-
-
 @app.post("/api/signup/face")
 async def signup_face(
     token: str = Form(...),
@@ -2257,22 +2236,6 @@ async def signup_face(
 # NOT /api/centres/public: routes.py registers /centres/{centre_id} first,
 # so that path matches it as centre_id="public" and answers 401 from its
 # auth dependency. Under /api/signup it also sits with the rest of the flow.
-@app.get("/api/config")
-def public_config():
-    """The handful of switches the sign-in screen needs before anyone signs in.
-
-    Deliberately tiny and deliberately not secret: which optional steps are
-    switched on. It exists so the browser stops offering things the server will
-    refuse - a "forgotten your password?" link that answers 503 costs somebody
-    a minute and their patience.
-    """
-    return {
-        "ok": True,
-        "signup_requires_otp": config.require_phone_otp(),
-        "password_reset_available": config.sms_configured(),
-    }
-
-
 @app.get("/api/signup/centres")
 def public_centres():
     """Centre names for the signup form, before any account exists.

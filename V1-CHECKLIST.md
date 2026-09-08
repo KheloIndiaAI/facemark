@@ -247,26 +247,32 @@ phase 5 21/21, API 23/23, and the 220-photo corpus still rejects no real face.
 
 ---
 
-## Phase 10 — Phone verification deferred
+## Phase 10 — Phone verification removed
 
-**Decision:** OTP is off until DLT registration exists. A verification step that
-cannot deliver a code is a wall, not a check.
+**Decision:** OTP and self-service password reset are gone, not switched off.
+They needed an SMS provider, DLT registration is procurement and is not done,
+and a dormant feature still costs endpoints, a table, a config flag and a UI
+branch to keep working.
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| 10.1 | `config.require_phone_otp()` switches it in one place | `[x]` | follows SMS config; `FACEMARK_REQUIRE_OTP` forces either way |
-| 10.2 | Signup completes with no code | `[x]` | verify_phase6 20/20 with it off, 27/27 with it on |
-| 10.3 | Asking for a code while off is REFUSED | `[x]` | 400, and no challenge row is created |
-| 10.4 | The face step no longer demands a verified phone | `[x]` | that gate refused every signup for an impossible step |
-| 10.5 | The browser skips the step because the SERVER said so | `[x]` | `needs_otp` in the start response, not a second copy of the config |
-| 10.6 | Password reset unavailable, and says so | `[x]` | 503 identically for every username; no enumeration |
-| 10.7 | The sign-in screen offers no link that would fail | `[x]` | `GET /api/config`; "ask your coach or an administrator" instead |
-| 10.8 | The phone field stops promising a text | `[x]` | "So your coach can reach you." |
-| 10.9 | Docs describe the flow that is running | `[x]` | DEVELOPMENT.md and DATA-HANDLING.md, including what it costs |
+| 10.1 | `/api/signup/otp/*` removed | `[x]` | both answer 404; asserted in verify_phase6 |
+| 10.2 | `/api/auth/reset/*` removed | `[x]` | resets go to an admin, as before |
+| 10.3 | `otp_challenges` table dropped | `[x]` | via `_drop_removed_tables`; asserted |
+| 10.4 | SMS + OTP config removed | `[x]` | no `SMS_PROVIDER`, no `require_phone_otp` |
+| 10.5 | The code step is gone from the UI | `[x]` | signup is details -> coach -> face |
+| 10.6 | The reset panel and link are gone | `[x]` | "ask your coach or an administrator" |
+| 10.7 | The approvals card stops claiming a verified phone | `[x]` | nothing verifies it any more |
+| 10.8 | The phone field stops promising a text | `[x]` | "so your coach can reach you" |
+| 10.9 | Suites and docs describe the flow that runs | `[x]` | verify_reset.py deleted with its feature |
+| 10.10 | `users.phone_verified_at` kept | `[x]` | it holds real timestamps for people who did verify |
 
-**What it costs:** the phone number is an unverified claim. **What it does not
-cost:** approval still gates sign-in, gallery membership and every attendance
-write — see DATA-HANDLING.md, "What approval is doing".
+**What it costs:** the phone is an unverified claim, and a locked-out user needs
+an administrator. **What it does not cost:** approval still gates sign-in,
+gallery membership and both attendance writes — see DATA-HANDLING.md.
+
+**Bringing it back:** `git log -S require_phone_otp` has all of it, working and
+tested. Restore rather than rewrite.
 
 ---
 

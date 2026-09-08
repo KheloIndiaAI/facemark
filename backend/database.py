@@ -171,21 +171,6 @@ CREATE TABLE IF NOT EXISTS session_captures (
 );
 CREATE INDEX IF NOT EXISTS idx_captures_session ON session_captures(session_id);
 
--- ------------------------------------------------------------- v1: OTP
--- Codes are stored HASHED and salted with the number. A leaked database must
--- not hand over live one-time codes, and one rainbow table must not cover
--- every number.
-CREATE TABLE IF NOT EXISTS otp_challenges (
-    id          SERIAL PRIMARY KEY,
-    phone       TEXT NOT NULL,
-    code_hash   TEXT NOT NULL,
-    expires_at  TEXT NOT NULL,
-    attempts    INTEGER NOT NULL DEFAULT 0,
-    consumed_at TEXT,
-    created_at  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_otp_phone ON otp_challenges(phone, created_at);
-
 -- ------------------------------------------------- v1: signup in progress
 -- A half-finished signup, carried between requests. In a dict this worked only
 -- while there was one worker; the Dockerfile runs two, so half of all signups
@@ -264,6 +249,9 @@ def init_db() -> None:
             "status": "TEXT NOT NULL DEFAULT 'active'",   # pending|active|suspended|rejected
             "approved_by": "INTEGER REFERENCES users(id) ON DELETE SET NULL",
             "approved_at": "TEXT",
+            # Kept, unused. Phone verification was removed; dropping a column
+            # that already holds timestamps for people who did verify would
+            # destroy a record of something that really happened.
             "phone_verified_at": "TEXT",
             "guardian_name": "TEXT",
             "guardian_consent_at": "TEXT",
@@ -466,7 +454,10 @@ def _ensure_join_codes(conn: Conn) -> None:
 
 def _drop_removed_tables(conn: Conn) -> None:
     """Drop tables left behind by the removed performance-tracking feature."""
-    for t in ("performance", "metrics"):
+    # otp_challenges joins them: phone verification was removed with the SMS
+    # provider it depended on. Dropping rather than leaving an empty table
+    # behind, which is the sort of thing that gets rediscovered and reconnected.
+    for t in ("performance", "metrics", "otp_challenges"):
         conn.execute(f"DROP TABLE IF EXISTS {t}")
 
 

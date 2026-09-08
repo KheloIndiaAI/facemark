@@ -53,51 +53,10 @@
           New here? <a href="#" id="signup-open">Register as an athlete</a>
           &middot; <a href="#" id="signup-open-coach">Register as a coach</a>
         </div>
-        <div class="login-foot hidden" style="margin-top:6px" id="reset-link-wrap">
-          <a href="#" id="reset-open">Forgotten your password?</a>
-        </div>
-        <div class="login-foot" style="margin-top:6px" id="reset-unavailable">
+        <div class="login-foot" style="margin-top:6px">
           Forgotten your password? Ask your coach or an administrator to reset it.
         </div>
       </div>
-    </div>
-
-    <div id="reset-gate" class="login-gate hidden">
-        <div class="login-card" style="max-width:420px">
-            <div class="login-head">
-                <div class="login-logo"></div>
-                <div>
-                    <h1 class="login-title">Reset your password</h1>
-                    <p class="login-sub">We send a code to the phone on your account.</p>
-                </div>
-            </div>
-
-            <div id="rs-step-1">
-                <div class="form-group"><label class="form-label" for="rs-user">Username</label>
-                    <input type="text" id="rs-user" class="form-input" autocapitalize="none"
-                           spellcheck="false"></div>
-                <button type="button" class="btn btn-primary" style="width:100%" id="rs-send">Send me a code</button>
-            </div>
-
-            <div id="rs-step-2" class="hidden">
-                <div class="form-group"><label class="form-label" for="rs-code">Code</label>
-                    <input type="text" id="rs-code" class="form-input" inputmode="numeric"
-                           maxlength="6"></div>
-                <div class="form-group"><label class="form-label" for="rs-pw">New password</label>
-                    <input type="password" id="rs-pw" class="form-input"
-                           autocomplete="new-password"></div>
-                <button type="button" class="btn btn-primary" style="width:100%" id="rs-done">Change my password</button>
-            </div>
-
-            <div id="rs-ok" class="hidden">
-                <div class="notice notice-blue"><strong>Password changed.</strong>
-                    Sign in with the new one.</div>
-            </div>
-
-            <div id="rs-msg" class="login-foot" style="min-height:18px"></div>
-            <p class="login-foot" style="margin-top:8px">
-                <a href="#" id="reset-cancel">Back to sign in</a></p>
-        </div>
     </div>
 
     <div id="signup-gate" class="login-gate hidden">
@@ -143,15 +102,6 @@
             <div id="su-step-2" class="hidden">
                 <div class="form-group"><label class="form-label">Choose your coach</label>
                     <div id="su-coaches"></div></div>
-            </div>
-
-            <div id="su-step-3" class="hidden">
-                <p class="login-foot" id="su-otp-note">We sent a 6-digit code to your phone.</p>
-                <div class="form-group"><label class="form-label" for="su-code">Code</label>
-                    <input type="text" id="su-code" class="form-input" inputmode="numeric"
-                           maxlength="6"></div>
-                <button type="button" class="btn btn-primary" style="width:100%" id="su-verify">Verify</button>
-                <button type="button" class="btn btn-secondary" style="width:100%;margin-top:8px" id="su-resend">Send again</button>
             </div>
 
             <div id="su-step-4" class="hidden">

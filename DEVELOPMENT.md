@@ -174,49 +174,36 @@ alongside photographs of real athletes.
 
 ---
 
-## SMS, and why phone verification is currently off
+## No phone verification, and no self-service password reset
 
-Sending SMS to Indian numbers requires DLT registration with a TRAI-approved
-platform: entity, sender ID and every template approved in advance. That is
-procurement, and it is not done.
+Both were removed. They depended on sending an SMS, and sending SMS to Indian
+numbers requires DLT registration with a TRAI-approved platform — entity, sender
+ID and every template approved in advance. That is procurement and it is not
+done, so a code could never reach anybody: signup reached "we sent a code to
+your phone", nothing arrived, and the registration died there.
 
-**So phone verification during signup is switched off.** A verification step
-with no way to deliver a code is not a check, it is a wall: people reached "we
-sent a code to your phone", nothing arrived, and the registration died there.
+They were briefly kept behind a switch. That was worse than removing them: a
+dormant feature still has endpoints that answer, a table that exists, a config
+flag to reason about and a UI branch to keep working, and none of it earns
+anything.
 
-It is off, not removed. `config.require_phone_otp()` follows SMS configuration,
-so the day a provider is set up it comes back on by itself; `FACEMARK_REQUIRE_OTP=1`
-or `=0` forces it either way. The hashed codes, attempt counting, expiry and
-throttling all stay in place and are still tested — `verify_phase6.py` runs the
-verification branch when it is enabled and asserts the step is *refused* when it
-is not.
+**What replaced them.** Nothing. A signup is: details → choose a coach → record
+your face. A forgotten password goes to an administrator, via
+`POST /api/users/{id}/password` on the Accounts page.
 
-**What that costs:** nobody proves they hold the number they typed, so the phone
-is a claim rather than a verified fact. What it does not cost is the thing that
-actually protects the register — an account is inert until a human approves it,
-and cannot sign in or be recognised until then. Verification was defence in
-depth behind that approval, never the gate itself.
+**The consequence, stated plainly.** The phone number is an unverified claim —
+useful for a coach ringing an athlete, worth nothing as identity. And a user
+locked out has to find somebody with admin access.
 
-Self-service password reset rides on the same channel, so it is unavailable too:
-the endpoint answers 503 identically for every username, and the sign-in screen
-says to ask a coach or administrator instead of offering a link that fails.
-`GET /api/config` reports both switches so the browser never offers a step the
-server will refuse.
+**Bringing it back.** It is in git, working and tested. `git log -S require_phone_otp`
+finds every piece: hashed codes salted per number, attempt counting, expiry,
+per-number and per-address throttling, the `otp_challenges` table, an SMS webhook
+with DLT fields, and a password reset that could not be used to discover which
+usernames exist. Restore that commit rather than writing it again.
 
-Once a provider exists:
-
-```
-FACEMARK_SMS_PROVIDER=webhook
-FACEMARK_SMS_URL=https://your-gateway.example/send
-FACEMARK_SMS_TOKEN=...
-FACEMARK_SMS_SENDER_ID=...
-FACEMARK_DLT_ENTITY_ID=...
-FACEMARK_DLT_TEMPLATE_ID=...
-```
-
-The webhook receives `{phone, message, sender_id, entity_id, template_id}` and
-should answer 2xx once accepted. Setting it turns phone verification and
-password reset back on automatically.
+If self-service reset is wanted sooner than DLT allows, the cheaper route is a
+reset **request** that appears in the coach's approvals queue — the coach knows
+the athlete by sight, which is a stronger check than a text message anyway.
 
 ---
 

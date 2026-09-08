@@ -721,7 +721,7 @@ def pending_for_coach(coach_student_id: Optional[int]) -> List[dict]:
     """The approval queue. None means every pending account (super admin)."""
     q = ("SELECT u.id AS user_id, u.username, u.full_name, u.email, u.phone, "
          "       u.status, u.role, u.created_at, u.student_id, u.chosen_coach_id, "
-         "       u.phone_verified_at, u.guardian_name, "
+         "       u.guardian_name, "
          "       u.duplicate_of, u.duplicate_score, "
          "       d.name AS duplicate_name, d.roll_no AS duplicate_roll_no, "
          "       dc.name AS duplicate_centre_name, "

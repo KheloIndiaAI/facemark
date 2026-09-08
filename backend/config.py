@@ -472,52 +472,6 @@ TILED_DETECTION = False            # Disabled to prevent tile-boundary cuts and 
 TILE_SIZE = 1280                   # tile dimension in pixels
 TILE_OVERLAP = 0.15                # fractional overlap between tiles
 
-# --- SMS delivery ------------------------------------------------------------
-# Sending SMS to Indian numbers needs DLT registration with a TRAI-approved
-# platform: the entity, the sender ID and every template approved in advance.
-# That is procurement, not code. These say what to do once it exists.
-#
-# With no provider configured nothing is sent AND the API says so, rather than
-# reporting success for a message that was never handed to anybody.
-SMS_PROVIDER = os.environ.get("FACEMARK_SMS_PROVIDER", "none").strip().lower()
-SMS_WEBHOOK_URL = os.environ.get("FACEMARK_SMS_URL", "").strip()
-SMS_WEBHOOK_TOKEN = os.environ.get("FACEMARK_SMS_TOKEN", "").strip()
-SMS_SENDER_ID = os.environ.get("FACEMARK_SMS_SENDER_ID", "").strip()
-DLT_ENTITY_ID = os.environ.get("FACEMARK_DLT_ENTITY_ID", "").strip()
-DLT_TEMPLATE_ID = os.environ.get("FACEMARK_DLT_TEMPLATE_ID", "").strip()
-SMS_TIMEOUT_SECONDS = float(os.environ.get("FACEMARK_SMS_TIMEOUT", "8"))
-
-
-# Phone verification during signup. OFF until an SMS provider exists: with no
-# way to deliver a code, the step is a wall rather than a check - people reach
-# "we sent a code to your phone", nothing arrives, and the registration dies
-# there.
-#
-# Defaults to following SMS configuration, so the day a provider is set up this
-# switches itself back on. Force it either way with FACEMARK_REQUIRE_OTP.
-#
-# Turning it off does NOT open the register: an account is inert until a human
-# approves it, and that approval - not the code - is what stands between a
-# stranger and being marked present.
-_REQUIRE_OTP_ENV = os.environ.get("FACEMARK_REQUIRE_OTP", "").strip().lower()
-
-
-def sms_configured() -> bool:
-    """Whether a code handed to _deliver would actually reach a phone."""
-    if SMS_PROVIDER == "webhook":
-        return bool(SMS_WEBHOOK_URL)
-    return False
-
-
-def require_phone_otp() -> bool:
-    """Whether signup must verify the phone number with a one-time code."""
-    if _REQUIRE_OTP_ENV in ("1", "true", "yes", "on"):
-        return True
-    if _REQUIRE_OTP_ENV in ("0", "false", "no", "off"):
-        return False
-    return sms_configured()
-
-
 # --- retention ---------------------------------------------------------------
 # How long an undecided or refused registration is kept before it is forgotten,
 # face templates included. These are mostly minors, and a face held for somebody
