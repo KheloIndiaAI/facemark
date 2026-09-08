@@ -239,6 +239,13 @@ def captures_of(session_id: int) -> List[dict]:
 # Draft rows
 # =============================================================================
 
+def _is_active_person(conn: Conn, student_id: int) -> bool:
+    """Whether attendance may be written for this person at all."""
+    row = conn.execute("SELECT status FROM students WHERE id = ?",
+                       (int(student_id),)).fetchone()
+    return bool(row) and row["status"] == "active"
+
+
 def draft(session_id: int, student_id: int, day: str, confidence: float,
           origin: str, image_path: Optional[str] = None,
           capture_id: Optional[int] = None, centre_id: Optional[int] = None,
@@ -250,8 +257,16 @@ def draft(session_id: int, student_id: int, day: str, confidence: float,
     Never writes 'confirmed'. Capturing the same group twice must not create a
     second row for the same person, which is what the (student_id, session_id)
     constraint enforces - so the second capture simply adds whoever was missed.
+
+    Refuses anybody who is not an active person. The gallery exclusion stops
+    the RECOGNISER reaching a pending or rejected face; this stops the other
+    route, where a name appears on a roster and somebody ticks it. Enforced at
+    the write rather than in each caller, because there are three of them and
+    the cost of missing one is an unapproved person marked present.
     """
     with connect() as conn:
+        if not _is_active_person(conn, student_id):
+            return False
         cur = conn.execute(
             "INSERT INTO attendance (student_id, date, confidence, image_path, "
             " marked_at, centre_id, latitude, longitude, accuracy_m, geo_status, "
@@ -267,6 +282,9 @@ def draft(session_id: int, student_id: int, day: str, confidence: float,
 
 def set_present(session_id: int, student_id: int, present: bool, day: str,
                 centre_id: Optional[int], marked_by: Optional[int]) -> str:
+    # NOTE: adding goes through draft(), which refuses a non-active person.
+    # Removing deliberately does not check - if a row exists for somebody who
+    # has since been rejected, taking it off the register must still work.
     """Toggle someone in the register by hand. Returns 'added' | 'removed' | 'noop'.
 
     Only ever touches DRAFT rows. A confirmed row belongs to a submitted
@@ -391,6 +409,47 @@ def verify_face(img, student_id: int) -> dict:
         return {"ok": False, "score": 0.0, "reason": "Could not read that face"}
     score = float(np.max(fused[0]))
     return {"ok": True, "score": score, "reason": ""}
+
+
+def find_existing_person(img) -> dict:
+    """The best open-set match for this face among people already enrolled.
+
+    The same fuse_scores path and the same MATCH_THRESHOLD the register uses,
+    because it is the same question - "which of these people is this?" - and
+    that threshold is the one measured on this corpus. The 1:1 thresholds are
+    deliberately not used: those answer "is this the person I already believe
+    it is", which is a different and much easier question.
+
+    Searched across every centre, not just the one being applied to. An athlete
+    moving between centres is exactly the case that produces a duplicate, and
+    narrowing to one centre would miss it.
+
+    Pending people are already outside the gallery, so an applicant's own
+    templates can never come back as their own duplicate.
+    """
+    from .detector import get_detector
+    from .recognizer import fuse_scores, get_recognizer
+    from . import database
+
+    detector, recognizer = get_detector(), get_recognizer()
+    faces = detector.detect(img)
+    if not faces:
+        return {"student_id": None, "score": 0.0}
+    face = max(faces, key=lambda f: f.width * f.height)
+
+    gallery = database.load_gallery()
+    if not gallery:
+        return {"student_id": None, "score": 0.0}
+    queries = recognizer.embed_faces(img, [face])
+    weights = {m.name: m.weight for m in recognizer.models}
+    fused, ids = fuse_scores(queries, gallery, weights)
+    if fused is None or not len(ids):
+        return {"student_id": None, "score": 0.0}
+    best = int(np.argmax(fused[0]))
+    score = float(fused[0][best])
+    if score < config.MATCH_THRESHOLD:
+        return {"student_id": None, "score": score}
+    return {"student_id": int(ids[best]), "score": score}
 
 
 def submit(session_id: int, verified: bool, score: float,
@@ -537,6 +596,13 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
         pending = conn.execute(
             "SELECT COUNT(*) FROM users WHERE status = 'pending'"
         ).fetchone()[0]
+        # Counted separately because these are the ones nobody will action on
+        # their own: no coach sees them, so they wait until someone goes
+        # looking. A number on the oversight page is that someone.
+        orphaned = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE status = 'pending' "
+            "  AND role = 'athlete' AND chosen_coach_id IS NULL"
+        ).fetchone()[0]
 
     now = config.local_now().replace(tzinfo=None).isoformat(timespec="seconds")
     expiring = [d for d in drafts if (d.get("expires_at") or "") <= now]
@@ -556,6 +622,7 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
         "photo_only": photo_only,
         "photo_only_count": len(photo_only),
         "pending_approvals": pending,
+        "orphaned_approvals": orphaned,
     }
 
 
@@ -568,11 +635,21 @@ def pending_for_coach(coach_student_id: Optional[int]) -> List[dict]:
     q = ("SELECT u.id AS user_id, u.username, u.full_name, u.email, u.phone, "
          "       u.status, u.role, u.created_at, u.student_id, u.chosen_coach_id, "
          "       u.phone_verified_at, u.guardian_name, "
+         "       u.duplicate_of, u.duplicate_score, "
+         "       d.name AS duplicate_name, d.roll_no AS duplicate_roll_no, "
+         "       dc.name AS duplicate_centre_name, "
          "       s.name AS person_name, s.roll_no, s.photo_path, s.centre_id, "
          "       c.name AS centre_name, "
+         # A number shared with somebody already enrolled. Shown, not acted on:
+         # families share phones here and most of these athletes are minors, so
+         # this is a prompt to look rather than evidence of anything.
+         "       (SELECT COUNT(*) FROM students ps WHERE ps.phone = u.phone "
+         "          AND ps.id <> u.student_id AND ps.status = 'active') AS phone_shared_with, "
          "       (SELECT COUNT(*) FROM templates t WHERE t.student_id = u.student_id) AS templates "
          "FROM users u "
          "LEFT JOIN students s ON s.id = u.student_id "
+         "LEFT JOIN students d ON d.id = u.duplicate_of "
+         "LEFT JOIN centres dc ON dc.id = d.centre_id "
          "LEFT JOIN centres c ON c.id = u.centre_id "
          "WHERE u.status = 'pending'")
     p: list = []
@@ -585,12 +662,101 @@ def pending_for_coach(coach_student_id: Optional[int]) -> List[dict]:
         p.append(int(coach_student_id))
     q += " ORDER BY u.created_at"
     with connect() as conn:
-        return [dict(r) for r in conn.execute(q, p).fetchall()]
+        rows = [dict(r) for r in conn.execute(q, p).fetchall()]
+    # An athlete with no chosen coach is not a new arrival - the coach they
+    # picked was deleted, and chosen_coach_id is ON DELETE SET NULL. They then
+    # sat in nobody's queue. Flagged rather than silently reassigned: which
+    # coach they belong to now is a question for a person.
+    for r in rows:
+        r["orphaned"] = bool(r.get("role") == "athlete" and not r.get("chosen_coach_id"))
+    return rows
+
+
+def reopen(user_id: int) -> dict:
+    """Put a decided account back in the queue.
+
+    Rejecting was a one-way door: the username stayed taken and nothing could
+    undo it short of database access. This is the way back, and it lands the
+    application exactly where it started rather than approving it - the second
+    decision gets made the same way the first one was.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT status, student_id, role FROM users WHERE id = ?", (int(user_id),)
+        ).fetchone()
+        if row is None:
+            raise ValueError("No such account")
+        if row["status"] == "pending":
+            raise ValueError("That account is already waiting for a decision")
+        if row["status"] == "active":
+            raise ValueError("That account is active. Deactivate it instead of "
+                             "sending it back to the queue.")
+        conn.execute(
+            "UPDATE users SET status = 'pending', approved_by = NULL, approved_at = NULL "
+            "WHERE id = ?", (int(user_id),))
+        # The person goes back to pending too, so the face stays out of the
+        # gallery while the second decision is pending - the same rule as the
+        # first time round.
+        if row["student_id"]:
+            conn.execute("UPDATE students SET status = 'pending' WHERE id = ?",
+                         (int(row["student_id"]),))
+    return {"status": "pending", "role": row["role"]}
+
+
+def set_chosen_coach(user_id: int, coach_id: Optional[int]) -> dict:
+    """Point a pending athlete at the coach who should decide them.
+
+    For applicants whose chosen coach was deleted, and for the case where the
+    applicant simply picked the wrong name off the list. Refuses anything but a
+    pending ATHLETE: moving a coach application into a coach's queue is the
+    escalation the whole approval split exists to prevent.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT status, role, centre_id FROM users WHERE id = ?", (int(user_id),)
+        ).fetchone()
+        if row is None:
+            raise ValueError("No such account")
+        if row["status"] != "pending":
+            raise ValueError("That account is not waiting for a decision")
+        if row["role"] != "athlete":
+            raise ValueError("A coach application is decided by a super admin, "
+                             "so it has no coach to assign")
+        if coach_id is not None:
+            ok = conn.execute(
+                "SELECT 1 FROM students s WHERE s.id = ? AND s.role = 'coach' "
+                "  AND s.status = 'active'", (int(coach_id),)
+            ).fetchone()
+            if not ok:
+                raise ValueError("That is not an active coach")
+        conn.execute("UPDATE users SET chosen_coach_id = ? WHERE id = ?",
+                     (int(coach_id) if coach_id is not None else None, int(user_id)))
+    return {"chosen_coach_id": coach_id}
+
+
+def merge_person(conn: Conn, user_id: int, new_person: int, keep_person: int) -> None:
+    """Fold a duplicate signup into the person who was already enrolled.
+
+    The account is re-pointed at the existing record and the duplicate's
+    templates move across - they are extra views of the same face, taken today,
+    which is worth keeping. The duplicate students row then goes, so there is
+    never a moment where both exist and attendance can land on the wrong one.
+    """
+    if int(new_person) == int(keep_person):
+        return
+    conn.execute("UPDATE templates SET student_id = ? WHERE student_id = ?",
+                 (int(keep_person), int(new_person)))
+    conn.execute("UPDATE users SET student_id = ? WHERE id = ?",
+                 (int(keep_person), int(user_id)))
+    conn.execute("DELETE FROM coach_athletes WHERE coach_id = ? OR athlete_id = ?",
+                 (int(new_person), int(new_person)))
+    conn.execute("DELETE FROM students WHERE id = ?", (int(new_person),))
 
 
 def decide(user_id: int, approve: bool, approver_user_id: int,
            guardian_name: Optional[str] = None,
-           guardian_consent: bool = False) -> dict:
+           guardian_consent: bool = False,
+           merge: bool = False) -> dict:
     """Approve or reject a pending account.
 
     On approval three things happen together, in one transaction: the account
@@ -603,7 +769,8 @@ def decide(user_id: int, approve: bool, approver_user_id: int,
     now = config.now_stamp()
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, status, role, student_id, chosen_coach_id FROM users WHERE id = ?",
+            "SELECT id, status, role, student_id, chosen_coach_id, duplicate_of "
+            "FROM users WHERE id = ?",
             (int(user_id),),
         ).fetchone()
         if row is None:
@@ -617,9 +784,28 @@ def decide(user_id: int, approve: bool, approver_user_id: int,
                 "UPDATE users SET status = 'rejected', approved_by = ?, approved_at = ? "
                 "WHERE id = ?", (int(approver_user_id), now, int(user_id)),
             )
+            # The person too. Rejecting used to leave students.status alone and
+            # the gallery keyed only on 'pending', so a rejected face became
+            # MATCHABLE - the opposite of the decision just made.
+            if row["student_id"]:
+                conn.execute("UPDATE students SET status = 'rejected' WHERE id = ?",
+                             (int(row["student_id"]),))
+            from . import signup as signup_mod
+            signup_mod.invalidate_for_user(int(user_id))
             return {"status": "rejected", "linked": False,
                     "role": row["role"]}
 
+        # Merging first, so everything below acts on the person who survives.
+        person = int(row["student_id"]) if row["student_id"] else None
+        merged_into = None
+        if merge:
+            if not row["duplicate_of"] or not person:
+                raise ValueError("There is no existing person to merge this into")
+            merged_into = int(row["duplicate_of"])
+            merge_person(conn, int(user_id), person, merged_into)
+            person = merged_into
+        if person:
+            conn.execute("UPDATE students SET status = 'active' WHERE id = ?", (person,))
         conn.execute(
             "UPDATE users SET status = 'active', approved_by = ?, approved_at = ?, "
             "guardian_name = COALESCE(?, guardian_name), "
@@ -632,11 +818,16 @@ def decide(user_id: int, approve: bool, approver_user_id: int,
         # rather than on chosen_coach_id being absent, so that a stray value in
         # that column could never enrol an approved coach as somebody's athlete.
         linked = False
-        if row["role"] == "athlete" and row["student_id"] and row["chosen_coach_id"]:
+        if row["role"] == "athlete" and person and row["chosen_coach_id"]:
             cur = conn.execute(
                 "INSERT INTO coach_athletes (coach_id, athlete_id, is_primary, created_at) "
                 "VALUES (?,?,1,?) ON CONFLICT (coach_id, athlete_id) DO NOTHING",
-                (int(row["chosen_coach_id"]), int(row["student_id"]), now),
+                (int(row["chosen_coach_id"]), person, now),
             )
             linked = cur.rowcount > 0
-    return {"status": "active", "linked": linked, "role": role}
+    # Imported here rather than at module scope: signup imports database and
+    # auth, and this is the only edge that would point back the other way.
+    from . import signup as signup_mod
+    signup_mod.invalidate_for_user(int(user_id))
+    return {"status": "active", "linked": linked, "role": role,
+            "student_id": person, "merged_into": merged_into}

@@ -116,7 +116,11 @@ def get_user_by_username(username: str) -> Optional[dict]:
 def list_users(centre_id: Optional[int] = None) -> list:
     q = (
         "SELECT u.id, u.username, u.role, u.full_name, u.email, u.phone, u.centre_id, "
-        "u.is_active, u.last_login, u.created_at, c.name AS centre_name "
+        # status was missing, so the Accounts page could not tell an approved
+        # account from a rejected one - the only screen a super admin has for
+        # looking at accounts showed nothing about the decision made on them.
+        "u.is_active, u.status, u.approved_at, u.last_login, u.created_at, "
+        "c.name AS centre_name "
         "FROM users u LEFT JOIN centres c ON c.id = u.centre_id"
     )
     params = []
@@ -250,9 +254,15 @@ def login(username: str, password: str, ip: str = "") -> Optional[dict]:
     status = (user.get("status") or "active")
     if status != "active":
         raise AccountNotActive(
-            "This account is waiting for a coach to approve it."
-            if status == "pending" else
-            "This account is not active. Ask an administrator.",
+            {
+                "pending": "This account is waiting to be approved. "
+                           "You will be able to sign in once that happens.",
+                # Named, because "not active" sent people to wait for something
+                # that was never going to arrive. A rejection can be reopened,
+                # so this says who to ask rather than closing the door.
+                "rejected": "This registration was not approved. Ask your coach "
+                            "or an administrator if you think that is a mistake.",
+            }.get(status, "This account is not active. Ask an administrator."),
             status,
         )
     if not verify_password(password, user["password_hash"]):

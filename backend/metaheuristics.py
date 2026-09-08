@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -318,52 +318,3 @@ class GlobalMatchOptimizer:
 
         return assignments
 
-    @staticmethod
-    def optimize_assignments_v2(
-        fused_sims: np.ndarray,
-        gallery_ids: List[int],
-        threshold=0.35,
-        quality_scores: Optional[List[dict]] = None
-    ) -> Tuple[List[Tuple[int, int, float]], List[int]]:
-        from . import config
-        if fused_sims is None or fused_sims.size == 0 or len(gallery_ids) == 0:
-            return [], []
-
-        n_faces, n_students = fused_sims.shape
-        thr_matrix = (
-            np.broadcast_to(threshold, fused_sims.shape)
-            if isinstance(threshold, np.ndarray)
-            else np.full(fused_sims.shape, float(threshold))
-        )
-
-        cost_matrix = 1.0 - fused_sims.astype(np.float64)
-        cost_matrix[fused_sims < thr_matrix] = _BLOCKED_COST
-        row_ind, col_ind = solve_optimal_assignment(cost_matrix)
-
-        assignments = []
-        ambiguous = []
-
-        ratio_th = getattr(config, 'RATIO_TEST_THRESHOLD', 1.0)
-        
-        for face_idx, col_idx in zip(row_ind, col_ind):
-            sim = float(fused_sims[face_idx, col_idx])
-            student_id = int(gallery_ids[col_idx])
-            
-            eff_sim = sim
-            if quality_scores is not None and face_idx < len(quality_scores):
-                qdict = quality_scores[face_idx]
-                eff_sim -= qdict.get('quality_penalty', 0.0)
-                
-            if eff_sim < thr_matrix[face_idx, col_idx]:
-                continue
-                
-            # Ratio test
-            row_sims = fused_sims[face_idx].copy()
-            row_sims[col_idx] = -np.inf
-            second_best = float(np.max(row_sims))
-            if second_best > 0 and (sim / second_best) < ratio_th:
-                ambiguous.append(face_idx)
-                
-            assignments.append((face_idx, student_id, eff_sim))
-
-        return assignments, ambiguous

@@ -1437,9 +1437,12 @@ def read_session(session_id: int, user: dict = Depends(auth.current_user)):
     if coach_id is not None:
         roster = sessions_mod.athletes_of(int(coach_id))
     else:
-        # Admin sweep: the centre's whole roster.
+        # Admin sweep: the centre's whole roster, minus anybody not approved.
+        # Attendance cannot be written for them anyway, so listing them offers
+        # a tick box that silently does nothing.
         roster = [s for s in database.list_students()
-                  if s.get("centre_id") == sess["centre_id"]]
+                  if s.get("centre_id") == sess["centre_id"]
+                  and (s.get("status") or "active") == "active"]
 
     entries = []
     for st in roster:
@@ -1908,9 +1911,15 @@ def decide_approval(
     approve: bool = Form(...),
     guardian_name: Optional[str] = Form(None),
     guardian_consent: bool = Form(False),
+    merge: bool = Form(False),
     user: dict = Depends(auth.current_user),
 ):
-    """Approve or reject. Approval activates, links and un-hides in one step."""
+    """Approve or reject. Approval activates, links and un-hides in one step.
+
+    `merge` answers the duplicate question: this applicant IS the person the
+    face check flagged, so fold them into that record rather than approving a
+    second one. Only ever set by someone who was shown both.
+    """
     if user["role"] != "super_admin":
         # Ownership is checked against chosen_coach_id, NOT against the pending
         # queue. Once an account is decided it leaves that queue, so a queue
@@ -1938,11 +1947,72 @@ def decide_approval(
             raise HTTPException(403, "That account did not choose you")
     try:
         out = sessions_mod.decide(user_id, approve, int(user["id"]),
-                                  guardian_name, guardian_consent)
+                                  guardian_name, guardian_consent, merge)
     except ValueError as e:
         raise HTTPException(409, str(e))
     return {"ok": True, **out}
 
+
+
+@app.get("/api/approvals/decided")
+def list_decided(limit: int = 50, user: dict = Depends(auth.require_super_admin)):
+    """Accounts that were rejected, so a decision can be looked at again.
+
+    Super admin only. A coach's own mistakes are recoverable through them, and
+    a list of every rejected applicant is not something to hand to each coach.
+    """
+    with pgdb.connect() as conn:
+        rows = conn.execute(
+            "SELECT u.id AS user_id, u.username, u.full_name, u.role, u.status, "
+            "       u.approved_at, u.phone, s.name AS person_name, s.roll_no, "
+            "       c.name AS centre_name, a.full_name AS decided_by "
+            "FROM users u "
+            "LEFT JOIN students s ON s.id = u.student_id "
+            "LEFT JOIN centres c ON c.id = u.centre_id "
+            "LEFT JOIN users a ON a.id = u.approved_by "
+            "WHERE u.status = 'rejected' ORDER BY u.approved_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    return {"ok": True, "decided": [dict(r) for r in rows]}
+
+
+@app.post("/api/approvals/{user_id}/reopen")
+def reopen_approval(user_id: int, user: dict = Depends(auth.require_super_admin)):
+    """Send a rejected application back to the queue.
+
+    Super admin only, and deliberately so even for an athlete a coach rejected:
+    undoing somebody else's decision is a different act from making one, and
+    the person who made it is not always the right one to reverse it.
+    """
+    try:
+        return {"ok": True, **sessions_mod.reopen(user_id)}
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.post("/api/approvals/{user_id}/coach")
+def reassign_approval(
+    user_id: int,
+    coach_id: Optional[int] = Form(None),
+    user: dict = Depends(auth.require_super_admin),
+):
+    """Point a pending athlete at the coach who should decide them.
+
+    For the applicant whose chosen coach was deleted, and for the one who
+    picked the wrong name. Super admin only: a coach moving an applicant into
+    their own queue would be approving themselves into the decision.
+    """
+    try:
+        return {"ok": True, **sessions_mod.set_chosen_coach(user_id, coach_id)}
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/approvals/coaches")
+def approval_coach_options(centre_id: int,
+                           user: dict = Depends(auth.require_super_admin)):
+    """Coaches a pending athlete at this centre could be reassigned to."""
+    return {"ok": True, "coaches": signup_mod.coaches_at(centre_id)}
 
 
 # =============================================================================
@@ -1970,6 +2040,7 @@ def signup_start(
     phone: str = Form(...),
     centre_id: int = Form(...),
     role: str = Form("athlete"),
+    join_code: str = Form(""),
 ):
     """Start an athlete OR a coach application.
 
@@ -1980,7 +2051,7 @@ def signup_start(
     try:
         return {"ok": True, **signup_mod.start(
             username, password, full_name, phone, centre_id,
-            _client_ip(request), role)}
+            _client_ip(request), role, join_code)}
     except PermissionError as e:
         raise HTTPException(429, str(e))
     except ValueError as e:
@@ -2063,6 +2134,22 @@ async def signup_face(
         return {"ok": False,
                 "message": "No usable face in that clip - try again in better light",
                 "liveness": result.to_dict()}
+
+    # Asked BEFORE this face joins the gallery, and answered against people
+    # who are already approved - so an applicant can never be flagged as their
+    # own duplicate. Recorded, never acted on: the merge is a human's call, and
+    # it is put in front of them at approval time.
+    dup = sessions_mod.find_existing_person(best)
+    if dup.get("student_id"):
+        with pgdb.connect() as conn:
+            conn.execute(
+                "UPDATE users SET duplicate_of = ?, duplicate_score = ? "
+                "WHERE student_id = ?",
+                (int(dup["student_id"]), float(dup["score"]), student_id),
+            )
+        log.info("Signup for person %s resembles enrolled person %s (%.3f) - "
+                 "flagged for the approver", student_id, dup["student_id"],
+                 dup["score"])
 
     ts = utils.timestamp()
     photo_name = f"signup_{student_id}_{ts}.jpg"

@@ -184,6 +184,37 @@ Verified by `verify_coach_signup.py` — 41/41, athlete path re-run 26/26.
 
 ---
 
+## Phase 8 — Loopholes found after the coach-registration audit
+
+Each was reproduced before it was fixed. Verified by `verify_matchable.py`
+(22/22) and `verify_fixes.py` (54/54).
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 8.1 | Rejecting no longer makes a face matchable | `[x]` | exclusion was `status='pending'` only; reproduced rejected -> IN gallery |
+| 8.2 | Deactivating an account removes the face too | `[x]` | `MATCHABLE` covers `is_active=0` and any non-active status |
+| 8.3 | Deleting an abandoned signup does not re-arm it | `[x]` | state now on `students.status`, so it outlives the account |
+| 8.4 | `load_gallery_with_quality` filters too | `[x]` | it had no exclusion at all; unused, so never a live hole |
+| 8.5 | Startup re-derives person status from accounts | `[x]` | `_sync_person_status`, only ever moves AWAY from active |
+| 8.6 | A pending person cannot be ticked on by hand | `[x]` | `draft()` refuses; admin-sweep roster excludes them |
+| 8.7 | A duplicate signup is flagged, not created | `[x]` | face matched against the gallery at signup; `duplicate_of` |
+| 8.8 | Approver can merge instead of duplicating | `[x]` | templates move, duplicate row deleted, link on the survivor |
+| 8.9 | A shared phone is surfaced, not blocked | `[x]` | families share numbers; shown as a count, no refusal |
+| 8.10 | A signup token dies with the decision | `[x]` | reproduced: token worked after approval for the rest of 45 min |
+| 8.11 | Rejection is recoverable | `[x]` | `/api/approvals/{id}/reopen`, super admin only |
+| 8.12 | The Accounts page shows the decision | `[x]` | `list_users` did not even select `status` |
+| 8.13 | A rejected login is told so | `[x]` | was "not active", which reads as "wait" |
+| 8.14 | Coach registration needs the centre's code | `[x]` | `centres.coach_join_code`, rotatable, never leaked to a coach |
+| 8.15 | Orphaned applicants are flagged and reassignable | `[x]` | chosen coach deleted -> flag, oversight tile, super-admin reassign |
+| 8.16 | `RATIO_TEST_THRESHOLD` removed, with evidence | `[x]` | measured 988 assignments: 0 flagged at either polarity; see config.py |
+
+**Not fixed, and still open:** the register roster is driven entirely by
+`coach_athletes`, which only self-signup approval writes. On the current data
+that is 0 of 34 athletes linked, so a coach opens an empty register. The
+link/unlink endpoints exist and have no UI.
+
+---
+
 ## Cross-cutting — "what breaks" (plan §6)
 
 Several of these fail **silently**. Each needs its own check.

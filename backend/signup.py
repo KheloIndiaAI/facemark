@@ -31,7 +31,7 @@ import time
 from datetime import timedelta
 from typing import Dict, List, Optional
 
-from . import auth, config, database
+from . import auth, centres as centres_mod, config, database
 from .db import connect
 
 log = logging.getLogger(__name__)
@@ -88,11 +88,55 @@ def _new_token(user_id: int, phone: str) -> str:
 
 
 def resolve_signup(token: str) -> dict:
+    """The signup behind a token, or ValueError.
+
+    Two conditions, and the second is the one that matters. A token is only a
+    convenience for carrying a half-finished signup between requests; what
+    makes it usable is the account still being undecided. Without that check a
+    token kept working after approval, so for the rest of its 45 minutes an
+    unauthenticated caller could keep posting face clips into a LIVE account -
+    the one window in this app where an outsider can write to an active
+    identity. Read from the row every time rather than cached in the token,
+    because the decision happens elsewhere and this has to see it.
+    """
     rec = _signups.get(token or "")
     if not rec or rec["expires"] < time.time():
         _signups.pop(token or "", None)
         raise ValueError("This signup has expired. Start again.")
+    # A token retired by decide() is kept just long enough to say WHY. Popping
+    # it there instead left the caller reading "this signup has expired" one
+    # second after their coach approved them, which sends them round the whole
+    # flow again rather than to the sign-in page.
+    if rec.get("decided"):
+        _signups.pop(token, None)
+        raise ValueError("This signup has already been decided. "
+                         "Sign in, or ask your coach.")
+    with connect() as conn:
+        row = conn.execute("SELECT status FROM users WHERE id = ?",
+                           (rec["user_id"],)).fetchone()
+    if row is None:
+        _signups.pop(token, None)
+        raise ValueError("This signup no longer exists. Start again.")
+    if row["status"] != "pending":
+        _signups.pop(token, None)
+        raise ValueError("This signup has already been decided. "
+                         "Sign in, or ask your coach.")
     return rec
+
+
+def invalidate_for_user(user_id: int) -> int:
+    """Drop any live signup token for this account. Returns how many.
+
+    Belt to resolve_signup's braces: the status check already refuses them, and
+    this stops a decided signup sitting in memory for another 45 minutes. Only
+    reaches tokens held by THIS process, which is why it is not the guard.
+    """
+    dead = [t for t, r in _signups.items() if int(r["user_id"]) == int(user_id)]
+    for t in dead:
+        # Marked, not dropped, so the next use gets the accurate message and
+        # then clears itself. It still cannot be used for anything.
+        _signups[t]["decided"] = True
+    return len(dead)
 
 
 # =============================================================================
@@ -115,7 +159,8 @@ def approver_for(role: str) -> str:
 
 
 def start(username: str, password: str, full_name: str, phone: str,
-          centre_id: int, ip: str = "", role: str = "athlete") -> dict:
+          centre_id: int, ip: str = "", role: str = "athlete",
+          join_code: str = "") -> dict:
     """Create the pending account. Returns {token, user_id}."""
     if _throttled(f"signup:{ip}", SIGNUP_PER_IP_PER_HOUR, 3600):
         raise PermissionError("Too many signups from this connection. Try later.")
@@ -143,6 +188,13 @@ def start(username: str, password: str, full_name: str, phone: str,
                         (int(centre_id),)).fetchone() is None:
             raise ValueError("Choose a centre")
 
+    # Coaches only. An athlete's coach approves them in person and knows their
+    # face; a coach may be approved by a super admin who has never met them, so
+    # something the centre actually issued has to come with the application.
+    if role == "coach" and not centres_mod.check_join_code(centre_id, join_code):
+        raise ValueError("That centre code is not right. Ask the centre for the "
+                         "coach registration code.")
+
     # The person record comes first: an account with no person could never be
     # recognised, and users.student_id is required for an athlete. A coach gets
     # one too - they are recognised at capture time and sign the register with
@@ -155,6 +207,11 @@ def start(username: str, password: str, full_name: str, phone: str,
                                centre_id=centre_id, phone=phone, student_id=student_id)
     with connect() as conn:
         conn.execute("UPDATE users SET status = 'pending' WHERE id = ?", (user_id,))
+        # The person is marked too, not just the account. The face lands on
+        # this row and has to stay unmatchable even if the account is later
+        # deleted rather than decided.
+        conn.execute("UPDATE students SET status = 'pending' WHERE id = ?",
+                     (student_id,))
     log.info("Signup started: %s user %s (person %s), pending %s approval",
              role, user_id, student_id, approver_for(role))
     return {"token": _new_token(user_id, phone), "user_id": user_id,

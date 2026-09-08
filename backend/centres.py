@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import secrets
 from datetime import datetime
 from typing import List, Optional
 
@@ -30,12 +31,51 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 def _row(r) -> dict:
     d = dict(r)
+    # Stripped by default, restored deliberately. search_centres does SELECT *,
+    # so without this the code would ride out on every centre listing - and one
+    # of those listings is the unauthenticated one the signup form reads.
+    d.pop("coach_join_code", None)
     try:
         d["sports"] = json.loads(d["sports"]) if d.get("sports") else []
     except (json.JSONDecodeError, TypeError):
         d["sports"] = []
     d["is_demo"] = bool(d.get("is_demo"))
     return d
+
+
+# --- coach join codes --------------------------------------------------------
+
+def join_code(centre_id: int) -> Optional[str]:
+    """This centre's coach join code. Super-admin eyes only - callers enforce."""
+    with database.connect() as conn:
+        row = conn.execute("SELECT coach_join_code FROM centres WHERE id = ?",
+                           (int(centre_id),)).fetchone()
+    return row["coach_join_code"] if row else None
+
+
+def rotate_join_code(centre_id: int) -> str:
+    """Issue a fresh code, retiring the old one immediately."""
+    code = database.new_join_code()
+    with database.connect() as conn:
+        n = conn.execute("UPDATE centres SET coach_join_code = ? WHERE id = ?",
+                         (code, int(centre_id))).rowcount
+    if not n:
+        raise ValueError("No such centre")
+    return code
+
+
+def check_join_code(centre_id: int, supplied: str) -> bool:
+    """Whether `supplied` is this centre's code.
+
+    Case and spacing are forgiven because this is read off a screen or a piece
+    of paper and typed by hand. compare_digest rather than ==, so a wrong code
+    cannot be narrowed down by timing.
+    """
+    have = join_code(centre_id)
+    if not have:
+        return False
+    return secrets.compare_digest(
+        have.strip().upper(), (supplied or "").strip().upper().replace(" ", ""))
 
 
 # --- CRUD --------------------------------------------------------------------
@@ -64,12 +104,13 @@ def create_centre(
         return conn.insert(
             "INSERT INTO centres (code, name, centre_type, state, district, address, pincode, "
             "sports, capacity, latitude, longitude, geofence_m, incharge_name, contact_phone, "
-            "contact_email, established, is_demo, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "contact_email, established, is_demo, coach_join_code, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 code.strip().upper(), name.strip(), centre_type, state, district, address,
                 pincode, json.dumps(sports or []), capacity, latitude, longitude, geofence_m,
-                incharge_name, contact_phone, contact_email, established, int(is_demo), now,
+                incharge_name, contact_phone, contact_email, established, int(is_demo),
+                database.new_join_code(), now,
             ),
         )
 

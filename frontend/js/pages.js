@@ -117,6 +117,17 @@ async function openCentreDetail(id) {
             <div><span class="ck">Email</span><div>${E(c.contact_email || '-')}</div></div>
             <div><span class="ck">Coordinates</span><div class="font-mono text-sm">${
                 c.latitude != null ? `${c.latitude}, ${c.longitude}` : 'not set'}</div></div>
+            ${c.coach_join_code ? `
+            <div style="grid-column:1/-1"><span class="ck">Coach registration code</span>
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                    <span class="font-mono" style="font-size:18px;letter-spacing:2px">${E(c.coach_join_code)}</span>
+                    <button class="btn btn-secondary" style="min-height:28px;padding:0 10px;font-size:12px"
+                        data-rotate-code data-centre-id="${c.id}">Issue a new code</button>
+                </div>
+                <div class="text-xs text-muted" style="margin-top:4px">
+                    Give this to a coach so they can register themselves. A super admin
+                    still approves them. Issuing a new code stops the old one working.
+                </div></div>` : ''}
         </div>
 
         <div class="stats-grid" style="margin-top:18px">
@@ -259,6 +270,31 @@ async function purgeDemoCentres() {
    Users (super admin)
    ========================================================================== */
 
+/* The approval decision and the on/off switch are two different things and
+   were being shown as one. An account can be approved and disabled, or
+   rejected and still nominally "active" in the old column - which is how a
+   rejected registration could sit on this page looking fine. */
+function userStatusBadge(x) {
+    if (!x.is_active) return '<span class="badge badge-red">disabled</span>';
+    if (x.status === 'pending') return '<span class="badge badge-amber">awaiting approval</span>';
+    if (x.status === 'rejected') return '<span class="badge badge-red">rejected</span>';
+    if (x.status && x.status !== 'active') return `<span class="badge badge-red">${E(x.status)}</span>`;
+    return '<span class="badge badge-green">active</span>';
+}
+
+async function reopenUser(id, name) {
+    if (!window.confirm(
+        `Send ${name} back to the approval queue?\n\nThey stay unable to sign in `
+        + `and their face stays out of the register until somebody decides again.`)) return;
+    try {
+        await api.postForm(`/api/approvals/${id}/reopen`, new FormData());
+        showToast('Back in the queue', `${name} is waiting for a decision again.`, 'success');
+        renderUsersPage();
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
 async function renderUsersPage() {
     const root = document.getElementById('users-root');
     root.innerHTML = '<div class="empty-state py-12">Loading accounts...</div>';
@@ -276,9 +312,12 @@ async function renderUsersPage() {
             ${E(roleShort(x.role))}</span></td>
           <td>${E(x.centre_name || '-')}</td>
           <td class="text-sm text-muted">${E(x.last_login ? x.last_login.replace('T', ' ') : 'never')}</td>
-          <td>${x.is_active ? '<span class="badge badge-green">active</span>'
-                            : '<span class="badge badge-red">disabled</span>'}</td>
+          <td>${userStatusBadge(x)}</td>
           <td style="white-space:nowrap">
+            ${x.status === 'rejected' ? `
+            <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
+              data-reopen-user data-user-id="${x.id}" data-username="${E(x.full_name || x.username)}"
+              >Reconsider</button>` : ''}
             <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
               onclick="toggleUser(${x.id}, ${!x.is_active})">${x.is_active ? 'Disable' : 'Enable'}</button>
             <!-- dataset, not an interpolated handler. E() is HTML escaping,
@@ -360,8 +399,34 @@ async function resetUserPassword(id, username) {
 // Delegated, so the users table can be re-rendered freely and no username is
 // ever interpolated into a handler string. See the note on the button.
 document.addEventListener('click', (e) => {
-    const btn = e.target.closest && e.target.closest('[data-reset-password]');
-    if (!btn) return;
-    e.preventDefault();
-    resetUserPassword(btn.dataset.userId, btn.dataset.username || '');
+    if (!e.target.closest) return;
+    const reset = e.target.closest('[data-reset-password]');
+    if (reset) {
+        e.preventDefault();
+        return resetUserPassword(reset.dataset.userId, reset.dataset.username || '');
+    }
+    const reopen = e.target.closest('[data-reopen-user]');
+    if (reopen) {
+        e.preventDefault();
+        return reopenUser(reopen.dataset.userId, reopen.dataset.username || '');
+    }
+    const rotate = e.target.closest('[data-rotate-code]');
+    if (rotate) {
+        e.preventDefault();
+        return rotateJoinCode(rotate.dataset.centreId);
+    }
 });
+
+async function rotateJoinCode(centreId) {
+    if (!window.confirm(
+        'Issue a new coach registration code?\n\nThe current one stops working '
+        + 'straight away, so anyone part-way through registering will have to '
+        + 'start again with the new code.')) return;
+    try {
+        const r = await api.postForm(`/api/centres/${centreId}/join-code`, new FormData());
+        showToast('New code issued', r.coach_join_code, 'success');
+        openCentreDetail(centreId);
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+}

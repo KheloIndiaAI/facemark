@@ -472,9 +472,34 @@ TILED_DETECTION = False            # Disabled to prevent tile-boundary cuts and 
 TILE_SIZE = 1280                   # tile dimension in pixels
 TILE_OVERLAP = 0.15                # fractional overlap between tiles
 
-# --- v3.0: Ratio test (ambiguous match rejection) --------------------------
+# --- ratio test: MEASURED, and deliberately absent -------------------------
 RATIO_TEST = True
-RATIO_TEST_THRESHOLD = 0.88        # best/2nd-best similarity ratio; above = ambiguous match (rejected as unknown)
+# There is no ratio test. There was a constant here that read like one, and
+# an optimize_assignments_v2 that used it, which nothing in backend/ or
+# scripts/ ever called - so it had never run on real data and the config
+# described a safeguard the matcher did not have.
+#
+# Measured before removing it, on 988 assignments over 120 real capture images
+# from this corpus:
+#
+#   as written   sim / second_best, flagged when BELOW 0.88.
+#                Observed range 1.163 - 2.539. The assigned face is nearly
+#                always the row maximum, so this quantity is >= 1 and the test
+#                could never fire. It was also the reciprocal of the intended
+#                one, so had it ever fired it would have flagged the most
+#                confident matches.
+#   as intended  second_best / sim, flagged when ABOVE 0.88 (Lowe).
+#                Observed range 0.394 - 0.860. Nothing reaches 0.88 either,
+#                though the worst case is close enough that it is not absurd.
+#
+# So neither polarity does anything on the data we have, and `ambiguous` was
+# returned to callers that discarded it - there was no defined consequence to
+# being flagged. Wiring an uncalibrated gate into the matcher on the strength
+# of zero observations, weeks before a pilot, buys nothing and can only cost.
+#
+# If this comes back it needs: a corpus that actually contains look-alikes, a
+# threshold fitted to it, and a decision about what a flagged face DOES -
+# rejected as unknown, or shown to the coach as a question.
 
 # --- v3.0: Platt calibration (raw similarity -> probability) ---------------
 PLATT_CALIBRATION = False          # keep pure cosine similarity for matching decisions

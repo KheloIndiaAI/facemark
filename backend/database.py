@@ -9,6 +9,7 @@ Learning ADDS templates rather than overwriting, so nothing is lost.
 from __future__ import annotations
 
 import logging
+import secrets
 
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
@@ -230,6 +231,13 @@ def init_db() -> None:
             "gender": "TEXT",
             "sport": "TEXT",
             "phone": "TEXT",
+            # Whether this PERSON may be matched. Deliberately duplicated from
+            # users.status rather than derived from it: an account can be
+            # deleted, and when it was, the gallery exclusion that depended on
+            # reading it silently stopped applying. Existing people take
+            # 'active', which is what they are - they were enrolled by an admin
+            # and never went through approval.
+            "status": "TEXT NOT NULL DEFAULT 'active'",  # active|pending|rejected
         })
         _ensure_columns(conn, "users", {
             # Account lifecycle. The column arrives with the admin dashboard so
@@ -252,6 +260,11 @@ def init_db() -> None:
             # read on the same query that fetches the password hash.
             "failed_attempts": "INTEGER NOT NULL DEFAULT 0",
             "locked_until": "TEXT",
+            # Somebody already enrolled whose face this applicant's face
+            # matched at signup. A QUESTION for the approver, never an action:
+            # the merge only happens if a human says so.
+            "duplicate_of": "INTEGER REFERENCES students(id) ON DELETE SET NULL",
+            "duplicate_score": "DOUBLE PRECISION",
         })
         _drop_removed_tables(conn)
         _ensure_columns(conn, "attendance", {
@@ -276,6 +289,16 @@ def init_db() -> None:
         _relax_session_author_fk(conn)
         _widen_role_check(conn)
         _promote_legacy_accounts(conn)
+        _sync_person_status(conn)
+        _ensure_columns(conn, "centres", {
+            # Handed to a coach out of band so their self-registration can be
+            # tied to the centre they claim. Not a secret worth much on its
+            # own - a super admin still approves - but it turns "a stranger
+            # picked your centre from a list" into "somebody the centre gave a
+            # code to".
+            "coach_join_code": "TEXT",
+        })
+        _ensure_join_codes(conn)
 
 
 def _swap_attendance_uniqueness(conn: Conn) -> None:
@@ -380,6 +403,48 @@ def _promote_legacy_accounts(conn: Conn) -> None:
     n = conn.execute("UPDATE users SET role = 'super_admin' WHERE role = 'coach'").rowcount
     if n:
         log.warning("Promoted %d existing account(s) to super_admin for v1.", n)
+
+
+def _sync_person_status(conn: Conn) -> None:
+    """Carry an account's approval state onto the person it belongs to.
+
+    Runs on every startup rather than once. It is derived data, so re-deriving
+    it is both idempotent and self-healing: if any path ever creates a pending
+    account without marking the person, the next start corrects it instead of
+    leaving a face quietly matchable. It only ever moves a person AWAY from
+    'active', so it cannot un-approve somebody a coach has approved - that
+    transition is decide()'s alone.
+    """
+    n = conn.execute(
+        "UPDATE students SET status = u.status FROM users u "
+        "WHERE u.student_id = students.id AND students.status = 'active' "
+        "  AND u.status IN ('pending', 'rejected')"
+    ).rowcount
+    if n:
+        log.warning("Marked %d person record(s) not matchable, from their "
+                    "account status.", n)
+
+
+# No I/O/0/1: these are read off a screen and typed in by somebody else, and
+# the pairs that get confused are the ones worth not having.
+_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def new_join_code(length: int = 8) -> str:
+    """A centre's coach join code. secrets, not random - it is a credential."""
+    return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(length))
+
+
+def _ensure_join_codes(conn: Conn) -> None:
+    """Give every centre a code. Idempotent - only fills the blanks."""
+    rows = conn.execute(
+        "SELECT id FROM centres WHERE coach_join_code IS NULL OR coach_join_code = ''"
+    ).fetchall()
+    for r in rows:
+        conn.execute("UPDATE centres SET coach_join_code = ? WHERE id = ?",
+                     (new_join_code(), int(r["id"])))
+    if rows:
+        log.info("Issued coach join codes to %d centre(s).", len(rows))
 
 
 def _drop_removed_tables(conn: Conn) -> None:
@@ -556,7 +621,7 @@ def list_students(centre_id: Optional[int] = None, role: Optional[str] = None) -
             " AND a.status = 'confirmed') AS total_present, "
             "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id) AS templates, "
             "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id AND t.source = 'adapted') AS adapted, "
-            "s.role, s.centre_id, s.gender, s.sport, s.phone "
+            "s.role, s.centre_id, s.gender, s.sport, s.phone, s.status "
             "FROM students s WHERE 1=1"
             + (" AND s.centre_id = ?" if centre_id is not None else "")
             + (" AND s.role = ?" if role else "")
@@ -618,6 +683,35 @@ def template_stats(student_id: int) -> Dict[str, int]:
 
 # --- gallery ----------------------------------------------------------------
 
+# Who may be matched at all. This is the clause that separates "signup is open"
+# from "anyone can enrol themselves into the register", so it is written once
+# and shared rather than repeated per query.
+#
+# Two conditions, because there are two ways to stop being matchable and they
+# live in different places:
+#
+#   the PERSON      is not active - never approved, or rejected. Held on
+#                   students so it survives the account being deleted; keying
+#                   this on users alone meant deleting an abandoned signup
+#                   re-armed its face.
+#   their ACCOUNT   is not active - pending, rejected, suspended, or switched
+#                   off by an admin. Deactivating an account is a decision
+#                   about a person who is standing in front of a camera, so it
+#                   has to reach the matcher too.
+#
+# NOT EXISTS for the account half, because most enrolled people have no account
+# at all and an inner join would silently drop every one of them. EXISTS for
+# the person half, so a template whose person is gone is excluded rather than
+# matched against a name nobody can look up.
+MATCHABLE = (
+    " AND EXISTS (SELECT 1 FROM students ms"
+    "             WHERE ms.id = t.student_id AND ms.status = 'active')"
+    " AND NOT EXISTS (SELECT 1 FROM users mu"
+    "                 WHERE mu.student_id = t.student_id"
+    "                   AND (mu.status <> 'active' OR mu.is_active = 0))"
+)
+
+
 def load_gallery(centre_id: Optional[int] = None) -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Templates grouped by model for matching.
 
@@ -628,26 +722,13 @@ def load_gallery(centre_id: Optional[int] = None) -> Dict[str, Tuple[np.ndarray,
     pool means fewer chances for a look-alike from another centre to outscore
     the right person.
     """
-    # Templates belonging to a PENDING account never enter the gallery.
-    #
-    # This is the join that stops an unapproved stranger being marked present.
-    # The face is captured at signup - deferring that means a second visit and
-    # half the people never come back - but it must not be matchable until a
-    # coach has approved the person. Forgetting this one clause is the whole
-    # difference between "signup is open" and "anyone can enrol themselves into
-    # the register".
-    #
-    # NOT EXISTS rather than a join on users: most enrolled people have no
-    # account at all, and an inner join would silently drop every one of them.
-    pending = (" AND NOT EXISTS (SELECT 1 FROM users u "
-               "WHERE u.student_id = t.student_id AND u.status = 'pending')")
     q = "SELECT t.id, t.student_id, t.model, t.vector FROM templates t"
     p: list = []
     if centre_id is not None:
-        q += " JOIN students s ON s.id = t.student_id WHERE s.centre_id = ?" + pending
+        q += " JOIN students s ON s.id = t.student_id WHERE s.centre_id = ?" + MATCHABLE
         p.append(centre_id)
     else:
-        q += " WHERE 1=1" + pending
+        q += " WHERE 1=1" + MATCHABLE
     with connect() as conn:
         rows = conn.execute(q, p).fetchall()
     gallery: Dict[str, list] = {}
@@ -666,10 +747,17 @@ def load_gallery(centre_id: Optional[int] = None) -> Dict[str, Tuple[np.ndarray,
 
 
 def load_gallery_with_quality() -> Tuple[Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]], Dict[str, np.ndarray]]:
-    """Like load_gallery() but also returns {model: quality_scores_array}."""
+    """Like load_gallery() but also returns {model: quality_scores_array}.
+
+    Shares MATCHABLE with load_gallery. It had no exclusion of its own, which
+    was invisible only because nothing calls it - a gallery loader that quietly
+    includes unapproved faces is not something to leave lying about for whoever
+    reaches for it next.
+    """
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, student_id, model, vector, quality FROM templates"
+            "SELECT t.id, t.student_id, t.model, t.vector, t.quality "
+            "FROM templates t WHERE 1=1" + MATCHABLE
         ).fetchall()
     gallery: Dict[str, list] = {}
     for r in rows:

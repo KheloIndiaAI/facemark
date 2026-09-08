@@ -1648,11 +1648,16 @@ async function initRegisterPage() {
     const appr = document.getElementById('reg-approvals');
     if (appr) {
         appr.addEventListener('click', (e) => {
+            const re = e.target.closest('[data-reassign-user]');
+            if (re) return regReassign(parseInt(re.dataset.reassignUser, 10),
+                                       parseInt(re.dataset.centreId, 10),
+                                       re.dataset.personName || '');
             const el = e.target.closest('[data-approve-user]');
             if (el) regDecide(parseInt(el.dataset.approveUser, 10),
                               el.dataset.decision === 'approve',
                               el.dataset.personName || '',
-                              el.dataset.personRole || 'athlete');
+                              el.dataset.personRole || 'athlete',
+                              el.dataset.merge === 'true');
         });
     }
     await Promise.all([regOpen(), regLoadApprovals()]);
@@ -1683,16 +1688,50 @@ async function regLoadApprovals() {
                        Asking for COACH access to ${Charts.esc(p.centre_name || 'a centre')}</div>`
                 : '';
             const role = Charts.esc(p.role || 'athlete');
+
+            // Somebody already enrolled whose face this matched. Offered as a
+            // question with its own button, because approving it as a new
+            // person is what creates the duplicate - two lines on the
+            // register, and one of them marked absent every day.
+            const dup = p.duplicate_of ? `
+                <div class="text-xs" style="color:#b45309;font-weight:600">
+                    Looks like ${Charts.esc(p.duplicate_name || 'someone already enrolled')}
+                    ${p.duplicate_roll_no ? `(${Charts.esc(p.duplicate_roll_no)})` : ''}
+                    &middot; ${(Number(p.duplicate_score) || 0).toFixed(2)}
+                    ${p.duplicate_centre_name ? `&middot; ${Charts.esc(p.duplicate_centre_name)}` : ''}
+                </div>` : '';
+            const phoneShared = (p.phone_shared_with > 0 && !p.duplicate_of) ? `
+                <div class="text-xs text-muted">Shares a phone number with
+                    ${p.phone_shared_with} enrolled ${p.phone_shared_with === 1 ? 'person' : 'people'}</div>` : '';
+            // Their coach was deleted, so nobody is looking at this but a
+            // super admin - who has no way to know that without being told.
+            const orphan = p.orphaned ? `
+                <div class="text-xs" style="color:#b45309;font-weight:600">
+                    No coach &mdash; the one they chose has been removed</div>` : '';
+            const mergeBtn = p.duplicate_of ? `
+                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
+                        data-approve-user="${p.user_id}" data-decision="approve" data-merge="true"
+                        data-person-role="${role}"
+                        data-person-name="${Charts.esc(name)}">Same person</button>` : '';
+            const reassignBtn = p.orphaned ? `
+                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
+                        data-reassign-user="${p.user_id}" data-centre-id="${p.centre_id || ''}"
+                        data-person-name="${Charts.esc(name)}">Assign a coach</button>` : '';
             return `
             <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border-subtle)">
                 ${photo}
                 <div style="flex:1;min-width:0">
                     <div style="font-weight:600">${Charts.esc(name)}</div>
                     ${flag}
+                    ${dup}
+                    ${orphan}
+                    ${phoneShared}
                     <div class="text-xs text-muted font-mono">${Charts.esc(p.roll_no || '')}</div>
                     <div class="text-xs text-muted">${p.templates || 0} face template(s)
                         ${p.phone_verified_at ? '\u00b7 phone verified' : ''}</div>
                 </div>
+                ${reassignBtn}
+                ${mergeBtn}
                 <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
                         data-approve-user="${p.user_id}" data-decision="reject"
                         data-person-role="${role}"
@@ -1708,8 +1747,41 @@ async function regLoadApprovals() {
     }
 }
 
-async function regDecide(userId, approve, name, role = 'athlete') {
+async function regReassign(userId, centreId, name) {
+    try {
+        const r = await api.get(`/api/approvals/coaches?centre_id=${centreId}`);
+        const list = r.coaches || [];
+        if (!list.length) {
+            return showToast('No coaches', `There are no active coaches at that centre yet.`, 'info');
+        }
+        const menu = list.map((c, i) => `${i + 1}. ${c.name}`).join("\n");
+        const pick = window.prompt(
+            `Who should decide ${name}?\n\n${menu}\n\nEnter a number.`, '');
+        if (pick === null) return;
+        const idx = parseInt(pick, 10) - 1;
+        if (!(idx >= 0 && idx < list.length)) return;
+        const fd = new FormData();
+        fd.append('coach_id', list[idx].id);
+        await api.postForm(`/api/approvals/${userId}/coach`, fd);
+        showToast('Assigned', `${name} is now in ${list[idx].name}'s queue.`, 'success');
+        await regLoadApprovals();
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+async function regDecide(userId, approve, name, role = 'athlete', merge = false) {
     let guardian = null;
+    if (approve && merge) {
+        // The merge is the destructive half of this screen - it deletes the
+        // record just created and moves its faces onto an existing person - so
+        // it is confirmed on its own terms rather than folded into Approve.
+        if (!window.confirm(
+            `Treat ${name} as somebody already enrolled?\n\nTheir new face `
+            + `captures move onto the existing record and this duplicate is removed. `
+            + `Their attendance stays on the one record instead of splitting `
+            + `between two.`)) return;
+    }
     if (approve && role === 'coach') {
         // Typed, not clicked. Approving a coach grants a whole centre, and it
         // arrives in a list where the muscle memory is to tap Approve - so the
@@ -1730,13 +1802,16 @@ async function regDecide(userId, approve, name, role = 'athlete') {
     try {
         const fd = new FormData();
         fd.append('approve', approve ? 'true' : 'false');
+        if (merge) fd.append('merge', 'true');
         if (guardian) {
             fd.append('guardian_name', guardian);
             fd.append('guardian_consent', 'true');
         }
         await api.postForm(`/api/approvals/${userId}`, fd);
-        showToast(approve ? 'Approved' : 'Rejected',
-                  approve ? (role === 'coach'
+        showToast(approve ? (merge ? 'Merged' : 'Approved') : 'Rejected',
+                  approve ? (merge
+                             ? `${name} was folded into the record already enrolled.`
+                             : role === 'coach'
                              ? `${name} can now sign in as a coach at their centre.`
                              : `${name} can now sign in and be recognised.`)
                           : `${name} was rejected.`,
@@ -2102,7 +2177,12 @@ async function ovLoad(day) {
             + ovTile('Still draft', o.draft_count, o.draft_count ? 'warn' : null)
             + ovTile('Unverified', o.unverified_count, o.unverified_count ? 'bad' : null)
             + ovTile('Photo-only captures', o.photo_only_count, o.photo_only_count ? 'warn' : null)
-            + ovTile('Pending approvals', o.pending_approvals);
+            + ovTile('Pending approvals', o.pending_approvals)
+            // Its own tile, not folded into the one above. These are the
+            // applications no coach can see, so they are the ones that sit
+            // there until somebody comes looking - which is what this page is.
+            + ovTile('No coach assigned', o.orphaned_approvals,
+                     o.orphaned_approvals ? 'bad' : null);
 
         const row = (main, sub) => `
             <div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border-subtle)">

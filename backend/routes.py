@@ -172,7 +172,22 @@ def get_centre_detail(centre_id: int, user: dict = Depends(auth.current_user)):
         for p in detail[group]:
             if p.get("photo_path"):
                 p["photo_url"] = f"/api/photos/{Path(p['photo_path']).name}"
+    # Added back for a super admin only. A coach at the centre does not need it
+    # - they are already in - and the fewer people holding it, the more it is
+    # worth when a stranger produces it.
+    if user["role"] == "super_admin":
+        detail["coach_join_code"] = centres_mod.join_code(centre_id)
     return detail
+
+
+@router.post("/centres/{centre_id}/join-code")
+def rotate_centre_join_code(centre_id: int,
+                            user: dict = Depends(auth.require_super_admin)):
+    """Issue a new coach join code, retiring the old one at once."""
+    try:
+        return {"ok": True, "coach_join_code": centres_mod.rotate_join_code(centre_id)}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 @router.post("/centres")
