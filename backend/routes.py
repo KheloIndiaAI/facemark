@@ -91,6 +91,34 @@ def change_own_password(
 
 # --- user management (super admin only) --------------------------------------
 
+@router.post("/auth/reset/start")
+def reset_start(request: Request, username: str = Form(...)):
+    """Send a one-time code to the phone on the account. Unauthenticated.
+
+    Answers identically for a username that does not exist, so this cannot be
+    used to find out who has an account.
+    """
+    from . import signup as signup_mod
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    ip = fwd or (request.client.host if request.client else "")
+    try:
+        return {"ok": True, **signup_mod.start_reset(username, ip)}
+    except PermissionError as e:
+        raise HTTPException(429, str(e))
+
+
+@router.post("/auth/reset/complete")
+def reset_complete(username: str = Form(...), code: str = Form(...),
+                   new_password: str = Form(...)):
+    """Check the code and set the new password. Every session is revoked."""
+    from . import signup as signup_mod
+    try:
+        signup_mod.complete_reset(username, code, new_password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "message": "Password changed. Sign in with the new one."}
+
+
 @router.get("/users")
 def get_users(user: dict = Depends(auth.require_super_admin)):
     return {"users": auth.list_users()}
@@ -299,8 +327,13 @@ def list_people(
 
 
 @router.patch("/people/{student_id}")
-async def update_person(student_id: int, request: Request, user: dict = Depends(auth.current_user)):
-    """Edit profile fields. A coach may only edit people at their own centre."""
+async def update_person(student_id: int, request: Request,
+                        user: dict = Depends(auth.require_staff)):
+    """Edit profile fields. A coach may only edit people at their own centre.
+
+    Staff only. The centre check below narrows WHICH people a coach may edit; it
+    was never the thing deciding whether the caller should be editing anybody.
+    """
     with database.connect() as conn:
         row = conn.execute("SELECT centre_id FROM students WHERE id = ?", (student_id,)).fetchone()
     if not row:

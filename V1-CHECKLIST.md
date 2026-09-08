@@ -215,6 +215,38 @@ link/unlink endpoints exist and have no UI.
 
 ---
 
+## Phase 9 — Full-audit remediation
+
+Every item reproduced before it was fixed, and re-tested after.
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 9.1 | An athlete cannot write confirmed attendance | `[x]` | reproduced 13 rows; `process` -> super_admin, `assign` -> staff |
+| 9.2 | `mark_attendance` refuses a non-active person | `[x]` | same guard `draft()` had; enforced at the write, not per route |
+| 9.3 | 14 more write routes require staff | `[x]` | enrol, delete, edit, sessions, captures, roster links |
+| 9.4 | An athlete can do 0 of 8 probed actions | `[x]` | was 4 of 10 |
+| 9.5 | Signup survives `--workers 2` | `[x]` | tokens in `signup_tokens`; 4/4 full flows across two workers |
+| 9.6 | Per-number OTP limit is shared across workers | `[x]` | counted from `otp_challenges`, not a per-worker dict |
+| 9.7 | Coach photos render during signup | `[x]` | inlined thumbnails; the /api/photos URL always 401'd |
+| 9.8 | Draft registers expire | `[x]` | `maintenance.expire_drafts`; submitted registers untouched |
+| 9.9 | Undecided and refused registrations are forgotten | `[x]` | 30 days, templates included; refuses anyone with attendance |
+| 9.10 | Sweeps run without a scheduler | `[x]` | startup, register open, oversight page; 15-min rate limit |
+| 9.11 | A coach can fill their own register | `[x]` | GET/PUT `/api/coaches/{id}/roster`; **the pilot blocker** |
+| 9.12 | SMS provider, and no false claim of delivery | `[x]` | webhook + DLT fields; `sent:false` when unconfigured |
+| 9.13 | Self-service password reset | `[x]` | code to the verified phone; no account enumeration |
+| 9.14 | Liveness recalibration documented | `[!]` | still n=2. Cannot improve without pilot clips; procedure written |
+| 9.15 | Sample generator stops writing into `data/students/` | `[x]` | writes to `samples/` only |
+| 9.16 | `master` cannot be pushed by accident | `[x]` | `.githooks/pre-push`; verified it refuses and lets `dev` through |
+| 9.17 | `DEVELOPMENT.md` and `DATA-HANDLING.md` exist | `[x]` | retention, roles, consent, and the traps |
+| 9.18 | Built PDF untracked | `[x]` | plus `*.pdf` and `.backup_*/` ignored |
+
+**Verification:** matchable 22/22, maintenance 18/18, roster 19/19, reset 17/17,
+multi-worker 22/22, athlete-powers 0 of 8 allowed, earlier fixes 54/54, coach
+signup 41/41, athlete signup 27/27, schema 20/20, phase 1 27/27, phase 4 13/13,
+phase 5 21/21, API 23/23, and the 220-photo corpus still rejects no real face.
+
+---
+
 ## Cross-cutting — "what breaks" (plan §6)
 
 Several of these fail **silently**. Each needs its own check.

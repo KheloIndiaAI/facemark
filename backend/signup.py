@@ -68,22 +68,30 @@ def _throttled(key: str, limit: int, window_s: int) -> bool:
 # =============================================================================
 # Signup tokens
 # =============================================================================
-# Kept in auth_sessions would be wrong - those are LOGIN sessions and
-# current_user resolves them, so a signup token would become a way to be
-# signed in as a pending account. Its own table would be tidier; a dict is
-# honest about what it is and disappears on restart, which for a 45-minute
-# half-finished signup is acceptable.
-_signups: Dict[str, dict] = {}
+# In its own table, not in auth_sessions: those are LOGIN sessions and
+# current_user resolves them, so a signup token there would become a way to be
+# signed in as a pending account.
+#
+# And in the DATABASE, not a dict. A dict was a per-worker store, and the
+# Dockerfile runs two workers - so a signup whose next request happened to land
+# on the other one was told it had expired, about half the time, on both
+# deployments. The original reasoning covered restarts and not workers.
 
 
 def _new_token(user_id: int, phone: str) -> str:
     tok = secrets.token_urlsafe(32)
-    _signups[tok] = {
-        "user_id": int(user_id),
-        "phone": phone,
-        "expires": time.time() + SIGNUP_TOKEN_TTL_MINUTES * 60,
-        "phone_verified": False,
-    }
+    now = config.local_now().replace(tzinfo=None)
+    expires = (now + timedelta(minutes=SIGNUP_TOKEN_TTL_MINUTES)).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO signup_tokens (token, user_id, phone, decided, expires_at, created_at) "
+            "VALUES (?,?,?,0,?,?)",
+            (tok, int(user_id), phone, expires, config.now_stamp()),
+        )
+        # Swept here rather than on a schedule: this is the only place rows are
+        # added, so it is the only place they can accumulate.
+        conn.execute("DELETE FROM signup_tokens WHERE expires_at < ?",
+                     (now.isoformat(timespec="seconds"),))
     return tok
 
 
@@ -99,44 +107,43 @@ def resolve_signup(token: str) -> dict:
     identity. Read from the row every time rather than cached in the token,
     because the decision happens elsewhere and this has to see it.
     """
-    rec = _signups.get(token or "")
-    if not rec or rec["expires"] < time.time():
-        _signups.pop(token or "", None)
-        raise ValueError("This signup has expired. Start again.")
-    # A token retired by decide() is kept just long enough to say WHY. Popping
-    # it there instead left the caller reading "this signup has expired" one
-    # second after their coach approved them, which sends them round the whole
-    # flow again rather than to the sign-in page.
-    if rec.get("decided"):
-        _signups.pop(token, None)
-        raise ValueError("This signup has already been decided. "
-                         "Sign in, or ask your coach.")
+    now = config.local_now().replace(tzinfo=None).isoformat(timespec="seconds")
     with connect() as conn:
-        row = conn.execute("SELECT status FROM users WHERE id = ?",
-                           (rec["user_id"],)).fetchone()
-    if row is None:
-        _signups.pop(token, None)
-        raise ValueError("This signup no longer exists. Start again.")
-    if row["status"] != "pending":
-        _signups.pop(token, None)
-        raise ValueError("This signup has already been decided. "
-                         "Sign in, or ask your coach.")
-    return rec
+        rec = conn.execute(
+            "SELECT t.token, t.user_id, t.phone, t.decided, t.expires_at, u.status "
+            "FROM signup_tokens t LEFT JOIN users u ON u.id = t.user_id "
+            "WHERE t.token = ?", (token or "",),
+        ).fetchone()
+        if rec is None or rec["expires_at"] < now:
+            if rec is not None:
+                conn.execute("DELETE FROM signup_tokens WHERE token = ?", (token,))
+            raise ValueError("This signup has expired. Start again.")
+        if rec["status"] is None:
+            conn.execute("DELETE FROM signup_tokens WHERE token = ?", (token,))
+            raise ValueError("This signup no longer exists. Start again.")
+        # A token retired by decide() is kept just long enough to say WHY.
+        # Deleting it there instead left the caller reading "this signup has
+        # expired" a second after their coach approved them, which sends them
+        # round the whole flow again rather than to the sign-in page.
+        if int(rec["decided"]) or rec["status"] != "pending":
+            conn.execute("DELETE FROM signup_tokens WHERE token = ?", (token,))
+            raise ValueError("This signup has already been decided. "
+                             "Sign in, or ask your coach.")
+    return {"user_id": int(rec["user_id"]), "phone": rec["phone"]}
 
 
 def invalidate_for_user(user_id: int) -> int:
     """Drop any live signup token for this account. Returns how many.
 
     Belt to resolve_signup's braces: the status check already refuses them, and
-    this stops a decided signup sitting in memory for another 45 minutes. Only
-    reaches tokens held by THIS process, which is why it is not the guard.
+    this makes the reason accurate rather than "expired".
     """
-    dead = [t for t, r in _signups.items() if int(r["user_id"]) == int(user_id)]
-    for t in dead:
+    with connect() as conn:
         # Marked, not dropped, so the next use gets the accurate message and
-        # then clears itself. It still cannot be used for anything.
-        _signups[t]["decided"] = True
-    return len(dead)
+        # then clears itself. It still cannot be used for anything - and now it
+        # reaches tokens held by every worker, not just this one.
+        return conn.execute("UPDATE signup_tokens SET decided = 1 WHERE user_id = ?",
+                            (int(user_id),)).rowcount
 
 
 # =============================================================================
@@ -249,10 +256,55 @@ def coaches_at(centre_id: int) -> List[dict]:
     out = []
     for r in rows:
         d = dict(r)
-        p = d.pop("photo_path", None)
-        d["photo_url"] = f"/api/photos/{os.path.basename(p)}" if p else None
+        d["photo"] = _thumbnail(d.pop("photo_path", None))
         out.append(d)
     return out
+
+
+# The picker showed a coach's face so a new athlete could recognise the person
+# rather than parse a name they may have only heard. It pointed at /api/photos,
+# which requires a session - correctly, those are photographs of children - and
+# the applicant has no session yet, so every one of them was a broken image.
+#
+# Inlined rather than given a token-gated image route: the list is already
+# behind the signup token, a handful of coaches is a handful of small
+# thumbnails, and it keeps the token out of <img src>, where it would end up in
+# proxy and browser logs.
+THUMB_PX = 96
+THUMB_QUALITY = 70
+
+
+def _thumbnail(photo_path: Optional[str]) -> Optional[str]:
+    """A small square-ish JPEG data URI, or None if there is no usable photo."""
+    if not photo_path:
+        return None
+    try:
+        import base64
+
+        import cv2
+        import numpy as np
+
+        from . import storage
+
+        raw = storage.get("students", os.path.basename(photo_path))
+        if not raw:
+            return None
+        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        scale = THUMB_PX / max(h, w, 1)
+        if scale < 1:
+            img = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))),
+                             interpolation=cv2.INTER_AREA)
+        okj, buf = cv2.imencode(".jpg", img,
+                                [int(cv2.IMWRITE_JPEG_QUALITY), THUMB_QUALITY])
+        if not okj:
+            return None
+        return "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode()
+    except Exception as e:               # noqa: BLE001 - a missing face is not fatal
+        log.warning("Could not build a coach thumbnail for %s: %s", photo_path, e)
+        return None
 
 
 def choose_coach(token: str, coach_id: int) -> None:
@@ -288,7 +340,16 @@ def send_otp(token: str, ip: str = "") -> dict:
     rec = resolve_signup(token)
     phone = rec["phone"]
 
-    if _throttled(f"otp:num:{phone}", OTP_PER_NUMBER_PER_HOUR, 3600):
+    # Counted from the table, not a per-worker dict: this is the limit with a
+    # bill attached, and two workers each allowing five is ten messages an hour
+    # to somebody's phone.
+    with connect() as conn:
+        recent = conn.execute(
+            "SELECT COUNT(*) FROM otp_challenges WHERE phone = ? AND created_at > ?",
+            (phone, (config.local_now() - timedelta(hours=1))
+             .replace(tzinfo=None).isoformat(timespec="seconds")),
+        ).fetchone()[0]
+    if recent >= OTP_PER_NUMBER_PER_HOUR:
         raise PermissionError("Too many codes for that number. Try again later.")
     if _throttled(f"otp:ip:{ip}", OTP_PER_IP_PER_HOUR, 3600):
         raise PermissionError("Too many codes from this connection. Try later.")
@@ -318,8 +379,12 @@ def send_otp(token: str, ip: str = "") -> dict:
             "VALUES (?,?,?,0,?)",
             (phone, _hash_code(phone, code), expires, config.now_stamp()),
         )
-    _deliver(phone, code)
-    return {"sent": True, "expires_in_minutes": OTP_TTL_MINUTES}
+    delivered = _deliver(phone, code)
+    # The truth, not "sent: true" regardless. A screen that says "check your
+    # phone" when nothing was sent leaves somebody waiting for a message that
+    # is never coming, and blaming their signal.
+    return {"sent": delivered, "delivery": "sms" if delivered else "not_configured",
+            "expires_in_minutes": OTP_TTL_MINUTES}
 
 
 def _hash_code(phone: str, code: str) -> str:
@@ -327,18 +392,59 @@ def _hash_code(phone: str, code: str) -> str:
     return hashlib.sha256(f"{phone}:{code}".encode()).hexdigest()
 
 
-def _deliver(phone: str, code: str) -> None:
-    """Hand the code to a delivery channel.
+OTP_MESSAGE = ("{code} is your FaceMark verification code. It expires in "
+               "{minutes} minutes. Do not share it with anyone.")
 
-    SMS to Indian numbers needs DLT registration with a TRAI-approved platform
-    before a single message can be sent - entity, sender ID and every template
-    approved in advance. That is procurement, not code, so until it exists this
-    logs at WARNING and nothing is sent. The code is deliberately NOT returned
-    to the caller: an endpoint that hands back its own OTP "for testing" is one
-    deploy away from doing it in production.
+
+def _deliver(phone: str, code: str) -> bool:
+    """Hand the code to a delivery channel. True if it actually went somewhere.
+
+    The code is deliberately NEVER returned to the caller: an endpoint that
+    hands back its own OTP "for testing" is one deploy away from doing it in
+    production. It is not logged either once a provider is configured - a code
+    in a log file is a code somebody can read.
+
+    Returns False when no provider is configured, and the caller passes that
+    honesty up to the screen instead of saying "check your phone".
     """
-    log.warning("OTP for %s is %s (no SMS provider configured - see IMPLEMENTATION-PLAN "
-                "section 4.4 on DLT registration)", phone, code)
+    text = OTP_MESSAGE.format(code=code, minutes=OTP_TTL_MINUTES)
+    if config.SMS_PROVIDER == "webhook" and config.SMS_WEBHOOK_URL:
+        try:
+            import json as _json
+            import urllib.request
+
+            payload = {"phone": phone, "message": text,
+                       "sender_id": config.SMS_SENDER_ID,
+                       "entity_id": config.DLT_ENTITY_ID,
+                       "template_id": config.DLT_TEMPLATE_ID}
+            req = urllib.request.Request(
+                config.SMS_WEBHOOK_URL,
+                data=_json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json",
+                         **({"Authorization": f"Bearer {config.SMS_WEBHOOK_TOKEN}"}
+                            if config.SMS_WEBHOOK_TOKEN else {})},
+                method="POST")
+            with urllib.request.urlopen(req, timeout=config.SMS_TIMEOUT_SECONDS) as r:
+                if 200 <= r.status < 300:
+                    log.info("OTP delivered to %s via the SMS webhook.", _redact(phone))
+                    return True
+                log.error("SMS webhook refused the message for %s: HTTP %s",
+                          _redact(phone), r.status)
+        except Exception as e:                # noqa: BLE001
+            log.error("SMS webhook failed for %s: %s", _redact(phone), e)
+        return False
+
+    # Nothing configured. Logged so a pilot can still be run by reading the
+    # server log, and at WARNING so it is obvious this is not a real deployment.
+    log.warning("NO SMS PROVIDER: the code for %s is %s. Set FACEMARK_SMS_PROVIDER "
+                "once DLT registration is done - see DEVELOPMENT.md.", phone, code)
+    return False
+
+
+def _redact(phone: str) -> str:
+    """Enough of a number to match it to a person, not enough to dial it."""
+    p = (phone or "").strip()
+    return ("*" * max(0, len(p) - 4)) + p[-4:] if len(p) > 4 else "****"
 
 
 def verify_otp(token: str, code: str) -> bool:
@@ -381,6 +487,107 @@ def role_for(token: str) -> str:
         row = conn.execute("SELECT role FROM users WHERE id = ?",
                            (rec["user_id"],)).fetchone()
     return (row["role"] if row else "athlete")
+
+
+# =============================================================================
+# Password reset
+# =============================================================================
+# Deliberately keyed on the username plus the code rather than on a reset token:
+# the code IS the credential, it already expires, already counts attempts and is
+# already stored hashed. A token would be a second secret to get right.
+
+RESET_PER_ACCOUNT_PER_HOUR = 3
+
+
+def start_reset(username: str, ip: str = "") -> dict:
+    """Send a reset code, if that account exists and has a verified phone.
+
+    Always reports the same thing. A caller must not be able to tell a real
+    username from a made-up one by the answer they get.
+    """
+    # Must be byte-identical to what a REAL account produces, not merely the
+    # same shape. An earlier version answered {"sent": true, "delivery":
+    # "unknown"} here while a real account with no SMS provider answered
+    # {"sent": false, "delivery": "not_configured"} - which told a caller
+    # exactly which usernames exist. Derived from the same config the real path
+    # reads, so the two cannot drift apart again.
+    _sms = config.sms_configured()
+    quiet = {"sent": _sms, "delivery": "sms" if _sms else "not_configured"}
+    if _throttled(f"reset:ip:{ip}", OTP_PER_IP_PER_HOUR, 3600):
+        raise PermissionError("Too many reset attempts from this connection. Try later.")
+
+    user = auth.get_user_by_username(username or "")
+    if not user or not user.get("phone") or not user.get("phone_verified_at"):
+        # No phone, no account, or a phone never verified: nothing to send to.
+        # Same answer either way.
+        log.info("Password reset requested for an account that cannot use it (%r)",
+                 (username or "")[:40])
+        return quiet
+    if (user.get("status") or "active") != "active":
+        log.info("Password reset requested for a %s account", user.get("status"))
+        return quiet
+
+    phone = user["phone"]
+    now = config.local_now()
+    with connect() as conn:
+        recent = conn.execute(
+            "SELECT COUNT(*) FROM otp_challenges WHERE phone = ? AND created_at > ?",
+            (phone, (now - timedelta(hours=1)).replace(tzinfo=None)
+             .isoformat(timespec="seconds")),
+        ).fetchone()[0]
+        if recent >= RESET_PER_ACCOUNT_PER_HOUR + OTP_PER_NUMBER_PER_HOUR:
+            raise PermissionError("Too many codes for that number. Try again later.")
+        code = f"{secrets.randbelow(1000000):06d}"
+        expires = (now + timedelta(minutes=OTP_TTL_MINUTES)) \
+            .replace(tzinfo=None).isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO otp_challenges (phone, code_hash, expires_at, attempts, created_at) "
+            "VALUES (?,?,?,0,?)",
+            (phone, _hash_code(phone, code), expires, config.now_stamp()),
+        )
+    delivered = _deliver(phone, code)
+    return {"sent": delivered, "delivery": "sms" if delivered else "not_configured"}
+
+
+def complete_reset(username: str, code: str, new_password: str) -> None:
+    """Check the code and set the password. Raises ValueError with the reason.
+
+    One step rather than verify-then-set: a separate verify would have to hand
+    back something proving it happened, and that something is another credential
+    to protect. Here the code is spent exactly when the password changes.
+    """
+    user = auth.get_user_by_username(username or "")
+    # Checked before the code so a wrong username cannot consume somebody's
+    # attempts, but reported identically so it still reveals nothing.
+    generic = "That code is not right, or it has expired."
+    if not user or not user.get("phone") or not user.get("phone_verified_at"):
+        raise ValueError(generic)
+    if (user.get("status") or "active") != "active":
+        raise ValueError(generic)
+
+    phone = user["phone"]
+    now = config.local_now().replace(tzinfo=None).isoformat(timespec="seconds")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, code_hash, expires_at, attempts, consumed_at FROM otp_challenges "
+            "WHERE phone = ? ORDER BY id DESC LIMIT 1", (phone,)).fetchone()
+        if row is None or row["consumed_at"] or row["expires_at"] < now:
+            raise ValueError(generic)
+        if int(row["attempts"]) >= OTP_MAX_ATTEMPTS:
+            raise ValueError("Too many wrong attempts. Ask for a new code.")
+        # Counted before comparing, so a crash cannot buy a free guess.
+        conn.execute("UPDATE otp_challenges SET attempts = attempts + 1 WHERE id = ?",
+                     (row["id"],))
+        if not secrets.compare_digest(row["code_hash"],
+                                      _hash_code(phone, (code or "").strip())):
+            raise ValueError(generic)
+        conn.execute("UPDATE otp_challenges SET consumed_at = ? WHERE id = ?",
+                     (config.now_stamp(), row["id"]))
+
+    # change_password revokes every live session for this account, which is the
+    # point: whoever prompted the reset must not still be signed in elsewhere.
+    auth.change_password(int(user["id"]), new_password)
+    log.warning("Password reset completed for account %s via phone code.", user["id"])
 
 
 def student_for(token: str) -> int:

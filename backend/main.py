@@ -32,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (auth, centres as centres_mod, config, database, db as pgdb,
                sessions as sessions_mod, signup as signup_mod,
+               maintenance as maintenance_mod,
                liveness, metaheuristics, routes, storage, utils)
 from .detector import Face, estimate_landmarks, get_detector
 from .enhancer import get_enhancer, sharpness_quality
@@ -99,6 +100,14 @@ def startup() -> None:
                 log.info("Auto-healed %d student template profiles on startup.", healed)
         except Exception as e:
             log.warning("Template sync check skipped: %s", e)
+
+        # Housekeeping, inside the same lock so two workers do not both sweep
+        # on boot. Forced: a container that has been down for a week has a
+        # week of expired registers waiting, and the caller-triggered sweeps
+        # only fire once somebody visits.
+        swept = maintenance_mod.run_due(force=True)
+        if any(swept.values()):
+            log.info("Startup housekeeping: %s", swept)
 
     log.info("Detector backend: %s", get_detector().backend_label)
     log.info("Recognizer ensemble: %s", get_recognizer().label)
@@ -241,7 +250,7 @@ async def register_student(
     gender: Optional[str] = Form(None),
     sport: Optional[str] = Form(None),
     phone: Optional[str] = Form(None),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Register a person from a photo (required) and, optionally, a second photo.
 
@@ -338,7 +347,7 @@ async def add_student_photo(
     student_id: int,
     photo: UploadFile = File(...),
     source: str = Form("live"),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Attach an extra photo (recent selfie, another ID) to an existing student."""
     student = database.get_student(student_id)
@@ -383,7 +392,7 @@ async def add_student_photo(
 
 
 @app.delete("/api/students/{student_id}")
-def remove_student(student_id: int, user: dict = Depends(auth.current_user)):
+def remove_student(student_id: int, user: dict = Depends(auth.require_staff)):
     student = database.get_student(student_id)
     if not student:
         raise HTTPException(404, "Student not found")
@@ -450,9 +459,20 @@ async def process_attendance(
     longitude: Optional[float] = Form(None),
     accuracy_m: Optional[float] = Form(None),
     centre_id: Optional[int] = Form(None),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_super_admin),
 ):
     """Process group photo for attendance.
+
+    SUPER ADMIN ONLY. This is the pre-session route: it writes CONFIRMED
+    attendance straight from a photo, with no register, no review and no
+    signature from whoever took it. That is the one thing v1 set out to stop, so
+    the only accounts left holding it are the ones running the bulk import
+    scripts. A coach takes attendance through /api/sessions, where it is
+    reviewed and signed for; an athlete never takes it for anybody.
+
+    It used to take current_user and scope by centre, which reads like access
+    control and is not - an athlete has a centre too, and could post a group
+    photo to mark thirteen people present.
 
     detection_mode options:
     - fast:     YuNet at a higher confidence - fewer, surer boxes
@@ -813,7 +833,7 @@ async def process_attendance_video(
     longitude: Optional[float] = Form(None),
     accuracy_m: Optional[float] = Form(None),
     centre_id: Optional[int] = Form(None),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Mark attendance from a short clip, refusing photographs of photographs.
 
@@ -967,7 +987,7 @@ async def enroll_pose_check(
     step: str = Form(...),
     base_yaw: Optional[float] = Form(None),
     base_pitch: Optional[float] = Form(None),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Live guidance for one frame of guided enrolment.
 
@@ -1072,7 +1092,7 @@ async def enroll_multiview(
     request: Request,
     student_id: int,
     frames: List[UploadFile] = File(...),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Enrol an athlete from several views captured in one sitting.
 
@@ -1188,7 +1208,7 @@ async def register_student_from_video(
     gender: Optional[str] = Form(None),
     sport: Optional[str] = Form(None),
     phone: Optional[str] = Form(None),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Register a new person from one short clip.
 
@@ -1305,7 +1325,7 @@ async def enroll_from_video(
     request: Request,
     student_id: int,
     video: UploadFile = File(...),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Enrol an athlete from a short clip instead of a posed frame sequence.
 
@@ -1408,7 +1428,7 @@ def open_session(
     centre_id: Optional[int] = Form(None),
     coach_id: Optional[int] = Form(None),
     date_str: Optional[str] = Form(None),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Get or create today's register. Idempotent - calling it twice is safe."""
     scoped_centre = auth.scope_centre(user, centre_id)
@@ -1501,7 +1521,7 @@ async def add_session_capture(
     latitude: Optional[float] = Form(None),
     longitude: Optional[float] = Form(None),
     accuracy_m: Optional[float] = Form(None),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Add one capture to a register. Video or photo.
 
@@ -1645,7 +1665,7 @@ async def submit_session(
     session_id: int,
     clip: UploadFile = File(...),
     attempt: int = Form(1),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Close the register under the submitter's own face.
 
@@ -1720,7 +1740,7 @@ def toggle_roster(
     session_id: int,
     student_id: int,
     present: bool = Form(...),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Tick or untick one person by hand. Drafts only."""
     sess = _session_or_404(session_id)
@@ -1741,9 +1761,63 @@ def coach_roster(coach_id: int, user: dict = Depends(auth.current_user)):
             "athletes": sessions_mod.athletes_of(int(scoped))}
 
 
+# Declared BEFORE /athletes/{athlete_id}: FastAPI matches in order, and
+# "roster" would otherwise be read as an athlete_id and fail to parse as an int.
+@app.get("/api/coaches/{coach_id}/roster")
+def read_roster(coach_id: int, user: dict = Depends(auth.require_staff)):
+    """This coach's register roster, and who else at the centre could join it."""
+    scoped = auth.scope_coach(user, coach_id)
+    if scoped is None:
+        raise HTTPException(400, "A coach is required")
+    with pgdb.connect() as conn:
+        row = conn.execute("SELECT centre_id FROM students WHERE id = ?",
+                           (int(scoped),)).fetchone()
+    if row is None:
+        raise HTTPException(404, "No such coach")
+    centre = auth.scope_centre(user, row["centre_id"])
+    return {"ok": True, "coach_id": int(scoped),
+            **sessions_mod.roster_options(int(scoped), centre)}
+
+
+@app.put("/api/coaches/{coach_id}/roster")
+def write_roster(
+    coach_id: int,
+    athlete_ids: str = Form(""),
+    user: dict = Depends(auth.require_staff),
+):
+    """Set this coach's roster to exactly these athletes.
+
+    Takes the whole list, not one change at a time: a coach setting up for the
+    first time is ticking thirty boxes, and thirty requests is thirty chances to
+    end up with a roster that is half of what they chose.
+    """
+    scoped = auth.scope_coach(user, coach_id)
+    if scoped is None:
+        raise HTTPException(400, "A coach is required")
+    try:
+        ids = [int(x) for x in athlete_ids.replace(" ", "").split(",") if x]
+    except ValueError:
+        raise HTTPException(400, "athlete_ids must be a comma-separated list of ids")
+    # A coach may only add people from their own centre, checked here rather
+    # than trusted from the browser.
+    if user["role"] != "super_admin" and ids:
+        with pgdb.connect() as conn:
+            marks = ",".join("?" for _ in ids)
+            outside = conn.execute(
+                f"SELECT COUNT(*) FROM students WHERE id IN ({marks}) "
+                "AND (centre_id IS DISTINCT FROM ?)", ids + [user["centre_id"]],
+            ).fetchone()[0]
+        if outside:
+            raise HTTPException(403, "You can only add athletes from your own centre")
+    try:
+        return {"ok": True, **sessions_mod.set_roster(int(scoped), ids)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/coaches/{coach_id}/athletes/{athlete_id}")
 def link_athlete(coach_id: int, athlete_id: int,
-                 user: dict = Depends(auth.current_user)):
+                 user: dict = Depends(auth.require_staff)):
     scoped = auth.scope_coach(user, coach_id)
     if not database.get_student(athlete_id):
         raise HTTPException(404, "No such person")
@@ -1756,7 +1830,7 @@ def link_athlete(coach_id: int, athlete_id: int,
 
 @app.delete("/api/coaches/{coach_id}/athletes/{athlete_id}")
 def unlink_athlete(coach_id: int, athlete_id: int,
-                   user: dict = Depends(auth.current_user)):
+                   user: dict = Depends(auth.require_staff)):
     scoped = auth.scope_coach(user, coach_id)
     return {"ok": True, "removed": sessions_mod.unlink_athlete(int(scoped), athlete_id)}
 
@@ -1892,6 +1966,10 @@ def admin_overview(
     user: dict = Depends(auth.require_super_admin),
 ):
     """Which registers are missing today, and which should not be trusted."""
+    # The oversight page is where somebody looks at the state of the system, so
+    # it is a good moment to make that state true: expire yesterday's abandoned
+    # registers and forget registrations nobody decided. Rate-limited inside.
+    maintenance_mod.run_due()
     return {"ok": True, **sessions_mod.admin_overview(date_str, centre_id)}
 
 
@@ -2259,9 +2337,13 @@ async def assign_face_to_student(
     student_id: int = Form(...),
     date_str: Optional[str] = Form(None),
     learn: bool = Form(True),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Attribute a face the matcher missed to a known athlete, and learn from it.
+
+    Coaches and admins only. It writes confirmed attendance AND, with learn on,
+    adds an adapted template - so an athlete holding this could both mark people
+    present and teach the recogniser a face of their choosing.
 
     This is the correction path for the case the measurements show is hardest:
     small faces in a low-resolution photo, where the right person scores just

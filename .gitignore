@@ -72,3 +72,10 @@ server.err
 # data/models/ is. Committing it would make a sub-1 MB repo ~28x larger, and
 # git would keep the blobs even after a later deletion.
 frontend/vendor/
+
+# Built deliverables. Regenerated from scripts; not source.
+FaceMark-Coach-Guide.pdf
+*.pdf
+
+# Local working copies of the tree, made before large refactors.
+.backup_*/

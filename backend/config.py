@@ -472,6 +472,40 @@ TILED_DETECTION = False            # Disabled to prevent tile-boundary cuts and 
 TILE_SIZE = 1280                   # tile dimension in pixels
 TILE_OVERLAP = 0.15                # fractional overlap between tiles
 
+# --- SMS delivery ------------------------------------------------------------
+# Sending SMS to Indian numbers needs DLT registration with a TRAI-approved
+# platform: the entity, the sender ID and every template approved in advance.
+# That is procurement, not code. These say what to do once it exists.
+#
+# With no provider configured nothing is sent AND the API says so, rather than
+# reporting success for a message that was never handed to anybody.
+SMS_PROVIDER = os.environ.get("FACEMARK_SMS_PROVIDER", "none").strip().lower()
+SMS_WEBHOOK_URL = os.environ.get("FACEMARK_SMS_URL", "").strip()
+SMS_WEBHOOK_TOKEN = os.environ.get("FACEMARK_SMS_TOKEN", "").strip()
+SMS_SENDER_ID = os.environ.get("FACEMARK_SMS_SENDER_ID", "").strip()
+DLT_ENTITY_ID = os.environ.get("FACEMARK_DLT_ENTITY_ID", "").strip()
+DLT_TEMPLATE_ID = os.environ.get("FACEMARK_DLT_TEMPLATE_ID", "").strip()
+SMS_TIMEOUT_SECONDS = float(os.environ.get("FACEMARK_SMS_TIMEOUT", "8"))
+
+
+def sms_configured() -> bool:
+    """Whether a code handed to _deliver would actually reach a phone."""
+    if SMS_PROVIDER == "webhook":
+        return bool(SMS_WEBHOOK_URL)
+    return False
+
+
+# --- retention ---------------------------------------------------------------
+# How long an undecided or refused registration is kept before it is forgotten,
+# face templates included. These are mostly minors, and a face held for somebody
+# you decided not to enrol is the hardest kind of data to justify keeping.
+#
+# 30 days is chosen to be longer than any plausible "the coach was away" gap and
+# shorter than a term. Nothing here touches a person an admin enrolled, or
+# anybody with attendance against their name.
+PENDING_SIGNUP_TTL_DAYS = int(os.environ.get("FACEMARK_PENDING_TTL_DAYS", "30"))
+REJECTED_SIGNUP_TTL_DAYS = int(os.environ.get("FACEMARK_REJECTED_TTL_DAYS", "30"))
+
 # --- ratio test: MEASURED, and deliberately absent -------------------------
 RATIO_TEST = True
 # There is no ratio test. There was a constant here that read like one, and

@@ -76,6 +76,74 @@ def athletes_of(coach_id: int) -> List[dict]:
         return [dict(r) for r in rows]
 
 
+def roster_options(coach_id: int, centre_id: Optional[int]) -> dict:
+    """Who is on this coach's register, and who else could be.
+
+    Candidates are active athletes at the coach's own centre. Pending and
+    rejected people are excluded: they are not matchable and attendance cannot
+    be written for them, so offering them a checkbox promises something the
+    rest of the system refuses to deliver.
+    """
+    with connect() as conn:
+        linked = [int(r[0]) for r in conn.execute(
+            "SELECT athlete_id FROM coach_athletes WHERE coach_id = ?",
+            (int(coach_id),)).fetchall()]
+        q = ("SELECT s.id, s.name, s.roll_no, s.photo_path, s.gender, s.sport "
+             "FROM students s WHERE s.role = 'athlete' AND s.status = 'active'")
+        p: list = []
+        if centre_id is not None:
+            q += " AND s.centre_id = ?"
+            p.append(int(centre_id))
+        rows = [dict(r) for r in conn.execute(q + " ORDER BY s.name", p).fetchall()]
+    have = set(linked)
+    for r in rows:
+        r["linked"] = int(r["id"]) in have
+    return {"athletes": rows, "linked": linked}
+
+
+def set_roster(coach_id: int, athlete_ids: List[int]) -> dict:
+    """Make this coach's roster exactly `athlete_ids`. Returns what changed.
+
+    Reconciled in ONE transaction rather than applied as a stream of link and
+    unlink calls: a coach ticking thirty boxes should either get thirty or get
+    an error, not whatever arrived before their phone lost signal.
+
+    Removing a link does NOT touch attendance already recorded. Somebody who
+    trained here in March was present in March, whoever coaches them now.
+    """
+    want = {int(a) for a in athlete_ids}
+    with connect() as conn:
+        if want:
+            marks = ",".join("?" for _ in want)
+            valid = {int(r[0]) for r in conn.execute(
+                f"SELECT id FROM students WHERE id IN ({marks}) "
+                "AND role = 'athlete' AND status = 'active'", list(want)).fetchall()}
+            refused = want - valid
+            if refused:
+                raise ValueError(
+                    "Not an active athlete: " + ", ".join(str(x) for x in sorted(refused)))
+            want = valid
+        if int(coach_id) in want:
+            raise ValueError("A coach cannot be their own athlete")
+
+        have = {int(r[0]) for r in conn.execute(
+            "SELECT athlete_id FROM coach_athletes WHERE coach_id = ?",
+            (int(coach_id),)).fetchall()}
+        now = config.now_stamp()
+        added = removed = 0
+        for a in sorted(want - have):
+            added += conn.execute(
+                "INSERT INTO coach_athletes (coach_id, athlete_id, is_primary, created_at) "
+                "VALUES (?,?,0,?) ON CONFLICT (coach_id, athlete_id) DO NOTHING",
+                (int(coach_id), a, now)).rowcount
+        for a in sorted(have - want):
+            removed += conn.execute(
+                "DELETE FROM coach_athletes WHERE coach_id = ? AND athlete_id = ?",
+                (int(coach_id), a)).rowcount
+    log.info("Roster for coach %s: +%d -%d, now %d", coach_id, added, removed, len(want))
+    return {"added": added, "removed": removed, "total": len(want)}
+
+
 def coaches_of(athlete_id: int) -> List[dict]:
     """Every coach this athlete trains under."""
     with connect() as conn:
@@ -129,6 +197,21 @@ def coach_of_athlete_ids(athlete_ids) -> Dict[int, List[dict]]:
 # Sessions
 # =============================================================================
 
+def _sweep() -> None:
+    """Housekeeping, hung off the one action every coach takes every day.
+
+    Imported inside the call rather than at module scope: main imports sessions
+    during startup, and a cycle through this module is not worth risking for
+    something that does real work once every fifteen minutes. Never raises - a
+    failed sweep must not break the register somebody is trying to open.
+    """
+    try:
+        from . import maintenance
+        maintenance.run_due()
+    except Exception as e:                # noqa: BLE001
+        log.warning("Maintenance sweep skipped: %s", e)
+
+
 def get_or_create(centre_id: int, coach_id: Optional[int], opened_by: int,
                   day: Optional[str] = None) -> dict:
     """Today's register for this coach at this centre. Idempotent.
@@ -137,6 +220,10 @@ def get_or_create(centre_id: int, coach_id: Optional[int], opened_by: int,
     is why the uniqueness lives in two partial indexes rather than one
     constraint - see database._swap_attendance_uniqueness.
     """
+    # Opening a register is the one thing every coach does every day, so it is
+    # where the housekeeping hangs - and it is the right moment: yesterday's
+    # abandoned draft should be closed before today's is opened.
+    _sweep()
     day = day or config.today_str()
     now = config.local_now()
     expires = (now + timedelta(hours=SESSION_TTL_HOURS)).replace(tzinfo=None).isoformat(timespec="seconds")

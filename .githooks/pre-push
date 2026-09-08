@@ -1,0 +1,26 @@
+#!/bin/sh
+# Refuse to push `master`.
+#
+# Its history contains data/roster_import/ at commit 687e494 - face crops, real
+# names and NSRS ids of athletes at a pilot centre, most of them minors. The
+# files were removed from the tip later, but a push sends the whole history and
+# the blobs are still reachable from that branch.
+#
+# `dev` and `main` are clean and push normally. If master ever genuinely needs
+# to go out, its history has to be rewritten first (git-filter-repo) and the
+# blobs confirmed unreachable - not waved through with --no-verify.
+#
+# Install once:  git config core.hooksPath .githooks
+
+while read -r local_ref _local_sha remote_ref _remote_sha; do
+    case "$local_ref$remote_ref" in
+        *refs/heads/master*)
+            echo "pre-push: REFUSING to push master." >&2
+            echo "  Its history contains data/roster_import/ - face photographs" >&2
+            echo "  and names of athletes, most of them minors (commit 687e494)." >&2
+            echo "  Push dev instead, or rewrite that history first." >&2
+            exit 1
+            ;;
+    esac
+done
+exit 0

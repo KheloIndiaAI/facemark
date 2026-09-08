@@ -427,6 +427,19 @@ def scope_self(user: dict, student_id: Optional[int]) -> int:
     return int(own)
 
 
+def require_staff(user: dict = Depends(current_user)) -> dict:
+    """Coach or super admin - anybody who runs a centre rather than attends it.
+
+    The gap this closes: several routes took `current_user` and then scoped by
+    centre, which reads like access control but is not. An athlete HAS a centre,
+    so a centre scope let them through to writes meant for the person taking the
+    register.
+    """
+    if user["role"] not in ("coach", "super_admin"):
+        raise HTTPException(403, "This action is for coaches and administrators")
+    return user
+
+
 def require_athlete(user: dict = Depends(current_user)) -> dict:
     if user["role"] not in ("athlete", "super_admin"):
         raise HTTPException(403, "This is for athlete accounts")

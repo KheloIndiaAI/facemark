@@ -53,7 +53,48 @@
           New here? <a href="#" id="signup-open">Register as an athlete</a>
           &middot; <a href="#" id="signup-open-coach">Register as a coach</a>
         </div>
+        <div class="login-foot" style="margin-top:6px">
+          <a href="#" id="reset-open">Forgotten your password?</a>
+        </div>
       </div>
+    </div>
+
+    <div id="reset-gate" class="login-gate hidden">
+        <div class="login-card" style="max-width:420px">
+            <div class="login-head">
+                <div class="login-logo"></div>
+                <div>
+                    <h1 class="login-title">Reset your password</h1>
+                    <p class="login-sub">We send a code to the phone on your account.</p>
+                </div>
+            </div>
+
+            <div id="rs-step-1">
+                <div class="form-group"><label class="form-label" for="rs-user">Username</label>
+                    <input type="text" id="rs-user" class="form-input" autocapitalize="none"
+                           spellcheck="false"></div>
+                <button type="button" class="btn btn-primary" style="width:100%" id="rs-send">Send me a code</button>
+            </div>
+
+            <div id="rs-step-2" class="hidden">
+                <div class="form-group"><label class="form-label" for="rs-code">Code</label>
+                    <input type="text" id="rs-code" class="form-input" inputmode="numeric"
+                           maxlength="6"></div>
+                <div class="form-group"><label class="form-label" for="rs-pw">New password</label>
+                    <input type="password" id="rs-pw" class="form-input"
+                           autocomplete="new-password"></div>
+                <button type="button" class="btn btn-primary" style="width:100%" id="rs-done">Change my password</button>
+            </div>
+
+            <div id="rs-ok" class="hidden">
+                <div class="notice notice-blue"><strong>Password changed.</strong>
+                    Sign in with the new one.</div>
+            </div>
+
+            <div id="rs-msg" class="login-foot" style="min-height:18px"></div>
+            <p class="login-foot" style="margin-top:8px">
+                <a href="#" id="reset-cancel">Back to sign in</a></p>
+        </div>
     </div>
 
     <div id="signup-gate" class="login-gate hidden">
@@ -99,7 +140,7 @@
             </div>
 
             <div id="su-step-3" class="hidden">
-                <p class="login-foot">We sent a 6-digit code to your phone.</p>
+                <p class="login-foot" id="su-otp-note">We sent a 6-digit code to your phone.</p>
                 <div class="form-group"><label class="form-label" for="su-code">Code</label>
                     <input type="text" id="su-code" class="form-input" inputmode="numeric"
                            maxlength="6"></div>
@@ -433,13 +474,29 @@
             <div id="reg-approvals"></div>
         </div>
     </div>
+    <!-- Shown only when the roster is empty. That is the state every coach
+         starts in, and without this the register is a blank list with no
+         explanation and nothing to press. -->
+    <div class="card" id="reg-empty-roster" style="display:none;margin-bottom:16px">
+        <div class="card-body">
+            <div class="notice notice-blue" style="margin:0">
+                <strong>Nobody is on your register yet.</strong>
+                Choose which athletes at your centre you take attendance for.
+                You can change this at any time.
+            </div>
+            <button type="button" class="btn btn-primary" style="margin-top:12px"
+                    id="reg-roster-btn-empty">Choose my athletes</button>
+        </div>
+    </div>
+
     <div class="card" style="margin-bottom:16px">
         <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
             <div>
                 <div style="font-weight:600">Today&rsquo;s register</div>
                 <div class="text-xs text-muted" id="reg-session-meta">Opening&hellip;</div>
             </div>
-            <div style="display:flex;gap:8px">
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button type="button" class="btn btn-secondary" id="reg-roster-btn">My athletes</button>
                 <button type="button" class="btn btn-secondary" id="reg-capture-btn">Capture group</button>
                 <button type="button" class="btn btn-primary" id="reg-submit-btn">Submit register</button>
             </div>

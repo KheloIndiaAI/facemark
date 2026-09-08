@@ -292,8 +292,8 @@ async function suLoadCoaches() {
     host.innerHTML = list.map(c => `
         <button type="button" class="btn btn-secondary" data-su-coach="${c.id}"
                 style="display:flex;align-items:center;gap:10px;width:100%;height:auto;padding:8px;margin-bottom:8px;justify-content:flex-start">
-            ${c.photo_url ? `<img src="${c.photo_url}" alt="" style="width:36px;height:36px;border-radius:8px;object-fit:cover">`
-                          : '<div style="width:36px;height:36px;border-radius:8px;background:var(--bg-subtle)"></div>'}
+            ${c.photo ? `<img src="${c.photo}" alt="" style="width:36px;height:36px;border-radius:8px;object-fit:cover">`
+                      : '<div style="width:36px;height:36px;border-radius:8px;background:var(--bg-subtle)"></div>'}
             <span>${Charts.esc(c.name)}</span>
         </button>`).join('');
     host.querySelectorAll('[data-su-coach]').forEach(b => {
@@ -316,7 +316,18 @@ async function suSendCode() {
     const r = await fetch('/api/signup/otp/send', { method: 'POST', body: fd });
     const j = await r.json();
     if (!r.ok) return suMsg(j.detail || 'Could not send a code');
-    suShow(2); suMsg('');
+    suShow(2);
+    // The server says whether a message actually went anywhere. Telling
+    // somebody to check their phone when no SMS provider is configured leaves
+    // them waiting for a message that is never coming, and blaming their signal.
+    const note = document.getElementById('su-otp-note');
+    if (note) {
+        note.textContent = j.sent
+            ? 'We sent a 6-digit code to your phone.'
+            : 'Text messages are not switched on yet at this centre. Ask your '
+              + 'coach or administrator for the code from the system.';
+    }
+    suMsg('');
 }
 
 async function suVerify() {
@@ -367,4 +378,83 @@ document.addEventListener('DOMContentLoaded', () => {
     on('su-verify', suVerify);
     on('su-resend', suSendCode);
     on('su-face', suFace);
+});
+
+
+/* ---------------------------------------------------------------------------
+   Password reset
+
+   The account already carries a phone number that was verified at signup, and
+   there is already a one-time-code mechanism next to it. Before this, a
+   forgotten password meant finding somebody with admin access.
+--------------------------------------------------------------------------- */
+
+function rsMsg(text, bad = true) {
+    const el = document.getElementById('rs-msg');
+    if (el) {
+        el.textContent = text || '';
+        el.style.color = bad ? 'var(--red)' : 'var(--text-secondary)';
+    }
+}
+
+function rsShow(step) {
+    ['rs-step-1', 'rs-step-2', 'rs-ok'].forEach((id, i) => {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('hidden', i !== step);
+    });
+}
+
+function openReset() {
+    document.getElementById('login-gate')?.classList.add('hidden');
+    document.getElementById('reset-gate')?.classList.remove('hidden');
+    rsShow(0); rsMsg('');
+}
+
+function closeReset() {
+    document.getElementById('reset-gate')?.classList.add('hidden');
+    document.getElementById('login-gate')?.classList.remove('hidden');
+}
+
+async function rsSend() {
+    const u = document.getElementById('rs-user').value.trim();
+    if (!u) return rsMsg('Enter your username');
+    const fd = new FormData();
+    fd.append('username', u);
+    try {
+        const r = await fetch('/api/auth/reset/start', { method: 'POST', body: fd });
+        const j = await r.json();
+        if (!r.ok) return rsMsg(j.detail || 'Could not send a code');
+        rsShow(1);
+        // Deliberately the same words whether or not that username exists -
+        // the server answers identically, and so must this.
+        rsMsg(j.sent
+            ? 'If that account exists, a code is on its way to the phone on it.'
+            : 'Text messages are not switched on yet. Ask your coach or '
+              + 'administrator for the code from the system.', false);
+    } catch { rsMsg('Could not reach the server'); }
+}
+
+async function rsComplete() {
+    const fd = new FormData();
+    fd.append('username', document.getElementById('rs-user').value.trim());
+    fd.append('code', document.getElementById('rs-code').value.trim());
+    const pw = document.getElementById('rs-pw').value;
+    if (pw.length < 6) return rsMsg('Use at least 6 characters');
+    fd.append('new_password', pw);
+    try {
+        const r = await fetch('/api/auth/reset/complete', { method: 'POST', body: fd });
+        const j = await r.json();
+        if (!r.ok) return rsMsg(j.detail || 'That did not work');
+        rsShow(2); rsMsg('');
+    } catch { rsMsg('Could not reach the server'); }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const on = (id, fn) => document.getElementById(id)?.addEventListener('click', (e) => {
+        e.preventDefault(); fn();
+    });
+    on('reset-open', openReset);
+    on('reset-cancel', closeReset);
+    on('rs-send', rsSend);
+    on('rs-done', rsComplete);
 });

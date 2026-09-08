@@ -1660,7 +1660,103 @@ async function initRegisterPage() {
                               el.dataset.merge === 'true');
         });
     }
+    const rosterBtn = document.getElementById('reg-roster-btn');
+    if (rosterBtn) rosterBtn.addEventListener('click', openRosterEditor);
+    const rosterBtn2 = document.getElementById('reg-roster-btn-empty');
+    if (rosterBtn2) rosterBtn2.addEventListener('click', openRosterEditor);
     await Promise.all([regOpen(), regLoadApprovals()]);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Who is on the register
+
+   coach_athletes decides what the register lists, and until now nothing wrote
+   it except signup approval - so a centre whose athletes were enrolled by an
+   admin had an empty register and no way to fill it. The whole roster is sent
+   at once and the server reconciles, so a coach ticks their boxes and presses
+   save once.
+--------------------------------------------------------------------------- */
+
+let rosterState = { coachId: null, chosen: new Set() };
+
+async function openRosterEditor() {
+    const coachId = (regSession && regSession.coach_id)
+        || (state.user && state.user.student_id) || '';
+    try {
+        const r = await api.get(`/api/coaches/${coachId}/roster`);
+        rosterState.coachId = r.coach_id;
+        rosterState.chosen = new Set((r.linked || []).map(Number));
+        const list = r.athletes || [];
+        if (!list.length) {
+            return openModal('Choose my athletes',
+                '<div class="empty-state">There are no enrolled athletes at this centre yet. '
+                + 'Add them on the Students page first.</div>',
+                '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
+        }
+        openModal('Choose my athletes', `
+            <div class="text-sm text-muted" style="margin-bottom:10px">
+                Tick everyone you take attendance for. Removing somebody does not
+                delete any attendance already recorded for them.
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:10px">
+                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
+                        id="roster-all">Select all</button>
+                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
+                        id="roster-none">Clear</button>
+                <span class="text-xs text-muted" id="roster-count" style="margin-left:auto;align-self:center"></span>
+            </div>
+            <div id="roster-list" style="max-height:46vh;overflow-y:auto">
+                ${list.map(a => `
+                <label style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border-subtle);cursor:pointer">
+                    <input type="checkbox" data-roster-id="${a.id}" ${a.linked ? 'checked' : ''}>
+                    <div style="flex:1;min-width:0">
+                        <div style="font-weight:600;font-size:13px">${Charts.esc(a.name)}</div>
+                        <div class="text-xs text-muted font-mono">${Charts.esc(a.roll_no || '')}</div>
+                    </div>
+                </label>`).join('')}
+            </div>`,
+            `<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+             <button class="btn btn-primary" id="roster-save">Save register</button>`);
+
+        const box = document.getElementById('roster-list');
+        const count = () => {
+            const n = box.querySelectorAll('[data-roster-id]:checked').length;
+            const el = document.getElementById('roster-count');
+            if (el) el.textContent = `${n} of ${list.length} selected`;
+        };
+        box.addEventListener('change', count);
+        document.getElementById('roster-all').addEventListener('click', () => {
+            box.querySelectorAll('[data-roster-id]').forEach(c => { c.checked = true; });
+            count();
+        });
+        document.getElementById('roster-none').addEventListener('click', () => {
+            box.querySelectorAll('[data-roster-id]').forEach(c => { c.checked = false; });
+            count();
+        });
+        document.getElementById('roster-save').addEventListener('click', saveRoster);
+        count();
+    } catch (err) {
+        showToast('Could not load the roster', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+async function saveRoster() {
+    const box = document.getElementById('roster-list');
+    if (!box) return;
+    const ids = Array.from(box.querySelectorAll('[data-roster-id]:checked'))
+        .map(c => c.dataset.rosterId);
+    const fd = new FormData();
+    fd.append('athlete_ids', ids.join(','));
+    try {
+        const r = await api.postForm(`/api/coaches/${rosterState.coachId}/roster`, fd, 'PUT');
+        closeModal();
+        showToast('Register updated',
+                  `${r.total} athlete${r.total === 1 ? '' : 's'} on your register.`, 'success');
+        await regLoad();
+    } catch (err) {
+        showToast('Could not save', (err && err.message) || 'Try again.', 'error');
+    }
 }
 
 async function regLoadApprovals() {
@@ -1847,6 +1943,11 @@ async function regLoad() {
             + ` \u00b7 ${data.captures.length} capture${data.captures.length === 1 ? '' : 's'}`
             + ` \u00b7 ${data.session.status}`;
     }
+
+    // An empty roster is the state every coach starts in, and it looks
+    // identical to "everybody is absent". Say which it is.
+    const emptyCard = document.getElementById('reg-empty-roster');
+    if (emptyCard) emptyCard.style.display = data.roster_count ? 'none' : '';
 
     const submitted = data.session.status === 'submitted';
     const capBtn = document.getElementById('reg-capture-btn');

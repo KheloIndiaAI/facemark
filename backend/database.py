@@ -186,6 +186,23 @@ CREATE TABLE IF NOT EXISTS otp_challenges (
 );
 CREATE INDEX IF NOT EXISTS idx_otp_phone ON otp_challenges(phone, created_at);
 
+-- ------------------------------------------------- v1: signup in progress
+-- A half-finished signup, carried between requests. In a dict this worked only
+-- while there was one worker; the Dockerfile runs two, so half of all signups
+-- were told they had expired. Same shape as auth_sessions deliberately - it is
+-- the same kind of thing, an opaque bearer token with a deadline - but a
+-- SEPARATE table, because current_user resolves auth_sessions and a signup
+-- token must never become a way to be signed in as a pending account.
+CREATE TABLE IF NOT EXISTS signup_tokens (
+    token      TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    phone      TEXT NOT NULL,
+    decided    INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_signup_tokens_user ON signup_tokens(user_id);
+
 CREATE TABLE IF NOT EXISTS auth_sessions (
     token      TEXT PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -838,6 +855,16 @@ def mark_attendance(
     that attendance was taken at the centre rather than anywhere convenient.
     """
     with connect() as conn:
+        # The same rule sessions.draft() enforces, at the other write. A person
+        # who is pending, rejected or gone must not acquire attendance by any
+        # route - and "every route remembered to check" is not a property you
+        # can keep true, so the write itself checks.
+        row = conn.execute("SELECT status FROM students WHERE id = ?",
+                           (int(student_id),)).fetchone()
+        if row is None or row["status"] != "active":
+            log.warning("Refused attendance for person %s (status=%s)",
+                        student_id, row["status"] if row else "no such person")
+            return False
         cur = conn.execute(
             "INSERT INTO attendance (student_id, date, confidence, image_path, "
             "marked_at, centre_id, latitude, longitude, accuracy_m, geo_status, distance_m, marked_by) "
