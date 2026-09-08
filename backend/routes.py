@@ -103,6 +103,8 @@ def reset_start(request: Request, username: str = Form(...)):
     ip = fwd or (request.client.host if request.client else "")
     try:
         return {"ok": True, **signup_mod.start_reset(username, ip)}
+    except LookupError as e:
+        raise HTTPException(503, str(e))
     except PermissionError as e:
         raise HTTPException(429, str(e))
 

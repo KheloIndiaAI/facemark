@@ -159,7 +159,7 @@ coach approves them. **Only after Phase 5.**
 | 6.6 | Throttled **per number and per address** | `[x]` | per-number and per-address, plus a resend cooldown |
 | 6.7 | `POST /api/signup/face` guided capture into pending account | `[x]` | guided capture into the pending person; 7 templates |
 | 6.8 | Signup screens in the frontend | `[x]` | full flow driven in browser to the face step |
-| 6.9 | DLT/SMS registration started (procurement, not code) | `[!]` | Not mine to do — needs someone with authority to register the org. Ship with email verification if not ready. |
+| 6.9 | DLT/SMS registration started (procurement, not code) | `[~]` | Deferred. Phone verification is SWITCHED OFF (`require_phone_otp()`) so signup completes without it; comes back on by itself when a provider is set. Not mine to do — needs someone with authority to register the org. Ship with email verification if not ready. |
 
 ---
 
@@ -244,6 +244,29 @@ Every item reproduced before it was fixed, and re-tested after.
 multi-worker 22/22, athlete-powers 0 of 8 allowed, earlier fixes 54/54, coach
 signup 41/41, athlete signup 27/27, schema 20/20, phase 1 27/27, phase 4 13/13,
 phase 5 21/21, API 23/23, and the 220-photo corpus still rejects no real face.
+
+---
+
+## Phase 10 — Phone verification deferred
+
+**Decision:** OTP is off until DLT registration exists. A verification step that
+cannot deliver a code is a wall, not a check.
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 10.1 | `config.require_phone_otp()` switches it in one place | `[x]` | follows SMS config; `FACEMARK_REQUIRE_OTP` forces either way |
+| 10.2 | Signup completes with no code | `[x]` | verify_phase6 20/20 with it off, 27/27 with it on |
+| 10.3 | Asking for a code while off is REFUSED | `[x]` | 400, and no challenge row is created |
+| 10.4 | The face step no longer demands a verified phone | `[x]` | that gate refused every signup for an impossible step |
+| 10.5 | The browser skips the step because the SERVER said so | `[x]` | `needs_otp` in the start response, not a second copy of the config |
+| 10.6 | Password reset unavailable, and says so | `[x]` | 503 identically for every username; no enumeration |
+| 10.7 | The sign-in screen offers no link that would fail | `[x]` | `GET /api/config`; "ask your coach or an administrator" instead |
+| 10.8 | The phone field stops promising a text | `[x]` | "So your coach can reach you." |
+| 10.9 | Docs describe the flow that is running | `[x]` | DEVELOPMENT.md and DATA-HANDLING.md, including what it costs |
+
+**What it costs:** the phone number is an unverified claim. **What it does not
+cost:** approval still gates sign-in, gallery membership and every attendance
+write — see DATA-HANDLING.md, "What approval is doing".
 
 ---
 

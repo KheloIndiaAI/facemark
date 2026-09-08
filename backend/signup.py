@@ -224,7 +224,11 @@ def start(username: str, password: str, full_name: str, phone: str,
     return {"token": _new_token(user_id, phone), "user_id": user_id,
             "student_id": student_id, "roll_no": roll, "role": role,
             "approver": approver_for(role),
-            "needs_coach": role == "athlete"}
+            "needs_coach": role == "athlete",
+            # The SERVER decides which steps there are. The browser asking
+            # config itself would be a second place for the answer to live, and
+            # the two would disagree the first time one of them changed.
+            "needs_otp": config.require_phone_otp()}
 
 
 # A coach who has applied but not been approved is a stranger with a name in
@@ -336,7 +340,12 @@ def choose_coach(token: str, coach_id: int) -> None:
 
 
 def send_otp(token: str, ip: str = "") -> dict:
-    """Create and 'deliver' a one-time code. The code is never returned."""
+    """Create and deliver a one-time code. The code is never returned."""
+    if not config.require_phone_otp():
+        # Refused rather than quietly issuing a code, so a client that has not
+        # noticed the step is gone gets told, instead of sending somebody to
+        # wait for a message that cannot arrive.
+        raise ValueError("Phone verification is switched off at the moment.")
     rec = resolve_signup(token)
     phone = rec["phone"]
 
@@ -448,6 +457,8 @@ def _redact(phone: str) -> str:
 
 
 def verify_otp(token: str, code: str) -> bool:
+    if not config.require_phone_otp():
+        raise ValueError("Phone verification is switched off at the moment.")
     rec = resolve_signup(token)
     phone = rec["phone"]
     now = config.local_now().replace(tzinfo=None).isoformat(timespec="seconds")
@@ -513,6 +524,13 @@ def start_reset(username: str, ip: str = "") -> dict:
     # reads, so the two cannot drift apart again.
     _sms = config.sms_configured()
     quiet = {"sent": _sms, "delivery": "sms" if _sms else "not_configured"}
+    if not _sms:
+        # No channel, so no self-service reset. Refused for every username
+        # alike - a real account and a made-up one get the same answer, which
+        # is the property that matters here.
+        raise LookupError(
+            "Password reset by text message is not available yet. "
+            "Ask your coach or an administrator to reset it for you.")
     if _throttled(f"reset:ip:{ip}", OTP_PER_IP_PER_HOUR, 3600):
         raise PermissionError("Too many reset attempts from this connection. Try later.")
 
@@ -559,6 +577,10 @@ def complete_reset(username: str, code: str, new_password: str) -> None:
     user = auth.get_user_by_username(username or "")
     # Checked before the code so a wrong username cannot consume somebody's
     # attempts, but reported identically so it still reveals nothing.
+    if not config.sms_configured():
+        raise ValueError(
+            "Password reset by text message is not available yet. "
+            "Ask your coach or an administrator to reset it for you.")
     generic = "That code is not right, or it has expired."
     if not user or not user.get("phone") or not user.get("phone_verified_at"):
         raise ValueError(generic)
@@ -598,6 +620,8 @@ def student_for(token: str) -> int:
                            (rec["user_id"],)).fetchone()
     if row is None or not row["student_id"]:
         raise ValueError("This signup is incomplete")
-    if not row["phone_verified_at"]:
+    # Only when there is a working way to deliver a code. Otherwise this
+    # refuses every signup for failing a step nobody could complete.
+    if config.require_phone_otp() and not row["phone_verified_at"]:
         raise ValueError("Verify your phone number first")
     return int(row["student_id"])

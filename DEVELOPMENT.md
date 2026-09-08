@@ -174,14 +174,36 @@ alongside photographs of real athletes.
 
 ---
 
-## SMS
+## SMS, and why phone verification is currently off
 
-Nothing is sent until a provider is configured, and the API says so rather than
-claiming a code was delivered. Sending SMS to Indian numbers requires DLT
-registration with a TRAI-approved platform: entity, sender ID and every template
-approved in advance. That is procurement.
+Sending SMS to Indian numbers requires DLT registration with a TRAI-approved
+platform: entity, sender ID and every template approved in advance. That is
+procurement, and it is not done.
 
-Once it exists:
+**So phone verification during signup is switched off.** A verification step
+with no way to deliver a code is not a check, it is a wall: people reached "we
+sent a code to your phone", nothing arrived, and the registration died there.
+
+It is off, not removed. `config.require_phone_otp()` follows SMS configuration,
+so the day a provider is set up it comes back on by itself; `FACEMARK_REQUIRE_OTP=1`
+or `=0` forces it either way. The hashed codes, attempt counting, expiry and
+throttling all stay in place and are still tested — `verify_phase6.py` runs the
+verification branch when it is enabled and asserts the step is *refused* when it
+is not.
+
+**What that costs:** nobody proves they hold the number they typed, so the phone
+is a claim rather than a verified fact. What it does not cost is the thing that
+actually protects the register — an account is inert until a human approves it,
+and cannot sign in or be recognised until then. Verification was defence in
+depth behind that approval, never the gate itself.
+
+Self-service password reset rides on the same channel, so it is unavailable too:
+the endpoint answers 503 identically for every username, and the sign-in screen
+says to ask a coach or administrator instead of offering a link that fails.
+`GET /api/config` reports both switches so the browser never offers a step the
+server will refuse.
+
+Once a provider exists:
 
 ```
 FACEMARK_SMS_PROVIDER=webhook
@@ -193,9 +215,8 @@ FACEMARK_DLT_TEMPLATE_ID=...
 ```
 
 The webhook receives `{phone, message, sender_id, entity_id, template_id}` and
-should answer 2xx once accepted. Until then the code is logged at WARNING so a
-pilot can still be run from the server log, and both the signup and reset
-screens tell the user that text messages are not switched on.
+should answer 2xx once accepted. Setting it turns phone verification and
+password reset back on automatically.
 
 ---
 

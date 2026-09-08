@@ -17,11 +17,11 @@ If you change any of it, change this file in the same commit.
 | Enrolment photographs | `data/students/` (or S3 `students/`) | Shown to a coach so they can confirm the system means the right person. |
 | Group captures and face crops | `data/uploads/` (or S3 `uploads/`) | Evidence for a register: it must be possible to see why somebody was marked present. |
 | Name, NSRS ID, gender, sport, centre | `students` table | The roster. |
-| Phone number | `students.phone`, `users.phone` | Signup verification and password reset. |
+| Phone number | `students.phone`, `users.phone` | So a coach can contact an athlete. Verification is **off** while there is no SMS provider, so this is an unverified claim — see DEVELOPMENT.md. |
 | Guardian name and consent timestamp | `users.guardian_name`, `guardian_consent_at` | Recorded by the coach at approval, for athletes under 18. |
 | Attendance rows | `attendance` table | The record the centre exists to produce. |
 | Account credentials | `users.password_hash` | PBKDF2-HMAC-SHA256, 600k iterations, per-user salt. No plaintext is ever written. |
-| One-time codes | `otp_challenges.code_hash` | SHA-256 salted with the phone number. The code itself is never stored and never returned by any endpoint. |
+| One-time codes | `otp_challenges.code_hash` | SHA-256 salted with the phone number. The code itself is never stored and never returned by any endpoint. None are issued while phone verification is off. |
 
 **Not stored:** raw images inside the database, plaintext passwords, plaintext
 one-time codes, location history beyond the single geo fix attached to a
@@ -60,6 +60,24 @@ guardian's name when they approve the account. It is stored on the account
 This is a record that consent was obtained, not a substitute for obtaining it.
 Consent for a minor's biometric data is collected by the centre, in whatever
 form the programme requires; the app records that it happened and when.
+
+---
+
+## What approval is doing
+
+With phone verification off, **approval is the only thing standing between a
+stranger and the register.** It is worth being explicit about what it covers:
+
+- A pending account cannot sign in.
+- Its face is excluded from the recognition gallery, so it cannot be recognised
+  in any capture.
+- Attendance cannot be written for it by any route — both writes refuse a
+  non-active person, so it cannot be ticked present by hand either.
+- An athlete application reaches only the coach it chose; a coach application
+  reaches only a super admin, and needs the centre's join code as well.
+
+So a coach approving somebody should be looking at the face on the screen and
+the person in front of them, not at the phone number, which nobody has checked.
 
 ---
 

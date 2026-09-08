@@ -176,7 +176,7 @@ async function submitPasswordChange() {
    they are already enrolled will turn up and be marked absent.
 --------------------------------------------------------------------------- */
 
-const suState = { token: null, centre: null, role: 'athlete' };
+const suState = { token: null, centre: null, role: 'athlete', needsOtp: false };
 
 // One panel, two applications. The steps are the same except for the coach
 // picker, which only an athlete has - a coach is approved by a super admin, so
@@ -268,11 +268,12 @@ async function suStart() {
         const j = await res.json();
         if (!res.ok) return suMsg(j.detail || 'Could not create the account');
         suState.token = j.token;
-        // The SERVER says whether a coach has to be chosen, rather than the
-        // browser inferring it from the role it just sent. The two can only
-        // disagree if the server rejected or altered the role, and in that case
-        // the server is right.
-        if (j.needs_coach === false) return suSendCode();
+        // The SERVER says which steps there are - whether a coach has to be
+        // chosen, and whether the phone gets verified. The browser inferring
+        // either would be a second copy of the answer, and the two would
+        // disagree the first time one changed.
+        suState.needsOtp = j.needs_otp !== false;
+        if (j.needs_coach === false) return suAfterCoach();
         await suLoadCoaches();
         suShow(1);
     } catch { suMsg('Could not reach the server'); }
@@ -307,7 +308,16 @@ async function suPickCoach(coachId) {
     fd.append('coach_id', coachId);
     const r = await fetch('/api/signup/coach', { method: 'POST', body: fd });
     if (!r.ok) return suMsg('Could not select that coach');
-    await suSendCode();
+    await suAfterCoach();
+}
+
+/* One place decides what follows the coach step. Phone verification is off
+   while there is no way to deliver a code, and when it comes back this is the
+   only line that changes. */
+async function suAfterCoach() {
+    if (suState.needsOtp) return suSendCode();
+    suShow(3);          // straight to the face capture
+    suMsg('');
 }
 
 async function suSendCode() {
@@ -453,6 +463,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const on = (id, fn) => document.getElementById(id)?.addEventListener('click', (e) => {
         e.preventDefault(); fn();
     });
+    // Offering a reset that answers 503 is worse than not offering it: somebody
+    // tries it, is told to ask an administrator, and has lost the time.
+    fetch('/api/config').then(r => r.json()).then(cfg => {
+        const can = !!(cfg && cfg.password_reset_available);
+        document.getElementById('reset-link-wrap')?.classList.toggle('hidden', !can);
+        document.getElementById('reset-unavailable')?.classList.toggle('hidden', can);
+    }).catch(() => { /* leave the "ask an administrator" line showing */ });
+
     on('reset-open', openReset);
     on('reset-cancel', closeReset);
     on('rs-send', rsSend);

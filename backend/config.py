@@ -488,11 +488,34 @@ DLT_TEMPLATE_ID = os.environ.get("FACEMARK_DLT_TEMPLATE_ID", "").strip()
 SMS_TIMEOUT_SECONDS = float(os.environ.get("FACEMARK_SMS_TIMEOUT", "8"))
 
 
+# Phone verification during signup. OFF until an SMS provider exists: with no
+# way to deliver a code, the step is a wall rather than a check - people reach
+# "we sent a code to your phone", nothing arrives, and the registration dies
+# there.
+#
+# Defaults to following SMS configuration, so the day a provider is set up this
+# switches itself back on. Force it either way with FACEMARK_REQUIRE_OTP.
+#
+# Turning it off does NOT open the register: an account is inert until a human
+# approves it, and that approval - not the code - is what stands between a
+# stranger and being marked present.
+_REQUIRE_OTP_ENV = os.environ.get("FACEMARK_REQUIRE_OTP", "").strip().lower()
+
+
 def sms_configured() -> bool:
     """Whether a code handed to _deliver would actually reach a phone."""
     if SMS_PROVIDER == "webhook":
         return bool(SMS_WEBHOOK_URL)
     return False
+
+
+def require_phone_otp() -> bool:
+    """Whether signup must verify the phone number with a one-time code."""
+    if _REQUIRE_OTP_ENV in ("1", "true", "yes", "on"):
+        return True
+    if _REQUIRE_OTP_ENV in ("0", "false", "no", "off"):
+        return False
+    return sms_configured()
 
 
 # --- retention ---------------------------------------------------------------
