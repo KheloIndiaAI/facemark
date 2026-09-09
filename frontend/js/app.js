@@ -2607,6 +2607,18 @@ function _arrowSvg(direction) {
 }
 
 async function openClipCapture(opts) {
+    /* Every pose-check poll goes through here.
+     *
+     * It carries the signup token when there is one - self-registration has no
+     * session, so without it every poll is a 403 - and it is quiet, because
+     * these run several times a second and each caller already counts failures
+     * and reports a run of them once. Getting either wrong is invisible until
+     * somebody is standing in front of a camera that will not respond. */
+    async function pollPose(fd) {
+        if (opts.signupToken) fd.append('signup_token', opts.signupToken);
+        return api.postForm('/api/enroll/pose-check', fd, 'POST', true);
+    }
+
     openModal(opts.title || 'Record clip', `
         <div class="camera-container" id="clip-cap-camera">
             <video id="clip-cap-video" class="camera-video" autoplay playsinline muted></video>
@@ -2809,11 +2821,7 @@ async function openClipCapture(opts) {
             const fd = new FormData();
             fd.append('frame', blob, 'f.jpg');
             fd.append('step', 'centre');
-            // Self-registration has no session, so it passes its signup token
-            // instead. Without this every poll is a 403 and the failure counter
-            // reports "Lost connection" over a perfectly good camera.
-            if (opts.signupToken) fd.append('signup_token', opts.signupToken);
-            const r = await api.postForm('/api/enroll/pose-check', fd);
+            const r = await pollPose(fd);
             if (!state.alive) return;
 
             state.box = r.box || null;
@@ -2932,7 +2940,7 @@ async function openClipCapture(opts) {
                         fd.append('frame', blob, 'f.jpg');
                         fd.append('step', stepKey);
                         if (baseYaw !== null) { fd.append('base_yaw', baseYaw); fd.append('base_pitch', basePitch); }
-                        const r = await api.postForm('/api/enroll/pose-check', fd);
+                        const r = await pollPose(fd);
                         if (r) {
                             if (r.box) { state.box = r.box; draw(); }
                             if (r.ok) return r;
@@ -2977,7 +2985,7 @@ async function openClipCapture(opts) {
                         const fd = new FormData();
                         fd.append('frame', blob, 'f.jpg');
                         fd.append('step', 'centre');
-                        const r = await api.postForm('/api/enroll/pose-check', fd);
+                        const r = await pollPose(fd);
                         if (r) {
                             if (r.box) { state.box = r.box; draw(); }
                             if (r.ok) { hold++; if (hold >= 3) { baseYaw = r.yaw; basePitch = r.pitch; } }
