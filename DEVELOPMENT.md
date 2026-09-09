@@ -191,6 +191,14 @@ anything.
 your face. A forgotten password goes to an administrator, via
 `POST /api/users/{id}/password` on the Accounts page.
 
+The phone field went with them — it existed to receive the code, and once
+nothing read it, it was asking every applicant for a string nobody checked. The
+centre code went too, at the pilot's request: a coach application no longer has
+to prove the centre issued anything, so **super-admin approval is now the whole
+gate** on coach access. `centres.coach_join_code`, `check_join_code` and the
+rotate endpoint all remain, so restoring the field is one form control and one
+call.
+
 **The consequence, stated plainly.** The phone number is an unverified claim —
 useful for a coach ringing an athlete, worth nothing as identity. And a user
 locked out has to find somebody with admin access.

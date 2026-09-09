@@ -727,11 +727,6 @@ def pending_for_coach(coach_student_id: Optional[int]) -> List[dict]:
          "       dc.name AS duplicate_centre_name, "
          "       s.name AS person_name, s.roll_no, s.photo_path, s.centre_id, "
          "       c.name AS centre_name, "
-         # A number shared with somebody already enrolled. Shown, not acted on:
-         # families share phones here and most of these athletes are minors, so
-         # this is a prompt to look rather than evidence of anything.
-         "       (SELECT COUNT(*) FROM students ps WHERE ps.phone = u.phone "
-         "          AND ps.id <> u.student_id AND ps.status = 'active') AS phone_shared_with, "
          "       (SELECT COUNT(*) FROM templates t WHERE t.student_id = u.student_id) AS templates "
          "FROM users u "
          "LEFT JOIN students s ON s.id = u.student_id "

@@ -220,11 +220,6 @@ async function openSignup(role = 'athlete') {
     set('su-role-note', copy.note);
     set('su-done-title', copy.doneTitle);
     set('su-done-body', copy.doneBody);
-    // Coaches only. An athlete's coach approves them in person; a coach may be
-    // approved by a super admin who has never met them, so the application has
-    // to carry something the centre actually issued.
-    document.getElementById('su-code-group')
-        ?.classList.toggle('hidden', suState.role !== 'coach');
     document.getElementById('login-gate')?.classList.add('hidden');
     document.getElementById('signup-gate')?.classList.remove('hidden');
     suShow(0); suMsg('');
@@ -249,13 +244,9 @@ async function suStart() {
     fd.append('full_name', document.getElementById('su-name').value.trim());
     fd.append('username', document.getElementById('su-user').value.trim());
     fd.append('password', document.getElementById('su-pw').value);
-    fd.append('phone', document.getElementById('su-phone').value.trim());
     suState.centre = document.getElementById('su-centre').value;
     fd.append('centre_id', suState.centre);
     fd.append('role', suState.role);
-    if (suState.role === 'coach') {
-        fd.append('join_code', document.getElementById('su-joincode').value.trim());
-    }
     suMsg('');
     try {
         const res = await fetch('/api/signup', { method: 'POST', body: fd });

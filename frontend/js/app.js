@@ -1796,9 +1796,6 @@ async function regLoadApprovals() {
                     &middot; ${(Number(p.duplicate_score) || 0).toFixed(2)}
                     ${p.duplicate_centre_name ? `&middot; ${Charts.esc(p.duplicate_centre_name)}` : ''}
                 </div>` : '';
-            const phoneShared = (p.phone_shared_with > 0 && !p.duplicate_of) ? `
-                <div class="text-xs text-muted">Shares a phone number with
-                    ${p.phone_shared_with} enrolled ${p.phone_shared_with === 1 ? 'person' : 'people'}</div>` : '';
             // Their coach was deleted, so nobody is looking at this but a
             // super admin - who has no way to know that without being told.
             const orphan = p.orphaned ? `
@@ -1821,8 +1818,7 @@ async function regLoadApprovals() {
                     ${flag}
                     ${dup}
                     ${orphan}
-                    ${phoneShared}
-                    <div class="text-xs text-muted font-mono">${Charts.esc(p.roll_no || '')}</div>
+                                        <div class="text-xs text-muted font-mono">${Charts.esc(p.roll_no || '')}</div>
                     <div class="text-xs text-muted">${p.templates || 0} face template(s)</div>
                 </div>
                 ${reassignBtn}

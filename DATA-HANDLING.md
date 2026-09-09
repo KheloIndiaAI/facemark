@@ -17,7 +17,7 @@ If you change any of it, change this file in the same commit.
 | Enrolment photographs | `data/students/` (or S3 `students/`) | Shown to a coach so they can confirm the system means the right person. |
 | Group captures and face crops | `data/uploads/` (or S3 `uploads/`) | Evidence for a register: it must be possible to see why somebody was marked present. |
 | Name, NSRS ID, gender, sport, centre | `students` table | The roster. |
-| Phone number | `students.phone`, `users.phone` | So a coach can contact an athlete. **Never verified** — phone verification was removed with the SMS provider it needed, so this is a claim, not identity. |
+| Phone number | `students.phone`, `users.phone` | **No longer collected at signup.** The column remains, and an admin enrolling somebody by hand can still fill it. Never verified, so where it exists it is a claim, not identity. |
 | Guardian name and consent timestamp | `users.guardian_name`, `guardian_consent_at` | Recorded by the coach at approval, for athletes under 18. |
 | Attendance rows | `attendance` table | The record the centre exists to produce. |
 | Account credentials | `users.password_hash` | PBKDF2-HMAC-SHA256, 600k iterations, per-user salt. No plaintext is ever written. |
@@ -74,10 +74,10 @@ between a stranger and the register.** It is worth being explicit about what it 
 - Attendance cannot be written for it by any route — both writes refuse a
   non-active person, so it cannot be ticked present by hand either.
 - An athlete application reaches only the coach it chose; a coach application
-  reaches only a super admin, and needs the centre's join code as well.
+  reaches only a super admin.
 
 So a coach approving somebody should be looking at the face on the screen and
-the person in front of them, not at the phone number, which nobody has checked.
+the person in front of them. There is no phone number and no centre code to lean on — the face, and knowing who is supposed to be there, is the check.
 
 ---
 

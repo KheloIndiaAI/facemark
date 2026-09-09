@@ -2115,10 +2115,8 @@ def signup_start(
     username: str = Form(...),
     password: str = Form(...),
     full_name: str = Form(...),
-    phone: str = Form(...),
     centre_id: int = Form(...),
     role: str = Form("athlete"),
-    join_code: str = Form(""),
 ):
     """Start an athlete OR a coach application.
 
@@ -2128,8 +2126,7 @@ def signup_start(
     """
     try:
         return {"ok": True, **signup_mod.start(
-            username, password, full_name, phone, centre_id,
-            _client_ip(request), role, join_code)}
+            username, password, full_name, centre_id, _client_ip(request), role)}
     except PermissionError as e:
         raise HTTPException(429, str(e))
     except ValueError as e:

@@ -29,7 +29,7 @@ import time
 from datetime import timedelta
 from typing import Dict, List, Optional
 
-from . import auth, centres as centres_mod, config, database
+from . import auth, config, database
 from .db import connect
 
 log = logging.getLogger(__name__)
@@ -70,15 +70,15 @@ def _throttled(key: str, limit: int, window_s: int) -> bool:
 # deployments. The original reasoning covered restarts and not workers.
 
 
-def _new_token(user_id: int, phone: str) -> str:
+def _new_token(user_id: int) -> str:
     tok = secrets.token_urlsafe(32)
     now = config.local_now().replace(tzinfo=None)
     expires = (now + timedelta(minutes=SIGNUP_TOKEN_TTL_MINUTES)).isoformat(timespec="seconds")
     with connect() as conn:
         conn.execute(
-            "INSERT INTO signup_tokens (token, user_id, phone, decided, expires_at, created_at) "
-            "VALUES (?,?,?,0,?,?)",
-            (tok, int(user_id), phone, expires, config.now_stamp()),
+            "INSERT INTO signup_tokens (token, user_id, decided, expires_at, created_at) "
+            "VALUES (?,?,0,?,?)",
+            (tok, int(user_id), expires, config.now_stamp()),
         )
         # Swept here rather than on a schedule: this is the only place rows are
         # added, so it is the only place they can accumulate.
@@ -102,7 +102,7 @@ def resolve_signup(token: str) -> dict:
     now = config.local_now().replace(tzinfo=None).isoformat(timespec="seconds")
     with connect() as conn:
         rec = conn.execute(
-            "SELECT t.token, t.user_id, t.phone, t.decided, t.expires_at, u.status "
+            "SELECT t.token, t.user_id, t.decided, t.expires_at, u.status "
             "FROM signup_tokens t LEFT JOIN users u ON u.id = t.user_id "
             "WHERE t.token = ?", (token or "",),
         ).fetchone()
@@ -121,7 +121,7 @@ def resolve_signup(token: str) -> dict:
             conn.execute("DELETE FROM signup_tokens WHERE token = ?", (token,))
             raise ValueError("This signup has already been decided. "
                              "Sign in, or ask your coach.")
-    return {"user_id": int(rec["user_id"]), "phone": rec["phone"]}
+    return {"user_id": int(rec["user_id"])}
 
 
 def invalidate_for_user(user_id: int) -> int:
@@ -157,9 +157,8 @@ def approver_for(role: str) -> str:
     return "super_admin" if role == "coach" else "coach"
 
 
-def start(username: str, password: str, full_name: str, phone: str,
-          centre_id: int, ip: str = "", role: str = "athlete",
-          join_code: str = "") -> dict:
+def start(username: str, password: str, full_name: str,
+          centre_id: int, ip: str = "", role: str = "athlete") -> dict:
     """Create the pending account. Returns {token, user_id}."""
     if _throttled(f"signup:{ip}", SIGNUP_PER_IP_PER_HOUR, 3600):
         raise PermissionError("Too many signups from this connection. Try later.")
@@ -173,13 +172,10 @@ def start(username: str, password: str, full_name: str, phone: str,
 
     username = (username or "").strip().lower()
     full_name = (full_name or "").strip()
-    phone = (phone or "").strip()
     if len(username) < 3:
         raise ValueError("Choose a username of at least 3 characters")
     if not full_name:
         raise ValueError("Your full name is required")
-    if len(phone) < 8:
-        raise ValueError("A valid phone number is required")
     if auth.get_user_by_username(username):
         raise ValueError("That username is taken")
     with connect() as conn:
@@ -187,23 +183,16 @@ def start(username: str, password: str, full_name: str, phone: str,
                         (int(centre_id),)).fetchone() is None:
             raise ValueError("Choose a centre")
 
-    # Coaches only. An athlete's coach approves them in person and knows their
-    # face; a coach may be approved by a super admin who has never met them, so
-    # something the centre actually issued has to come with the application.
-    if role == "coach" and not centres_mod.check_join_code(centre_id, join_code):
-        raise ValueError("That centre code is not right. Ask the centre for the "
-                         "coach registration code.")
-
     # The person record comes first: an account with no person could never be
     # recognised, and users.student_id is required for an athlete. A coach gets
     # one too - they are recognised at capture time and sign the register with
     # their own face, so they are a person in `students` exactly like an athlete.
     roll = f"PEND-{secrets.token_hex(4).upper()}"
     student_id = database.add_student(
-        full_name, roll, "", [], role=role, centre_id=centre_id, phone=phone,
+        full_name, roll, "", [], role=role, centre_id=centre_id,
     )
     user_id = auth.create_user(username, password, role, full_name,
-                               centre_id=centre_id, phone=phone, student_id=student_id)
+                               centre_id=centre_id, student_id=student_id)
     with connect() as conn:
         conn.execute("UPDATE users SET status = 'pending' WHERE id = ?", (user_id,))
         # The person is marked too, not just the account. The face lands on
@@ -213,7 +202,7 @@ def start(username: str, password: str, full_name: str, phone: str,
                      (student_id,))
     log.info("Signup started: %s user %s (person %s), pending %s approval",
              role, user_id, student_id, approver_for(role))
-    return {"token": _new_token(user_id, phone), "user_id": user_id,
+    return {"token": _new_token(user_id), "user_id": user_id,
             "student_id": student_id, "roll_no": roll, "role": role,
             "approver": approver_for(role),
             # The SERVER decides which steps there are, so the browser never

@@ -181,7 +181,6 @@ CREATE INDEX IF NOT EXISTS idx_captures_session ON session_captures(session_id);
 CREATE TABLE IF NOT EXISTS signup_tokens (
     token      TEXT PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    phone      TEXT NOT NULL,
     decided    INTEGER NOT NULL DEFAULT 0,
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -292,6 +291,7 @@ def init_db() -> None:
         # After the columns exist - the swap references session_id.
         _swap_attendance_uniqueness(conn)
         _relax_session_author_fk(conn)
+        _drop_signup_token_phone(conn)
         _widen_role_check(conn)
         _promote_legacy_accounts(conn)
         _sync_person_status(conn)
@@ -341,6 +341,16 @@ def _swap_attendance_uniqueness(conn: Conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_att_status_date ON attendance(status, date)"
     )
+
+
+def _drop_signup_token_phone(conn: Conn) -> None:
+    """Remove signup_tokens.phone from a database created before it went.
+
+    Self-registration stopped asking for a phone number, so nothing fills this
+    and it was NOT NULL - the first signup against an old database would fail
+    on it. Safe to run repeatedly; IF EXISTS makes it a no-op once done.
+    """
+    conn.execute("ALTER TABLE signup_tokens DROP COLUMN IF EXISTS phone")
 
 
 def _relax_session_author_fk(conn: Conn) -> None:
