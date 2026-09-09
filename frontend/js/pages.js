@@ -96,17 +96,12 @@ async function openCentreDetail(id) {
     // openModal sets textContent (XSS-safe, since centre names are user input),
     // so the title must be plain text - the DEMO badge lives in the body instead.
     openModal(c.name, `
-        ${c.is_demo ? `<div class="notice notice-amber">
-            This is a <strong>placeholder record</strong>, not real Khelo India data. Replace it by
-            importing a CSV/JSON of real centres, or delete all demo rows, from the Centres page header.
-        </div>` : ''}
         <div class="detail-grid">
             <div><span class="ck">Code</span><div>${E(c.code)}</div></div>
             <div><span class="ck">Type</span><div>${E(c.centre_type)}</div></div>
             <div><span class="ck">State</span><div>${E(c.state || '-')}</div></div>
             <div><span class="ck">District</span><div>${E(c.district || '-')}</div></div>
             <div><span class="ck">Pincode</span><div>${E(c.pincode || '-')}</div></div>
-            <div><span class="ck">Established</span><div>${E(c.established || '-')}</div></div>
             <div><span class="ck">Capacity</span><div>${c.capacity || '-'}</div></div>
             <div><span class="ck">Geo-fence</span><div>${c.geofence_m} m</div></div>
             <div style="grid-column:1/-1"><span class="ck">Address</span><div>${E(c.address || '-')}</div></div>
@@ -146,14 +141,6 @@ async function openCentreDetail(id) {
         <h3 style="margin:20px 0 8px">Coaches (${c.coach_count})</h3>
         ${roster(c.coaches, 'coaches')}
 
-        <h3 style="margin:20px 0 8px">Staff accounts</h3>
-        ${c.staff_accounts.length ? `<div class="detail-people">${c.staff_accounts.map(u => `
-            <div class="detail-person">
-                <div class="avatar avatar-sm">${E(u.full_name.charAt(0))}</div>
-                <div><div style="font-weight:600;font-size:13px">${E(u.full_name)}</div>
-                <div class="text-xs text-muted font-mono">${E(u.username)} &middot; ${E(u.role)}
-                ${u.is_active ? '' : ' &middot; disabled'}</div></div>
-            </div>`).join('')}</div>` : '<div class="text-sm text-muted">No login accounts linked to this centre.</div>'}
         `,
         `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`);
 }
@@ -295,6 +282,35 @@ async function reopenUser(id, name) {
     }
 }
 
+async function decideUser(id, approve, name, role) {
+    // Approving a COACH hands over a whole centre, and on this page it sits in
+    // a table of ordinary rows where the habit is to click through. Typing
+    // breaks that habit; an athlete gets a plain confirm.
+    if (approve && role === 'coach') {
+        const typed = window.prompt(
+            `Approving ${name} as a COACH.\n\nThey will see every athlete at their `
+            + `centre, take attendance, and approve athletes themselves.\n\n`
+            + `Type APPROVE to confirm.`, '');
+        if ((typed || '').trim().toUpperCase() !== 'APPROVE') return;
+    } else if (approve) {
+        if (!window.confirm(`Approve ${name}? They will be able to sign in and be `
+                            + `recognised in a capture.`)) return;
+    } else if (!window.confirm(`Reject ${name}? They stay unable to sign in.`)) {
+        return;
+    }
+    try {
+        const fd = new FormData();
+        fd.append('approve', approve ? 'true' : 'false');
+        await api.postForm(`/api/approvals/${id}`, fd);
+        showToast(approve ? 'Approved' : 'Rejected',
+                  approve ? `${name} can now sign in.` : `${name} was rejected.`,
+                  approve ? 'success' : 'info');
+        renderUsersPage();
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
 async function renderUsersPage() {
     const root = document.getElementById('users-root');
     root.innerHTML = '<div class="empty-state py-12">Loading accounts...</div>';
@@ -314,6 +330,13 @@ async function renderUsersPage() {
           <td class="text-sm text-muted">${E(x.last_login ? x.last_login.replace('T', ' ') : 'never')}</td>
           <td>${userStatusBadge(x)}</td>
           <td style="white-space:nowrap">
+            ${x.status === 'pending' ? `
+            <button class="btn btn-primary" style="min-height:30px;padding:0 10px;font-size:12px"
+              data-decide-user="approve" data-user-id="${x.id}" data-user-role="${E(x.role)}"
+              data-username="${E(x.full_name || x.username)}">Approve</button>
+            <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
+              data-decide-user="reject" data-user-id="${x.id}" data-user-role="${E(x.role)}"
+              data-username="${E(x.full_name || x.username)}">Reject</button>` : ''}
             ${x.status === 'rejected' ? `
             <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
               data-reopen-user data-user-id="${x.id}" data-username="${E(x.full_name || x.username)}"
@@ -404,6 +427,14 @@ document.addEventListener('click', (e) => {
     if (reset) {
         e.preventDefault();
         return resetUserPassword(reset.dataset.userId, reset.dataset.username || '');
+    }
+    const decide = e.target.closest('[data-decide-user]');
+    if (decide) {
+        e.preventDefault();
+        return decideUser(decide.dataset.userId,
+                          decide.dataset.decideUser === 'approve',
+                          decide.dataset.username || '',
+                          decide.dataset.userRole || 'athlete');
     }
     const reopen = e.target.closest('[data-reopen-user]');
     if (reopen) {

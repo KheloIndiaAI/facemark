@@ -179,8 +179,6 @@ const SU_COPY = {
     athlete: {
         title: 'Create your account',
         sub: 'Your coach approves it before it works.',
-        note: 'Registering as an <strong>athlete</strong>. You will pick your coach '
-            + 'next, and they approve you before you can be marked present.',
         doneTitle: 'Sent to your coach.',
         doneBody: 'You can sign in once they approve you. Until then you will not '
             + 'be recognised in a capture, so keep signing the register the usual way.',
@@ -188,9 +186,6 @@ const SU_COPY = {
     coach: {
         title: 'Register as a coach',
         sub: 'A super admin approves coach accounts.',
-        note: 'Registering as a <strong>coach</strong>. A coach account can see a '
-            + 'whole centre, so a super admin checks it - not another coach. '
-            + 'This is not instant.',
         doneTitle: 'Sent to a super admin.',
         doneBody: 'Coach access is approved centrally, so this is not instant. '
             + 'You will be able to sign in once it is approved.',
@@ -217,7 +212,6 @@ async function openSignup(role = 'athlete') {
     const set = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
     set('su-title', copy.title);
     set('su-sub', copy.sub);
-    set('su-role-note', copy.note);
     set('su-done-title', copy.doneTitle);
     set('su-done-body', copy.doneBody);
     document.getElementById('login-gate')?.classList.add('hidden');

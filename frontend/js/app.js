@@ -477,7 +477,7 @@ function handleRoute() {
         initRegisterPage();
     }
     else if (hash === '/students') {
-        title.textContent = 'Students';
+        title.textContent = 'Athlete Directory';
         actions.innerHTML = `
             <button class="btn btn-primary" onclick="openRegisterModal()">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
@@ -1273,6 +1273,73 @@ function renderMarkResults(data) {
 }
 
 // --- Students Page ---
+/* ---------------------------------------------------------------------------
+   One athlete, in full
+
+   The directory is a grid of thumbnails; this is where somebody actually looks
+   at a person - the photo at a size worth having, what is on record, and a copy
+   of the picture if they need one for a form.
+--------------------------------------------------------------------------- */
+
+function openStudentDetail(studentId) {
+    // From the list the grid was drawn from, not a fresh request: there is no
+    // GET /api/students/{id}, and adding one would be a new route and a new
+    // access decision for data this page already holds.
+    const p = (state.students || []).find(x => String(x.id) === String(studentId));
+    if (!p) {
+        return showToast('Could not open', 'That athlete is no longer listed.', 'error');
+    }
+    const line = (k, v) => v ? `
+        <div><span class="ck">${Charts.esc(k)}</span><div>${Charts.esc(String(v))}</div></div>` : '';
+
+    openModal(p.name || 'Athlete', `
+        <div style="display:flex;gap:18px;flex-wrap:wrap">
+            <div style="flex:0 0 220px;max-width:100%">
+                <img src="${p.photo_url}" alt="${Charts.esc(p.name || '')}"
+                     style="width:220px;height:220px;object-fit:cover;border-radius:12px;background:var(--bg-subtle)">
+                <button class="btn btn-secondary" style="width:220px;margin-top:8px"
+                        data-download-photo data-url="${p.photo_url}"
+                        data-filename="${Charts.esc((p.roll_no || p.name || 'athlete'))}.jpg">
+                    Download photo
+                </button>
+            </div>
+            <div style="flex:1;min-width:220px">
+                <div class="detail-grid">
+                    ${line('NSRS ID', p.roll_no)}
+                    ${line('Role', p.role)}
+                    ${line('Gender', p.gender)}
+                    ${line('Sport', p.sport)}
+                    ${line('Days present', p.total_present ?? 0)}
+                    ${line('Face templates', p.templates ?? 0)}
+                    ${line('Enrolled', (p.created_at || '').replace('T', ' '))}
+                </div>
+            </div>
+        </div>`,
+        `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`);
+}
+
+async function downloadStudentPhoto(url, filename) {
+    // Fetched, not linked. /api/photos needs a session, and a plain
+    // <a download> hands the URL to the browser's downloader, which does not
+    // send the Authorization header - the file would come back as a 401 page
+    // saved under a .jpg name.
+    try {
+        const res = await fetch(url, { credentials: 'same-origin' });
+        if (!res.ok) throw new Error(`Server said ${res.status}`);
+        const blob = await res.blob();
+        const href = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = href;
+        a.download = filename || 'athlete.jpg';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(href), 10000);
+    } catch (err) {
+        showToast('Could not download', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
 async function renderStudents() {
     try {
         const data = await api.get('/api/students');
@@ -1312,11 +1379,18 @@ function drawStudents(students) {
                     data-delete-student data-student-id="${s.id}" data-student-name="${Charts.esc(s.name)}">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
             </button>
-            <div class="student-photo-wrap">
+            <!-- The photo is the obvious thing to click, so it is the way in.
+                 A button, not a div with a handler, so it is reachable by
+                 keyboard and announced as something that does anything. -->
+            <button class="student-photo-wrap" data-open-student data-student-id="${s.id}"
+                    title="See ${Charts.esc(s.name)}'s photo and details"
+                    style="display:block;width:100%;padding:0;border:0;background:none;cursor:pointer">
                 <img src="${s.photo_url}" class="student-photo" alt="${Charts.esc(s.name)}">
-            </div>
+            </button>
             <div class="student-info">
-                <div class="student-name">${s.name}</div>
+                <button class="student-name" data-open-student data-student-id="${s.id}"
+                        style="border:0;background:none;padding:0;font:inherit;color:inherit;cursor:pointer;text-align:left">
+                    ${Charts.esc(s.name)}</button>
                 <div class="student-meta">
                     <span class="student-roll">${s.roll_no}</span>
                     <span title="Days marked present">${s.total_present || 0} present</span>
@@ -2440,14 +2514,24 @@ async function submitAssign(faceUrl, studentId) {
 
 document.addEventListener('click', (e) => {
     if (!e.target.closest) return;
+
+    // Downloading is its own thing - it carries a url and a filename, not a
+    // student id - so it is matched before the id-shaped buttons below.
+    const dl = e.target.closest('[data-download-photo]');
+    if (dl) {
+        e.preventDefault();
+        return downloadStudentPhoto(dl.dataset.url, dl.dataset.filename);
+    }
+
     const btn = e.target.closest(
-        '[data-clip-enrol], [data-add-photo], [data-delete-student]');
+        '[data-clip-enrol], [data-add-photo], [data-delete-student], [data-open-student]');
     if (!btn) return;
     e.preventDefault();
     const id = btn.dataset.studentId;
     const name = btn.dataset.studentName || '';
     if (btn.hasAttribute('data-add-photo')) openAddPhotoModal(id, name);
     else if (btn.hasAttribute('data-delete-student')) confirmDeleteStudent(id, name);
+    else if (btn.hasAttribute('data-open-student')) openStudentDetail(id);
     else openClipEnrol(id, name);
 });
 

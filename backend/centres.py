@@ -206,11 +206,6 @@ def centre_detail(centre_id: int) -> Optional[dict]:
             "FROM students WHERE centre_id = ? AND role = 'coach' ORDER BY name",
             (centre_id,),
         ).fetchall()]
-        centre["staff_accounts"] = [dict(r) for r in conn.execute(
-            "SELECT id, username, full_name, role, is_active, last_login "
-            "FROM users WHERE centre_id = ? ORDER BY role, full_name",
-            (centre_id,),
-        ).fetchall()]
         centre["attendance_days"] = conn.execute(
             "SELECT COUNT(DISTINCT date) FROM attendance WHERE centre_id = ?", (centre_id,)
         ).fetchone()[0]

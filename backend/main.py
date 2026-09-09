@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (auth, centres as centres_mod, config, database, db as pgdb,
                sessions as sessions_mod, signup as signup_mod,
-               maintenance as maintenance_mod,
+               maintenance as maintenance_mod, portrait as portrait_mod,
                liveness, metaheuristics, routes, storage, utils)
 from .detector import Face, estimate_landmarks, get_detector
 from .enhancer import get_enhancer, sharpness_quality
@@ -287,7 +287,12 @@ async def register_student(
         except ValueError:
             log.warning("Ignoring invalid live photo for %s", roll_no)
 
-    photo_name = utils.save_image(img, "students", f"student_{ts}.jpg")
+    # The card in the directory shows this, so it is cropped to the face
+    # rather than stored as whatever was framed. Templates above already came
+    # from the full image; this only changes the picture a human sees.
+    shot, shot_info = portrait_mod.from_single(img, get_detector())
+    photo_name = utils.save_image(shot, "students", f"student_{ts}.jpg")
+    log.info("Enrolment portrait for %s: %s", roll_no, shot_info)
 
     if role not in ("athlete", "coach"):
         role = "athlete"
@@ -1255,7 +1260,13 @@ async def register_student_from_video(
         }
 
     ts = utils.timestamp()
-    photo_name = utils.save_image(best, "students", f"student_{ts}.jpg")
+    # Across the whole clip, not just the frame liveness liked: the most
+    # frontal, sharpest face is rarely the one that best proved the person was
+    # three-dimensional.
+    shot, shot_info = portrait_mod.choose(result.frames or [best], get_detector())
+    photo_name = utils.save_image(shot if shot is not None else best,
+                                  "students", f"student_{ts}.jpg")
+    log.info("Registration portrait: %s", shot_info)
 
     if role not in ("athlete", "coach"):
         role = "athlete"
@@ -2207,7 +2218,9 @@ async def signup_face(
 
     ts = utils.timestamp()
     photo_name = f"signup_{student_id}_{ts}.jpg"
-    utils.save_image(best, "students", photo_name)
+    shot, shot_info = portrait_mod.choose(result.frames or [best], get_detector())
+    utils.save_image(shot if shot is not None else best, "students", photo_name)
+    log.info("Signup portrait for person %s: %s", student_id, shot_info)
 
     added = 0
     for frame in result.frames[: config.LIVENESS_STORE_FRAMES]:

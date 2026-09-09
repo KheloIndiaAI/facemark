@@ -35,7 +35,11 @@ from .db import connect
 log = logging.getLogger(__name__)
 
 SIGNUP_TOKEN_TTL_MINUTES = 45
-SIGNUP_PER_IP_PER_HOUR = 5
+# A whole squad registers from the centre's one wifi, so every applicant shares
+# an address. At 5 the sixth athlete of the afternoon was refused and the centre
+# was told, in effect, that the app was broken. 120 covers any real intake and
+# still stops a script; it is a bound on machines, not a quota for people.
+SIGNUP_PER_IP_PER_HOUR = 120
 
 # In-process counters, like the login throttle. N workers allow N times the
 # burst; accepted deliberately, because the alternative is letting an
@@ -161,7 +165,13 @@ def start(username: str, password: str, full_name: str,
           centre_id: int, ip: str = "", role: str = "athlete") -> dict:
     """Create the pending account. Returns {token, user_id}."""
     if _throttled(f"signup:{ip}", SIGNUP_PER_IP_PER_HOUR, 3600):
-        raise PermissionError("Too many signups from this connection. Try later.")
+        # Says what to do about it. "Try later" left somebody at a centre with
+        # no idea whether to wait a minute or an hour, or whether it was them.
+        log.warning("Signup throttled for address %s (over %d in an hour)",
+                    ip or "unknown", SIGNUP_PER_IP_PER_HOUR)
+        raise PermissionError(
+            "This centre has registered a lot of accounts in the last hour. "
+            "Wait a few minutes and try again, or ask your coach to add you.")
 
     # Whitelisted, not merely "not super_admin". This value arrives on an
     # unauthenticated request, and the one thing it must never be able to say

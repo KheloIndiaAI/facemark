@@ -127,7 +127,11 @@ def list_users(centre_id: Optional[int] = None) -> list:
     if centre_id is not None:
         q += " WHERE u.centre_id = ?"
         params.append(centre_id)
-    q += " ORDER BY u.role, u.full_name"
+    # Newest first. Sorting by role then name scattered the accounts somebody
+    # actually has to act on - a registration that just arrived - through an
+    # alphabetical list. id descending is the creation order without needing
+    # created_at to be parseable.
+    q += " ORDER BY u.id DESC"
     with database.connect() as conn:
         return [dict(r) for r in conn.execute(q, params).fetchall()]
 
