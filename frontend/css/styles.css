@@ -526,7 +526,12 @@ a:hover { color: var(--accent-hover); }
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 2000;
+    /* Above .login-gate (5000), because the gate OPENS modals: the signup face
+       capture is a modal launched from inside the sign-in overlay. At 2000 it
+       rendered behind the gate - the camera started, the browser said "camera
+       in use", and the person saw nothing at all. A modal is the topmost thing
+       on screen by definition, so it outranks the wall it was opened from. */
+    z-index: 6000;
 }
 
 .modal-dialog {
@@ -573,7 +578,9 @@ a:hover { color: var(--accent-hover); }
     position: fixed;
     bottom: 24px;
     right: 24px;
-    z-index: 3000;
+    /* Above modals, so a "could not use that clip" toast is readable while the
+       capture modal is still up. Moved with .modal-overlay to keep that. */
+    z-index: 7000;
     display: flex;
     flex-direction: column;
     gap: 8px;
