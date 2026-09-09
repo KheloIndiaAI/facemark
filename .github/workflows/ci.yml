@@ -47,6 +47,16 @@ jobs:
           ruff check --select F401 \
             --exclude scripts/archive --output-format=github .
 
+      # Blocking. The liveness check once measured its own tracking failures and
+      # called them depth, which let a waved photograph outscore a real face
+      # while every other check in this file stayed green. The property is
+      # geometric, so it needs no photographs of athletes - which is what lets
+      # it run here at all.
+      - name: Liveness measures shape, not tracking failure
+        run: |
+          pip install opencv-python-headless numpy
+          python -m scripts.test_liveness_geometry
+
   drafts:
     name: Drafts never count as attendance
     runs-on: ubuntu-latest

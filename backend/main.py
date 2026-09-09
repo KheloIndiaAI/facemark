@@ -1590,9 +1590,17 @@ async def add_session_capture(
     and it is not the same as checking: the signature says a human was present,
     not that the people in the picture were.
 
-    Measured, on ten flat replays built by moving a photograph in front of the
-    lens: none were accepted, with 2.1x separation from genuine clips. The
-    parallax check earns its place, so the way round it is closed.
+    An earlier version of this docstring claimed the parallax check rejected ten
+    of ten flat replays with 2.1x separation. That figure was measured on
+    replays that all happened to move gently, against real clips that all
+    happened to move a lot, and it did not survive a matched comparison: at the
+    same motion, a waved photograph outscored a real face. The check has since
+    been repaired - see backend/liveness.py - and now separates the classes with
+    no overlap on 270 clips. The claim above was wrong before the fix, not after.
+
+    A DISTANT FACE IS NOT JUDGED AT ALL. See the `too_far` branch below: this is
+    the one endpoint pointed at a room rather than at arm's length, and the test
+    does not reach that far.
 
     Capturing again ADDS to the session. Recall is 100% at 50-pixel faces and
     23% at 24 pixels, so one frame across a hall loses most of a large group -
@@ -1616,33 +1624,63 @@ async def add_session_capture(
         raise HTTPException(
             400,
             "Attendance needs a short video, not a photo. A still cannot be "
-            "checked for liveness - record a few seconds while moving the "
-            "phone slightly.")
+            "checked for liveness - record a few seconds, moving the phone "
+            "slowly from side to side.")
 
     detector = get_detector()
-    verdict = "not_checked"
-    depth = None
+    result = liveness.analyse(data, detector)
+    verdict = result.verdict
+    depth = result.depth_score
 
-    if is_video:
-        result = liveness.analyse(data, detector)
-        verdict = result.verdict
-        depth = result.depth_score
-        if verdict != "live":
-            return {
-                "ok": False, "session_id": session_id,
-                "message": result.reason,
-                "liveness": result.to_dict(),
-            }
-        img = result.best_frame
-        if img is None:
-            raise HTTPException(400, "No usable frame in that clip")
-        media_bytes = utils.encode_jpeg(img) if hasattr(utils, "encode_jpeg") else None
-    else:
-        try:
-            img = utils.decode_image(data)
-        except ValueError:
-            raise HTTPException(400, "That file is not an image")
-        media_bytes = data
+    # A ROOM IS NOT A FACE HELD AT ARM'S LENGTH, and this endpoint is the only
+    # one pointed at a room. The parallax test was calibrated on faces 165-313px
+    # wide; the faces in a real group photograph from this centre are 20-74px.
+    # At that size the measurement is reading its own noise, so `too_far` means
+    # the test could not look - not that it looked and saw a photograph. It is
+    # recorded as unchecked, listed on the oversight page, and allowed through,
+    # because the alternative is refusing every genuine group capture with an
+    # accusation the evidence cannot support. A coach cannot move a hall closer.
+    #
+    # What still holds the line: a still is refused outright, a face close
+    # enough to judge IS judged, and the register is signed at the end with the
+    # coach's own face at arm's length, where the check works.
+    if result.code == "too_far":
+        verdict = "too_far"
+        log.info(
+            "Capture on session %s recorded unchecked: %s (face %spx, %s frames) "
+            "by %s", session_id, result.code, result.face_px, result.frames_used,
+            user.get("username"),
+        )
+    elif verdict != "live":
+        # Keep the evidence. A refusal nobody can inspect is a refusal nobody
+        # can appeal, and this route used to return without storing a single
+        # frame - so the one failure a coach would actually report was the one
+        # failure that left no trace to diagnose.
+        ts_ev = utils.timestamp()
+        frame_urls = []
+        for i, frame in enumerate(result.frames[: config.LIVENESS_STORE_FRAMES]):
+            name = f"refused_{session_id}_{ts_ev}_{i}.jpg"
+            try:
+                utils.save_image(frame, "uploads", name)
+                frame_urls.append(f"/api/uploads/{name}")
+            except Exception as e:  # noqa: BLE001 - storage must not sink the reply
+                log.warning("Could not store refused frame %s: %s", name, e)
+        log.warning(
+            "Capture refused on session %s: %s/%s (depth=%.5f motion=%.5f "
+            "face=%spx points=%s frames=%s) by %s",
+            session_id, verdict, result.code, result.depth_score, result.motion,
+            result.face_px, result.tracked_points, result.frames_used,
+            user.get("username"),
+        )
+        return {
+            "ok": False, "session_id": session_id,
+            "message": result.reason,
+            "liveness": {**result.to_dict(), "frame_urls": frame_urls},
+        }
+
+    img = result.best_frame
+    if img is None:
+        raise HTTPException(400, "No usable frame in that clip")
 
     ts = utils.timestamp()
     media_name = f"capture_{session_id}_{ts}.jpg"
@@ -1718,7 +1756,8 @@ async def add_session_capture(
         "session_id": session_id,
         "capture_id": capture_id,
         "kind": "video" if is_video else "photo",
-        "liveness": {"verdict": verdict, "depth_score": depth},
+        "liveness": {**result.to_dict(), "verdict": verdict},
+        "unchecked": verdict == "too_far",
         "faces_detected": len(faces),
         "recognized_count": len(recognised),
         "newly_drafted": drafted,

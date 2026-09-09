@@ -677,7 +677,8 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
             "FROM session_captures cap "
             "JOIN attendance_sessions s ON s.id = cap.session_id "
             "LEFT JOIN students p ON p.id = s.coach_id "
-            "WHERE cap.kind = 'photo' OR cap.liveness_verdict = 'not_checked'"
+            "WHERE cap.kind = 'photo' "
+            "   OR cap.liveness_verdict IN ('not_checked', 'too_far')"
             + cs + " ORDER BY cap.id DESC LIMIT 50", cp).fetchall()]
 
         pending = conn.execute(

@@ -871,7 +871,7 @@ function initMarkPage() {
         if (recording) return;
         recording = true;
         shutterBtn.classList.add('recording');
-        if (recHint) recHint.textContent = 'Recording - move the phone slightly';
+        if (recHint) recHint.textContent = 'Recording - move the phone slowly side to side';
 
         // Attendance stays a short, fixed-length capture, unlike registration's
         // guided sequence - see the note by CLIP_MS_ATTENDANCE.
@@ -880,7 +880,7 @@ function initMarkPage() {
         shutterBtn.classList.remove('recording');
         recording = false;
         setRing(0);
-        if (recHint) recHint.textContent = 'Hold steady, then move the phone slightly while recording';
+        if (recHint) recHint.textContent = 'Move the phone slowly from side to side while recording';
         if (!file) return;
 
         currentMarkFile = file;
@@ -2200,7 +2200,7 @@ function regCapture() {
         // No turn prompts: this is a room, not one person being enrolled.
         guided: false,
         intro: 'Point the camera at the group and record a few seconds, moving the '
-             + 'phone slightly. Capture again for anyone missed.',
+             + 'phone slowly from side to side. Capture again for anyone missed.',
         onClip: async (file, ui) => {
             ui.status('Checking the clip\u2026');
             try {
@@ -2216,9 +2216,14 @@ function regCapture() {
                 }
                 regLastNamed = r.other_coach || [];
                 ui.close();
+                // An unchecked capture is not a failure and not a success - the
+                // faces were too far off for the liveness test to reach, so it
+                // is recorded as unchecked and flagged for an admin. Saying so
+                // is the difference between a caveat and a silent assumption.
                 showToast('Capture added',
-                          `${r.newly_drafted} added \u00b7 ${r.recognized_count} recognised`,
-                          'success');
+                          `${r.newly_drafted} added \u00b7 ${r.recognized_count} recognised`
+                          + (r.unchecked ? ' \u00b7 too far to check for a live person' : ''),
+                          r.unchecked ? 'info' : 'success');
                 await regLoad();
             } catch (err) {
                 ui.status((err && err.message) || 'Could not add that capture.');
@@ -2269,7 +2274,7 @@ function regSubmit() {
         guided: false,
         title: 'Confirm it is you',
         intro: 'Record a few seconds of your own face to sign this register. '
-             + 'Move the phone slightly while recording.',
+             + 'Move the phone slowly from side to side while recording.',
         onClip: async (file, ui) => {
             ui.status('Checking\u2026');
             try {
@@ -2381,7 +2386,8 @@ function meMark(coachId, coachName) {
     const send = async (pos) => {
         openClipCapture({
             title: `Mark present \u2014 ${coachName}`,
-            intro: 'Record a few seconds of your own face, moving the phone slightly.',
+            intro: 'Record a few seconds of your own face, moving the phone slowly '
+                 + 'from side to side.',
             onClip: async (file, ui) => {
                 ui.status('Checking\u2026');
                 try {
@@ -3163,7 +3169,7 @@ async function openClipCapture(opts) {
         shutter.disabled = true;
         shutter.classList.add('recording');
         ui.status(opts.guided === false
-            ? 'Recording - move the phone slightly.'
+            ? 'Recording - move the phone slowly side to side.'
             : 'Recording - follow the on-screen prompts.');
 
         // The pre-recording framing poll and the guided sequence's own poll
@@ -3188,7 +3194,7 @@ async function openClipCapture(opts) {
                 // following prompts, and a 1:1 check needs one view. Parallax
                 // comes from moving the phone, which the copy asks for.
                 promptBox.classList.add('hidden');
-                ui.status('Recording - move the phone slightly.');
+                ui.status('Recording - move the phone slowly side to side.');
                 file = await cam.recordClip(opts.clipMs || CLIP_MS_PLAIN, setRing);
             } else {
                 const control = { done: false };

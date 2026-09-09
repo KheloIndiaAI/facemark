@@ -20,6 +20,15 @@ than the ears, so no single homography fits, and the residual is the depth.
 So the test is: track points across the clip, fit the best homography, and ask
 how badly it fails. Near-zero means flat, which means a screen or a print.
 
+That only holds while the tracking is real. The first version matched frame 0
+against every later frame directly, which is a displacement Lucas-Kanade cannot
+follow across a three-second clip; the residual then measured the tracker
+failing rather than the subject's shape, and failure looks exactly like depth.
+Measured on a matched corpus, photographs waved hard scored ABOVE real faces,
+and no threshold separated the two classes at all. Points are now followed frame
+to frame and checked by tracking them back again, which is what makes the number
+mean what the paragraph above says it means.
+
 WHAT THIS DOES NOT CATCH
 ------------------------
 A video of a real person replayed on a screen is still a plane, so it fails the
@@ -28,10 +37,17 @@ a second live person. That is a far higher bar than holding up a phone, which is
 the attack this exists to stop, but it is not "solved liveness" and must not be
 described as such.
 
-The other limit is honest and structural: parallax needs motion. If the camera
-and subject are both perfectly still, there is no depth information in the clip
-at all, and this returns "inconclusive" rather than guessing. A caller must
-decide what to do with that - it is not the same answer as "live".
+Two limits are structural rather than incidental, and both return
+"inconclusive" - which is NOT the same answer as "live", and not the same as
+"screen" either:
+
+  no motion   parallax needs a viewpoint change. Camera and subject both still
+              means the clip contains no depth information whatsoever.
+  too far     parallax across a face falls with the square of distance while the
+              tracker's error stays fixed in pixels. Beyond roughly arm's
+              length the measurement is reading its own noise. A group across a
+              hall is far outside what this can judge, and saying so is the
+              honest answer - see LIVENESS_MIN_FACE_PX.
 """
 from __future__ import annotations
 
@@ -53,10 +69,18 @@ log = logging.getLogger("liveness")
 class LivenessResult:
     verdict: str                     # "live" | "screen" | "inconclusive" | "no_face"
     reason: str
+    # WHY, in a form a caller can branch on. The verdict alone lumps together
+    # "this is flat" with "this could not be measured", and those two deserve
+    # opposite treatment: one is an accusation, the other is an admission. A
+    # caller that has to match on English prose to tell them apart will get it
+    # wrong the first time the wording changes.
+    #   ok | flat | too_far | no_motion | no_detail | unreadable | no_face
+    code: str = ""
     depth_score: float = 0.0         # homography residual, normalised by face width
-    motion: float = 0.0              # median tracked-point displacement, same units
+    motion: float = 0.0              # largest tracked-point displacement, same units
     frames_used: int = 0
     tracked_points: int = 0
+    face_px: int = 0                 # width of the face judged, in pixels
     frames: List[np.ndarray] = field(default_factory=list)   # sampled, for storage
     best_frame: Optional[np.ndarray] = None                  # sharpest face frame
 
@@ -64,14 +88,21 @@ class LivenessResult:
     def is_live(self) -> bool:
         return self.verdict == "live"
 
+    @property
+    def measurable(self) -> bool:
+        """Did the test actually get to look? Distinct from what it concluded."""
+        return self.code in ("ok", "flat")
+
     def to_dict(self) -> dict:
         return {
             "verdict": self.verdict,
             "reason": self.reason,
+            "code": self.code,
             "depth_score": round(self.depth_score, 4),
             "motion": round(self.motion, 4),
             "frames_used": self.frames_used,
             "tracked_points": self.tracked_points,
+            "face_px": self.face_px,
         }
 
 
@@ -160,15 +191,45 @@ def _largest_face(frame: np.ndarray, detector):
     return max(faces, key=lambda f: f.width * f.height)
 
 
+_LK = dict(
+    winSize=(21, 21), maxLevel=3,
+    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+)
+
+
 def _depth_from_parallax(
     frames: List[np.ndarray], box
-) -> Tuple[float, float, int]:
-    """Return (depth_score, motion, n_points) for the region in `box`.
+) -> Tuple[float, float, int, bool]:
+    """Return (depth_score, motion, n_points, measured) for the region in `box`.
 
     depth_score is the median distance, in face-widths, by which tracked points
-    disagree with the single best homography between the first frame and each
-    later one. A plane gives ~0 whatever it does; a face gives more the more the
-    viewpoint changes.
+    disagree with the single best homography between their first-frame position
+    and their current one. A plane gives ~0 whatever it does; a face gives more
+    the more the viewpoint changes.
+
+    TWO THINGS MAKE THAT NUMBER MEAN WHAT IT CLAIMS, and the first version had
+    neither.
+
+    Follow points to the NEXT frame, not to the last one. Matching frame 0
+    against frame 17 directly asks Lucas-Kanade for a displacement far outside
+    the window it searches, so points settle on whatever texture is nearby and
+    the residual measures the tracker giving up. Measured: photographs waved
+    hard scored up to 1.15, well above real faces, because a bigger mess is a
+    bigger residual and a bigger residual read as "more alive". Stepping frame
+    to frame keeps every displacement inside what the tracker can do, while the
+    comparison stays first-frame against current, which is where the parallax
+    is.
+
+    Then check the tracking instead of trusting it. Each point is tracked on and
+    back again, and any point that does not return to where it started never
+    followed anything. This is the standard forward-backward test, and it is
+    what separates the classes: with it, photographs top out at 0.00197 while
+    real faces start at 0.0031; without it there is no threshold that tells them
+    apart at all.
+
+    `measured` is False when too few points survived to say anything. That is
+    not evidence of a photograph - it is the absence of evidence, and the caller
+    must not turn it into an accusation.
     """
     x1, y1, x2, y2 = [int(v) for v in box]
     fw = max(1.0, float(x2 - x1))
@@ -185,42 +246,51 @@ def _depth_from_parallax(
         minDistance=4, mask=mask, blockSize=7,
     )
     if pts0 is None or len(pts0) < config.LIVENESS_MIN_POINTS:
-        return 0.0, 0.0, 0 if pts0 is None else len(pts0)
+        return 0.0, 0.0, 0 if pts0 is None else len(pts0), False
 
+    origin = pts0.copy()      # where each surviving point sat in frame 0
+    cur = pts0.copy()
+    prev_gray = first_gray
     residuals: List[float] = []
     motions: List[float] = []
-    n_used = len(pts0)
 
     for frame in frames[1:]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        pts1, status, _ = cv2.calcOpticalFlowPyrLK(
-            first_gray, gray, pts0, None,
-            winSize=(21, 21), maxLevel=3,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+        nxt, st_fwd, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, cur, None, **_LK)
+        if nxt is None:
+            break
+        back, st_bwd, _ = cv2.calcOpticalFlowPyrLK(gray, prev_gray, nxt, None, **_LK)
+        if back is None:
+            break
+        round_trip = np.linalg.norm(back - cur, axis=2).ravel()
+        good = (
+            (st_fwd.ravel() == 1)
+            & (st_bwd.ravel() == 1)
+            & (round_trip <= config.LIVENESS_FB_MAX_PX)
         )
-        if pts1 is None:
-            continue
-        good = status.ravel() == 1
-        a, b = pts0[good], pts1[good]
-        if len(a) < config.LIVENESS_MIN_POINTS:
-            continue
+        if int(good.sum()) < config.LIVENESS_MIN_POINTS:
+            break                     # tracking is lost; stop rather than guess
+        origin, cur, prev_gray = origin[good], nxt[good], gray
 
-        motions.append(float(np.median(np.linalg.norm(b - a, axis=2))) / fw)
+        motions.append(float(np.median(np.linalg.norm(cur - origin, axis=2))) / fw)
 
         # RANSAC finds the dominant plane. On a photograph that plane explains
         # every point; on a face it explains one surface and leaves the rest -
         # which is exactly the quantity of interest, so the residual is measured
-        # over ALL points, not just the inliers RANSAC kept.
-        H, _ = cv2.findHomography(a, b, cv2.RANSAC, 3.0)
+        # over ALL surviving points, not just the inliers RANSAC kept.
+        H, _ = cv2.findHomography(origin, cur, cv2.RANSAC, 3.0)
         if H is None:
             continue
-        projected = cv2.perspectiveTransform(a, H)
-        err = np.linalg.norm(projected - b, axis=2).ravel()
+        projected = cv2.perspectiveTransform(origin, H)
+        err = np.linalg.norm(projected - cur, axis=2).ravel()
         residuals.append(float(np.median(err)) / fw)
 
     if not residuals:
-        return 0.0, 0.0, n_used
-    return float(np.median(residuals)), float(np.median(motions or [0.0])), n_used
+        return 0.0, 0.0, len(origin), False
+    # Motion is the LARGEST viewpoint change the clip achieved - the question it
+    # answers is "was there ever enough baseline to see depth", not "how much on
+    # average". Depth stays a median, so one bad frame pair cannot carry it.
+    return float(np.median(residuals)), float(np.max(motions)), len(origin), True
 
 
 def analyse(data: bytes, detector) -> LivenessResult:
@@ -237,10 +307,11 @@ def analyse(data: bytes, detector) -> LivenessResult:
             return LivenessResult(
                 "inconclusive",
                 "Could not read any frames from this clip - is it a video?",
+                code="unreadable",
             )
         result = LivenessResult(
             "live", "Liveness checking is disabled",
-            frames_used=len(frames), frames=frames,
+            code="ok", frames_used=len(frames), frames=frames,
         )
         result.best_frame = max(
             frames,
@@ -252,6 +323,7 @@ def analyse(data: bytes, detector) -> LivenessResult:
         return LivenessResult(
             "inconclusive",
             f"Clip is larger than the {config.LIVENESS_MAX_BYTES // (1024*1024)} MB limit",
+            code="unreadable",
         )
 
     frames, info = sample_frames(data)
@@ -276,6 +348,7 @@ def analyse(data: bytes, detector) -> LivenessResult:
         return LivenessResult(
             "inconclusive",
             f"Could not read enough frames from this clip - {detail}.",
+            code="unreadable",
         )
 
     face = _largest_face(frames[0], detector)
@@ -285,13 +358,12 @@ def analyse(data: bytes, detector) -> LivenessResult:
         face = _largest_face(frames[len(frames) // 2], detector)
     if face is None:
         return LivenessResult("no_face", "No face was found in the clip",
-                              frames_used=len(frames), frames=frames)
+                              code="no_face", frames_used=len(frames), frames=frames)
 
-    depth, motion, n_pts = _depth_from_parallax(frames, face.box)
-
+    face_px = int(face.box[2] - face.box[0])
     result = LivenessResult(
-        verdict="inconclusive", reason="", depth_score=depth, motion=motion,
-        frames_used=len(frames), tracked_points=n_pts, frames=frames,
+        verdict="inconclusive", reason="", frames_used=len(frames),
+        face_px=face_px, frames=frames,
     )
     # The sharpest frame carries the most identity signal, so recognition should
     # run on that rather than on whichever frame happened to be first.
@@ -300,25 +372,57 @@ def analyse(data: bytes, detector) -> LivenessResult:
         key=lambda f: cv2.Laplacian(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var(),
     )
 
+    if face_px < config.LIVENESS_MIN_FACE_PX:
+        # Out of range, and saying so is the only honest answer. Parallax across
+        # a face shrinks with the square of distance while the tracker's error
+        # does not, so past a certain distance the measurement is reading its
+        # own noise. Every threshold here was set on faces 165-313px wide; the
+        # faces in a real group photograph from this centre are 20-74px. A test
+        # calibrated at arm's length cannot convict somebody standing across a
+        # hall, and must not pretend otherwise.
+        result.code = "too_far"
+        result.reason = (
+            f"The face is too far away to check for depth ({face_px}px across; "
+            f"{config.LIVENESS_MIN_FACE_PX}px is the closest this can judge from)"
+        )
+        return result
+
+    depth, motion, n_pts, measured = _depth_from_parallax(frames, face.box)
+    result.depth_score, result.motion, result.tracked_points = depth, motion, n_pts
+
     if n_pts < config.LIVENESS_MIN_POINTS:
+        result.code = "no_detail"
         result.reason = ("Too little detail on the face to measure depth - "
                          "move closer or improve the lighting")
+        return result
+
+    if not measured:
+        # Points were found but could not be followed: usually the phone swept
+        # too fast, or the clip is too compressed to track. Nothing was measured,
+        # so nothing is concluded.
+        result.code = "no_detail"
+        result.reason = ("The camera moved too fast to follow the face - record "
+                         "again, moving the phone more slowly")
         return result
 
     if motion < config.LIVENESS_MIN_MOTION:
         # No viewpoint change means no parallax, so the clip contains no depth
         # information at all. Reporting "live" here would pass a photograph held
         # perfectly still, which is the easiest attack of the lot.
+        result.code = "no_motion"
         result.reason = ("The camera and subject barely moved, so depth could not "
-                         "be measured - move the phone slightly while recording")
+                         "be measured - record again, moving the phone slowly "
+                         "from side to side")
         return result
 
     if depth < config.LIVENESS_MIN_DEPTH:
         result.verdict = "screen"
+        result.code = "flat"
         result.reason = ("This looks like a photograph or a screen: everything in "
                          "frame moved as one flat surface")
         return result
 
     result.verdict = "live"
+    result.code = "ok"
     result.reason = "Depth consistent with a real face"
     return result

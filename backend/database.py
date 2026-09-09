@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS session_captures (
     session_id       INTEGER NOT NULL REFERENCES attendance_sessions(id) ON DELETE CASCADE,
     media_key        TEXT NOT NULL,
     kind             TEXT NOT NULL,            -- video | photo
-    liveness_verdict TEXT,                     -- live | screen | inconclusive | not_checked
+    liveness_verdict TEXT,   -- live | screen | inconclusive | too_far | not_checked
     liveness_depth   DOUBLE PRECISION,
     faces_detected   INTEGER,
     recognised       INTEGER,

@@ -289,36 +289,70 @@ SCREEN_MIN_FACE_PX = 60          # below this the spectrum is too coarse to judg
 # way, so the clip is called inconclusive rather than live. Without that guard a
 # photograph held perfectly still would sail through.
 #
-# CALIBRATION STATUS, 2026-09-02: 0.010 was set from synthetic clips only - a
-# photo warped through known homographies (faithful for the flat side) and
-# deliberate large head turns stitched from guided-enrolment frames (which
-# overstated the live side: a big, deliberate pose swing is not what "look at
-# the camera and move your head a little" produces).
+# CALIBRATION STATUS, 2026-09-09. The previous note defended 0.006 with numbers
+# taken from clips whose motion ranges barely overlapped: real faces measured
+# where they happened to move a lot, photographs where they happened to move a
+# little. Comparing two classes over different parts of the motion range is not
+# a measurement of anything, and the 2.1x "separation" it produced did not
+# survive a wider sweep.
 #
-# That gap was real. A user reported genuine registrations being refused as
-# "screen". Reproduced by measuring REAL people - not synthetic warps - with
-# ordinary small motion, encoded through actual browser VP8 compression at a
-# realistic phone bitrate, the same pipeline production traffic uses:
+# Re-measured against a MATCHED corpus - 150 real clips (real people, a real
+# camera, frames ~200ms apart) and 150 photograph clips built to the same frame
+# count and the same measured motion, everything through real VP8:
 #
-#                                                  depth    motion
-#   flat photo, real VP8, 3 portraits x 2 bitrates 0.0038-0.0055   0.17-0.21
-#   real face, genuine small natural motion (n=2)  0.0072-0.0097   0.098-0.099
-#   real face, deliberate large pose change        0.17 -0.32      0.20-0.37
+#   frame 0 vs every frame, no tracking check   (what the code used to do)
+#       real faces   0.0036 - 0.956
+#       photographs  0.0006 - 1.153      <- a waved photograph outscores a face
 #
-# 0.010 sat ABOVE both real small-motion measurements - it was rejecting
-# ordinary people by construction, not as an edge case. 0.006 sits between the
-# two clusters, biased toward the flat side on purpose: the margin above the
-# threshold to the nearest real measurement (0.0072, ~1.2x) is wider than the
-# margin below it to the nearest flat measurement (0.0055, ~1.09x), because a
-# genuine person refused attendance is a worse failure than a spoof let
-# through. The margin is still thin - two people, one capture pipeline - and
-# needs more real clips before it can be called settled.
-# See scripts/calibrate_liveness.py to re-measure on your own devices.
+# The classes did not separate ANYWHERE. A threshold admitting no photograph
+# would have refused 142 of the 150 real clips. The cause is mechanical: the
+# residual was compared between frame 0 and each later frame directly, and
+# across a three-second clip that displacement is more than Lucas-Kanade can
+# follow. Points landed on whatever texture was nearby, the homography could not
+# explain the wreckage, and the residual rose - and rising means "live". So the
+# harder a spoofer waved the phone, the better their odds.
+#
+# Tracking each point on to the NEXT frame and back again, and keeping only the
+# points that come home (LIVENESS_FB_MAX_PX), separates the classes completely:
+#
+#   chained, round-trip validated
+#       real faces   0.0031 - 0.256   (median 0.0111)
+#       photographs  0.0006 - 0.00197
+#       -> 0 photographs accepted, 0 real people refused, on 270 judged clips
+#
+# 0.0025 is the geometric mean of that gap. The margin is 1.27x to the highest
+# photograph and 1.25x to the lowest real clip, with the median real clip 5.6x
+# clear. Thin at the extremes, so it is still worth re-measuring on real
+# devices - scripts/calibrate_liveness.py - but it is a gap, which is more than
+# the previous threshold had.
+#
+# 30 of the 180 real clips could not be judged at all: too little viewpoint
+# change to carry parallax. Those get "record again", never "screen". A clip
+# that cannot be measured is not evidence of a photograph.
 LIVENESS_ENABLED = True
 LIVENESS_SAMPLE_FRAMES = 18      # was 12; more samples for the longer clip below
 LIVENESS_MIN_POINTS = 25         # fewer trackable corners than this cannot judge
-LIVENESS_MIN_MOTION = 0.004      # median displacement in face-widths
-LIVENESS_MIN_DEPTH = 0.006       # measured - see calibration note above
+LIVENESS_MIN_MOTION = 0.010      # max displacement in face-widths, across the clip
+LIVENESS_MIN_DEPTH = 0.0025      # measured - see calibration note above
+# How far a point may drift on a there-and-back track before it is discarded.
+# This is the whole difference between measuring depth and measuring tracking
+# failure. Swept at 1, 2 and 4 px: all three separate the classes, 4 judges the
+# most clips (120 vs 48 at 1px) with the widest margin, because a real face
+# legitimately changes appearance as it turns and a tight tolerance throws that
+# evidence away along with the errors.
+LIVENESS_FB_MAX_PX = 4.0
+# Below this the test has nothing to say. Parallax across a face falls with the
+# square of distance, while the tracker's own error stays fixed in pixels, so
+# the noise floor expressed in face-widths grows as the face shrinks. The
+# thresholds above were measured on faces 165-313px wide, where the flat side's
+# noise is 0.33-0.62px; by ~130px that noise crosses LIVENESS_MIN_DEPTH and the
+# test starts calling photographs live. Real group photographs from this centre
+# have faces of 20-74px - a whole order below where any of this was measured.
+#
+# So a distant face is reported as UNMEASURABLE, not as a photograph. Accusing
+# a coach of holding up a phone on the strength of a measurement that cannot
+# see that far is the one answer certainly not supported by the evidence.
+LIVENESS_MIN_FACE_PX = 150
 LIVENESS_MAX_BYTES = 25 * 1024 * 1024
 # Registration records for 10s (config below); attendance stays at 2s. The
 # ceiling needs headroom above the longer of the two, not to equal it exactly -

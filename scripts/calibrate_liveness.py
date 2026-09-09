@@ -8,21 +8,39 @@ The signal is parallax: a photograph is a plane, so under camera motion every
 point on it maps through one homography, while a real face leaves a residual
 because the nose is nearer the lens than the ears.
 
-Measured on this project's own data:
+Measured on a MATCHED corpus - 150 real clips (real people, real camera, frames
+~200ms apart) against 150 photograph clips built to the same frame count and the
+same measured motion, all through real VP8:
 
-    flat photographs, warped through known homographies   0.00028 - 0.00085
-    flat photograph filmed through a browser (VP8)        0.0046
-    real faces, multi-view enrolment frames               0.17205 - 0.31982
+    photographs   0.00060 - 0.00197
+    real faces    0.00313 - 0.256     (median 0.0111)
 
-LIVENESS_MIN_DEPTH sits at 0.010, between those. But note the middle row: video
-compression roughly quintupled the flat score compared with clean warps, so the
-margin against a COMPRESSED spoof is about 2x, not the 12x the synthetic clips
-suggested. Different phones and bitrates will move that number, which is the
-main reason to run this.
+LIVENESS_MIN_DEPTH sits at 0.0025, inside that gap: 0 photographs accepted, 0
+real people refused, over 270 judged clips.
 
-The real-face figures also come from deliberate head turns, a larger viewpoint
-change than a casual two-second clip gives, so they are an optimistic bound.
-Recording real clips the way coaches actually will is the point of --live.
+MATCH THE MOTION, OR MEASURE NOTHING. Earlier versions of this file quoted
+figures from clips whose motion ranges barely overlapped - photographs that
+happened to move gently against faces that happened to move a lot - and the
+apparent separation was mostly that mismatch. Compared fairly, the old
+algorithm had NO separation at any motion: a photograph waved hard scored above
+a real face, because matching frame 0 against frame 17 directly asks more of
+Lucas-Kanade than it can do, and the residual then measures the tracker failing
+rather than the subject's shape. If you collect your own clips, sample both
+classes across the same range of movement, or you will re-learn this the hard
+way.
+
+Two regimes remain unmeasured, and both matter for a pilot:
+
+  distance   every number above comes from faces 165-313px wide. Real group
+             photographs from this centre have faces of 20-74px, where parallax
+             is below the tracker's noise. Those clips are reported as
+             unmeasurable rather than judged - see LIVENESS_MIN_FACE_PX - so a
+             group capture is currently NOT liveness-checked. Clips of a real
+             squad, and of a phone held up showing one, are the data that would
+             let that change.
+  real spoof a photograph warped in software is a faithful plane, but a real
+             screen filmed by a real phone adds moire and its own pixel grid.
+             --spoof is how you check that those do not move the flat side.
 
 HOW TO COLLECT
 --------------
