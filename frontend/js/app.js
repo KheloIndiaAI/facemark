@@ -560,14 +560,24 @@ const api = {
             throw err;
         }
     },
-    async delete(endpoint) {
+    /* Same shape as postForm: it reports the SERVER's reason, and `quiet` lets
+     * a caller that shows its own message stop this one firing too.
+     *
+     * It used to throw a flat 'API Error' and toast 'Failed to delete', so
+     * "You cannot delete your own account" - a thing somebody would want to
+     * read - arrived as three words that explain nothing, twice. */
+    async delete(endpoint, quiet = false) {
         try {
             const res = await fetch(endpoint, { method: 'DELETE' });
             if (res.status === 401) { handleUnauthorized(); throw new Error('Unauthorized'); }
-            if (!res.ok) throw new Error('API Error');
-            return await res.json();
+            let data = null;
+            try { data = await res.json(); } catch { /* some deletes return no body */ }
+            if (!res.ok) throw new Error((data && data.detail) || `Failed (${res.status})`);
+            return data;
         } catch (err) {
-            if (err.message !== 'Unauthorized') showToast('Error', 'Failed to delete', 'error');
+            if (!quiet && err.message !== 'Unauthorized') {
+                showToast('Error', err.message, 'error');
+            }
             throw err;
         }
     }
@@ -1393,11 +1403,31 @@ async function setNsrsId(studentId, current, name) {
     }
 }
 
+let studentRole = 'athlete';
+
 async function renderStudents() {
     try {
-        const data = await api.get('/api/students');
+        // The page is the ATHLETE Directory, so it asks for athletes. Coaches
+        // are enrolled people too and this is the only screen that can enrol
+        // one, so they are one button away rather than unreachable.
+        const data = await api.get(`/api/students?role=${encodeURIComponent(studentRole)}`);
         state.students = data.students;
         drawStudents(state.students);
+
+        document.querySelectorAll('[data-role-filter]').forEach(b => {
+            b.className = 'btn ' + (b.dataset.roleFilter === studentRole
+                ? 'btn-primary' : 'btn-secondary');
+            b.onclick = () => {
+                if (studentRole === b.dataset.roleFilter) return;
+                studentRole = b.dataset.roleFilter;
+                renderStudents();
+            };
+        });
+        const title = document.getElementById('page-title');
+        if (title) {
+            title.textContent = studentRole === 'coach'
+                ? 'Coaches' : 'Athlete Directory';
+        }
 
         document.getElementById('student-search').addEventListener('input', (e) => {
             const term = e.target.value.toLowerCase();
@@ -1438,7 +1468,11 @@ function drawStudents(students) {
             <button class="student-photo-wrap" data-open-student data-student-id="${s.id}"
                     title="See ${Charts.esc(s.name)}'s photo and details"
                     style="display:block;width:100%;padding:0;border:0;background:none;cursor:pointer">
-                <img src="${s.photo_url}" class="student-photo" alt="${Charts.esc(s.name)}">
+                ${s.photo_url
+                    ? `<img src="${s.photo_url}" class="student-photo" alt="${Charts.esc(s.name)}">`
+                    : `<div class="student-photo" style="display:flex;align-items:center;justify-content:center;
+                            background:var(--bg-subtle);color:var(--text-secondary);font-size:13px">
+                           No photo yet</div>`}
             </button>
             <div class="student-info">
                 <button class="student-name" data-open-student data-student-id="${s.id}"

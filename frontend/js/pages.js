@@ -311,6 +311,33 @@ async function decideUser(id, approve, name, role) {
     }
 }
 
+async function deleteUserAccount(id, name, role) {
+    // Two steps for a coach or an admin, one for an athlete. Deleting an
+    // account does not delete the PERSON or their attendance - only the login -
+    // but a coach account is the thing a whole centre signs in with, so it does
+    // not go on a single click.
+    if (role === 'coach' || role === 'super_admin') {
+        const typed = window.prompt(
+            `Delete the ${role === 'coach' ? 'coach' : 'super admin'} account "${name}".`
+            + `\n\nTheir person record, face and attendance are NOT deleted - only `
+            + `the login. This cannot be undone.\n\nType DELETE to confirm.`, '');
+        if ((typed || '').trim().toUpperCase() !== 'DELETE') return;
+    } else if (!window.confirm(
+            `Delete the account "${name}"?\n\nTheir person record, face and `
+            + `attendance are kept - only the login goes. This cannot be undone.`)) {
+        return;
+    }
+    try {
+        // quiet: this handler shows its own message, and two toasts for one
+        // failure is one too many.
+        await api.delete(`/api/users/${id}`, true);
+        showToast('Account deleted', `${name} can no longer sign in.`, 'success');
+        renderUsersPage();
+    } catch (err) {
+        showToast('Could not delete', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
 async function renderUsersPage() {
     const root = document.getElementById('users-root');
     root.innerHTML = '<div class="empty-state py-12">Loading accounts...</div>';
@@ -349,6 +376,9 @@ async function renderUsersPage() {
                  escape was not merely weak, it was the wrong kind. -->
             <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
               data-reset-password data-user-id="${x.id}" data-username="${E(x.username)}">Reset password</button>
+            <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px;color:#dc2626"
+              data-delete-user data-user-id="${x.id}" data-user-role="${E(x.role)}"
+              data-username="${E(x.full_name || x.username)}">Delete</button>
           </td></tr>`).join('')}</tbody></table>
       </div></div>`;
 }
@@ -428,6 +458,13 @@ document.addEventListener('click', (e) => {
         e.preventDefault();
         return resetUserPassword(reset.dataset.userId, reset.dataset.username || '');
     }
+    const del = e.target.closest('[data-delete-user]');
+    if (del) {
+        e.preventDefault();
+        return deleteUserAccount(del.dataset.userId, del.dataset.username || '',
+                                 del.dataset.userRole || 'athlete');
+    }
+
     const decide = e.target.closest('[data-decide-user]');
     if (decide) {
         e.preventDefault();

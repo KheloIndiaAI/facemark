@@ -229,11 +229,27 @@ def _enroll_photo_templates(
 # --- students ---------------------------------------------------------------
 
 @app.get("/api/students")
-def get_students(user: dict = Depends(auth.current_user)):
+def get_students(
+    role: Optional[str] = None,
+    user: dict = Depends(auth.current_user),
+):
+    """Enrolled people at the caller's centre, optionally one role.
+
+    `role` exists because the directory is the Athlete Directory: a coach is an
+    enrolled person with a face, and belongs in this table, but not in a list
+    the screen calls athletes. Unfiltered is still the default - several callers
+    want everybody.
+    """
+    if role is not None and role not in ("athlete", "coach"):
+        raise HTTPException(400, "role must be 'athlete' or 'coach'")
     scope = auth.scope_centre(user, None)
     students = [
-        {**s, "photo_url": f"/api/photos/{Path(s['photo_path']).name}"}
-        for s in database.list_students(centre_id=scope)
+        # None, not "/api/photos/". Building the URL unconditionally gave
+        # somebody with no photo a 404, which the browser drew as a broken
+        # image with their name beside it.
+        {**s, "photo_url": (f"/api/photos/{Path(s['photo_path']).name}"
+                            if s.get("photo_path") else None)}
+        for s in database.list_students(centre_id=scope, role=role)
     ]
     return {"students": students}
 
