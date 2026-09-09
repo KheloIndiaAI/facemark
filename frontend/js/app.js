@@ -1312,7 +1312,18 @@ function openStudentDetail(studentId) {
             </div>
             <div style="flex:1;min-width:220px">
                 <div class="detail-grid">
-                    ${line('NSRS ID', p.roll_no)}
+                    <div><span class="ck">NSRS ID</span>
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                            <span${isPlaceholderId(p.roll_no)
+                                ? ' style="opacity:.65;font-style:italic"' : ''
+                            }>${Charts.esc(rollLabel(p.roll_no))}</span>
+                            <button class="btn btn-secondary"
+                                style="min-height:26px;padding:0 8px;font-size:11px"
+                                data-set-nsrs data-student-id="${p.id}"
+                                data-current="${Charts.esc(p.roll_no || '')}"
+                                data-name="${Charts.esc(p.name || '')}">
+                                ${isPlaceholderId(p.roll_no) ? 'Set' : 'Change'}</button>
+                        </div></div>
                     ${line('Role', p.role)}
                     ${line('Gender', p.gender)}
                     ${line('Sport', p.sport)}
@@ -1344,6 +1355,41 @@ async function downloadStudentPhoto(url, filename) {
         setTimeout(() => URL.revokeObjectURL(href), 10000);
     } catch (err) {
         showToast('Could not download', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+/* A signup has to fill roll_no with something - the column is unique and NOT
+   NULL - so it gets PEND-xxxxxxxx. That is a placeholder, not an NSRS ID, and
+   showing it verbatim put an official-looking code next to somebody's name
+   that nobody could look up or correct. */
+function isPlaceholderId(roll) {
+    return !roll || String(roll).startsWith('PEND-');
+}
+
+function rollLabel(roll) {
+    return isPlaceholderId(roll) ? 'NSRS ID not set' : roll;
+}
+
+async function setNsrsId(studentId, current, name) {
+    const next = window.prompt(
+        `NSRS ID for ${name}.\n\nThis is the official Khelo India identifier. `
+        + `Leave blank to cancel.`, isPlaceholderId(current) ? '' : current);
+    if (next === null) return;
+    const val = next.trim();
+    if (!val) return;
+    try {
+        const fd = new FormData();
+        fd.append('roll_no', val);
+        await api.postForm(`/api/people/${studentId}`, fd, 'PATCH');
+        showToast('NSRS ID set', `${name} is now ${val}.`, 'success');
+        closeModal();
+        renderStudents();
+    } catch (err) {
+        // A duplicate is the likely failure and worth naming: two people cannot
+        // share an NSRS ID, and the server's unique constraint says so.
+        showToast('Could not set it',
+                  (err && err.message) || 'That ID may already belong to somebody.',
+                  'error');
     }
 }
 
@@ -1399,7 +1445,9 @@ function drawStudents(students) {
                         style="border:0;background:none;padding:0;font:inherit;color:inherit;cursor:pointer;text-align:left">
                     ${Charts.esc(s.name)}</button>
                 <div class="student-meta">
-                    <span class="student-roll">${s.roll_no}</span>
+                    <span class="student-roll"${isPlaceholderId(s.roll_no)
+                        ? ' style="opacity:.65;font-style:italic"' : ''
+                    }>${Charts.esc(rollLabel(s.roll_no))}</span>
                     <span title="Days marked present">${s.total_present || 0} present</span>
                 </div>
                 <div class="student-meta" style="margin-top: 6px; gap: 6px; display: flex; flex-wrap: wrap; align-items: center;">
@@ -2524,6 +2572,12 @@ document.addEventListener('click', (e) => {
 
     // Downloading is its own thing - it carries a url and a filename, not a
     // student id - so it is matched before the id-shaped buttons below.
+    const nsrs = e.target.closest('[data-set-nsrs]');
+    if (nsrs) {
+        e.preventDefault();
+        return setNsrsId(nsrs.dataset.studentId, nsrs.dataset.current, nsrs.dataset.name);
+    }
+
     const dl = e.target.closest('[data-download-photo]');
     if (dl) {
         e.preventDefault();

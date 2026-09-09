@@ -1071,6 +1071,21 @@ async def enroll_pose_check(
                 "face_px": round(size), "yaw": yaw, "pitch": pitch,
                 "box": [round(v, 1) for v in f.box],
                 "landmarks": _landmarks_payload(f)}
+    # Said BEFORE recording, because it cannot be fixed afterwards. The clip
+    # gets its several angles from the turn prompts; what it cannot manufacture
+    # is a level camera, and the enrolment photo comes out of these frames. A
+    # phone at chest height puts the lens under the chin and every frame is an
+    # up-nose shot - which is exactly the picture this was reported for.
+    # Only while FRAMING, never mid-sequence. base_yaw is set once a baseline
+    # exists, which is exactly when the turn prompts start asking for angles -
+    # and a step that says "look up" must not be refused for looking up.
+    if base_yaw is None and abs(pitch) > config.MAX_PORTRAIT_PITCH:
+        return {"ok": False, "reason": "pitch",
+                "message": ("Hold the phone at eye level" if pitch < 0
+                            else "Lower the phone to eye level"),
+                "face_px": round(size), "yaw": yaw, "pitch": pitch,
+                "box": [round(v, 1) for v in f.box],
+                "landmarks": _landmarks_payload(f)}
 
     dy = yaw - (base_yaw if base_yaw is not None else 0.0)
     dp = pitch - (base_pitch if base_pitch is not None else 0.0)

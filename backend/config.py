@@ -472,6 +472,13 @@ TILED_DETECTION = False            # Disabled to prevent tile-boundary cuts and 
 TILE_SIZE = 1280                   # tile dimension in pixels
 TILE_OVERLAP = 0.15                # fractional overlap between tiles
 
+# How far from level the camera may be before the framing guide asks the person
+# to raise it. A phone at chest height puts the lens under the chin: every frame
+# of the clip is an up-nose shot, and the enrolment photo can only ever be the
+# least bad of them. 18 degrees is generous - it passes a normal hand-held angle
+# and catches the waist-height hold that produces those pictures.
+MAX_PORTRAIT_PITCH = float(os.environ.get("FACEMARK_MAX_PORTRAIT_PITCH", "18"))
+
 # --- retention ---------------------------------------------------------------
 # How long an undecided or refused registration is kept before it is forgotten,
 # face templates included. These are mostly minors, and a face held for somebody

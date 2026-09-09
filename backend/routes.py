@@ -328,6 +328,13 @@ async def update_person(student_id: int, request: Request,
     if not sets:
         return {"ok": True, "updated": 0}
     params.append(student_id)
-    with database.connect() as conn:
-        conn.execute(f"UPDATE students SET {', '.join(sets)} WHERE id = ?", params)
+    try:
+        with database.connect() as conn:
+            conn.execute(f"UPDATE students SET {', '.join(sets)} WHERE id = ?", params)
+    except database.IntegrityError:
+        # roll_no is unique, and setting a real NSRS ID on a self-registered
+        # athlete is now a thing somebody does by hand - so typing one that
+        # already belongs to another person is a normal mistake, not a 500.
+        raise HTTPException(
+            409, "That NSRS ID already belongs to somebody else at this centre.")
     return {"ok": True, "updated": len(sets)}

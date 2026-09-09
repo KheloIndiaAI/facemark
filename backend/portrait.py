@@ -57,7 +57,11 @@ def _score(quality: dict, face) -> float:
         yaw = pitch = 45.0
     blur = float(quality.get("blur_score") or 0.0)
     area = float(face.width * face.height)
-    return (-2.0 * yaw) + (-1.0 * pitch) + (12.0 * min(blur, 400.0) / 400.0) \
+    # Yaw and pitch weigh the same. "Looking forward" is both axes, and a face
+    # tilted back far enough to show the underside of a chin is not a portrait
+    # whichever axis put it there. Pitch used to count half, which let a clip
+    # shot from waist height win on yaw alone.
+    return (-2.0 * yaw) + (-2.0 * pitch) + (12.0 * min(blur, 400.0) / 400.0) \
         + (4.0 * min(area, 200_000.0) / 200_000.0)
 
 
