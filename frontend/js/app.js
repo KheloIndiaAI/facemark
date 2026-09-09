@@ -538,7 +538,14 @@ const api = {
     // third argument was silently ignored and every toggle POSTed to a route
     // that only accepts PATCH, which is a 405 the caller reports as a generic
     // failure.
-    async postForm(endpoint, formData, method = 'POST') {
+    /* `quiet` suppresses the error toast and only throws.
+     *
+     * Right for a button somebody pressed: they deserve to know it failed.
+     * Wrong for a POLL - the camera guide calls this several times a second,
+     * so one bad minute stacks dozens of identical toasts over the very screen
+     * being used. Those loops already count failures and report a run of them
+     * once; they just had no way to stop this layer shouting first. */
+    async postForm(endpoint, formData, method = 'POST', quiet = false) {
         try {
             const res = await fetch(endpoint, {
                 method,
@@ -549,7 +556,7 @@ const api = {
             if (!res.ok) throw new Error(data.detail || 'API Error');
             return data;
         } catch (err) {
-            if (err.message !== 'Unauthorized') showToast('Error', err.message, 'error');
+            if (!quiet && err.message !== 'Unauthorized') showToast('Error', err.message, 'error');
             throw err;
         }
     },
