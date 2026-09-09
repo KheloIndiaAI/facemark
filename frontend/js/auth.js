@@ -301,6 +301,10 @@ function suFace() {
     openClipCapture({
         title: 'Record your face',
         intro: 'Follow the prompts and turn your head as asked.',
+        // The framing guide polls a route that needs to know this caller was
+        // invited. An applicant has no session - the account is what they are
+        // applying for - so the signup token stands in for one.
+        signupToken: suState.token,
         onClip: async (file, ui) => {
             ui.status('Checking\u2026');
             try {

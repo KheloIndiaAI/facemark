@@ -2809,6 +2809,10 @@ async function openClipCapture(opts) {
             const fd = new FormData();
             fd.append('frame', blob, 'f.jpg');
             fd.append('step', 'centre');
+            // Self-registration has no session, so it passes its signup token
+            // instead. Without this every poll is a 403 and the failure counter
+            // reports "Lost connection" over a perfectly good camera.
+            if (opts.signupToken) fd.append('signup_token', opts.signupToken);
             const r = await api.postForm('/api/enroll/pose-check', fd);
             if (!state.alive) return;
 

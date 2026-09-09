@@ -988,13 +988,28 @@ def _landmarks_payload(f) -> list:
 
 @app.post("/api/enroll/pose-check")
 async def enroll_pose_check(
+    request: Request,
     frame: UploadFile = File(...),
     step: str = Form(...),
     base_yaw: Optional[float] = Form(None),
     base_pitch: Optional[float] = Form(None),
-    user: dict = Depends(auth.require_staff),
+    signup_token: Optional[str] = Form(None),
 ):
     """Live guidance for one frame of guided enrolment.
+
+    Reachable by STAFF, or by somebody part-way through self-registration who
+    has a live signup token. Both are guided by this and neither can be left
+    out: a coach enrolling an athlete has a session, and an applicant recording
+    their own face has no account at all - by definition, since the account is
+    what they are applying for.
+
+    Guarding it with require_staff alone made every frame of the signup capture
+    403, and the frontend's failure counter turned that into "Lost connection"
+    over a working camera.
+
+    It stores nothing and answers only about the frame it was handed, so the
+    bar is "invited to be here", not "who are you". Left open it would be a
+    free face detector for anybody who found the URL.
 
     The phone-style enrolment people expect does not ask you to press a button
     and trust that you turned your head - it watches, tells you what is wrong,
@@ -1012,6 +1027,7 @@ async def enroll_pose_check(
     Nothing is stored here. The frame is examined and discarded; only the
     frames the client keeps are ever enrolled.
     """
+    _pose_check_caller(request, signup_token)
     data = await frame.read()
     try:
         img = utils.decode_image(data)
@@ -2113,6 +2129,23 @@ def approval_coach_options(centre_id: int,
 # somebody else's pending account or read a centre's coach roster uninvited.
 # What comes out is INERT: it cannot sign in and its face is excluded from the
 # gallery until a coach approves it.
+
+
+def _pose_check_caller(request: Request, signup_token: Optional[str]) -> str:
+    """Refuse anybody who is neither staff nor mid-signup. Returns which."""
+    token = auth._token_from_request(request)
+    if token:
+        user = auth.resolve_token(token)
+        if user and user.get("role") in ("coach", "super_admin"):
+            return "staff"
+    if signup_token:
+        try:
+            signup_mod.resolve_signup(signup_token)
+            return "signup"
+        except ValueError:
+            pass
+    raise HTTPException(
+        403, "Sign in, or start a registration, before using the camera guide.")
 
 
 def _client_ip(request: Request) -> str:
