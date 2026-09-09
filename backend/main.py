@@ -1583,10 +1583,16 @@ async def add_session_capture(
 ):
     """Add one capture to a register. Video or photo.
 
-    Video runs the parallax liveness check. A photo cannot be checked at all -
-    a still frame is exactly what a replay reproduces - so it is recorded as
-    `not_checked` rather than pretended about. That is acceptable here only
-    because a human submits the register under their own face afterwards.
+    A VIDEO IS REQUIRED. A still cannot be checked for liveness at all - a
+    photograph of a photograph is exactly what a still reproduces - and it used
+    to be accepted, marked `not_checked`, and allowed to write drafts anyway.
+    The defence was that a coach signs the register afterwards. That is true,
+    and it is not the same as checking: the signature says a human was present,
+    not that the people in the picture were.
+
+    Measured, on ten flat replays built by moving a photograph in front of the
+    lens: none were accepted, with 2.1x separation from genuine clips. The
+    parallax check earns its place, so the way round it is closed.
 
     Capturing again ADDS to the session. Recall is 100% at 50-pixel faces and
     23% at 24 pixels, so one frame across a hall loses most of a large group -
@@ -1605,6 +1611,13 @@ async def add_session_capture(
     is_video = (kind or "").lower() == "video" or filename.endswith(
         (".webm", ".mp4", ".mkv", ".mov", ".m4v")
     )
+
+    if not is_video:
+        raise HTTPException(
+            400,
+            "Attendance needs a short video, not a photo. A still cannot be "
+            "checked for liveness - record a few seconds while moving the "
+            "phone slightly.")
 
     detector = get_detector()
     verdict = "not_checked"

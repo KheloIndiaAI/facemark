@@ -477,7 +477,7 @@ function handleRoute() {
         initRegisterPage();
     }
     else if (hash === '/students') {
-        title.textContent = 'Athlete Directory';
+        title.textContent = 'Directory';
         actions.innerHTML = `
             <button class="btn btn-primary" onclick="openRegisterModal()">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
@@ -1426,7 +1426,7 @@ async function renderStudents() {
         const title = document.getElementById('page-title');
         if (title) {
             title.textContent = studentRole === 'coach'
-                ? 'Coaches' : 'Athlete Directory';
+                ? 'Coaches' : 'Athletes';
         }
 
         document.getElementById('student-search').addEventListener('input', (e) => {
@@ -1791,6 +1791,7 @@ async function executeDeleteStudent(id) {
 --------------------------------------------------------------------------- */
 
 let regSession = null;
+let regCounts = { present: 0, total: 0 };
 
 async function initRegisterPage() {
     const btn = document.getElementById('reg-capture-btn');
@@ -2094,6 +2095,11 @@ async function regLoad() {
     const data = await api.get(`/api/sessions/${regSession.id}`);
     regSession = data.session;
 
+    // Kept for the submit confirmation, which has to say what it is about to
+    // record. regLoad already has the authoritative counts from the server;
+    // recounting them from the DOM would be a second source of the same truth.
+    regCounts = { present: data.present_count, total: data.roster_count };
+
     const meta = document.getElementById('reg-session-meta');
     if (meta) {
         meta.textContent =
@@ -2191,6 +2197,8 @@ function regCapture() {
     if (!regSession) return;
     openClipCapture({
         title: 'Capture the group',
+        // No turn prompts: this is a room, not one person being enrolled.
+        guided: false,
         intro: 'Point the camera at the group and record a few seconds, moving the '
              + 'phone slightly. Capture again for anyone missed.',
         onClip: async (file, ui) => {
@@ -2229,8 +2237,36 @@ let regAttempt = 1;
 
 function regSubmit() {
     if (!regSession) return;
+
+    // Submitting is the irreversible step: it turns drafts into attendance and
+    // closes the register. Until now the only thing between a stray tap and
+    // that was the face check, which reads as a formality rather than a
+    // decision. Say what is about to be recorded, and let it be cancelled.
+    const present = regCounts.present || 0;
+    const total = regCounts.total || 0;
+    const absent = Math.max(0, total - present);
+    if (!window.confirm(
+            `Submit today's register?
+
+`
+            + `Present: ${present}
+`
+            + `Absent:  ${absent}
+`
+            + `Total:   ${total}
+
+`
+            + `This records attendance for ${present} `
+            + `${present === 1 ? 'athlete' : 'athletes'} and closes the register `
+            + `for today. It cannot be undone from here.`)) {
+        return;
+    }
+
     regAttempt = 1;
     openClipCapture({
+        // One face against one enrolled record. Several views were never needed
+        // here, and the prompts contradicted this screen's own instruction.
+        guided: false,
         title: 'Confirm it is you',
         intro: 'Record a few seconds of your own face to sign this register. '
              + 'Move the phone slightly while recording.',
@@ -2655,6 +2691,11 @@ document.addEventListener('click', (e) => {
 // room, where nobody is going to perform a guided sequence, and the clip is a
 // means to a register rather than a permanent identity record.
 const CLIP_MS_ATTENDANCE = 2000;
+
+// The unguided clip. Longer than the legacy attendance capture because the
+// parallax check has to find depth in it without any head movement to help -
+// all it gets is the hand holding the phone.
+const CLIP_MS_PLAIN = 3000;
 
 // Registration does NOT record for a fixed duration. A clock was tried first -
 // ten seconds, on the reasoning that more elapsed time gives a person more
@@ -3121,7 +3162,9 @@ async function openClipCapture(opts) {
         state.recording = true;
         shutter.disabled = true;
         shutter.classList.add('recording');
-        ui.status('Recording - follow the on-screen prompts.');
+        ui.status(opts.guided === false
+            ? 'Recording - move the phone slightly.'
+            : 'Recording - follow the on-screen prompts.');
 
         // The pre-recording framing poll and the guided sequence's own poll
         // would otherwise both be hitting pose-check for the same video at
@@ -3139,11 +3182,21 @@ async function openClipCapture(opts) {
         // camera except closing and reopening the whole modal.
         let file = null;
         try {
-            const control = { done: false };
-            [file] = await Promise.all([
-                cam.recordClip(GUIDED_CAPTURE_MAX_MS, null, control),
-                runGuidedSequence(control),
-            ]);
+            if (opts.guided === false) {
+                // A group across a room, or one face being verified against one
+                // record. Neither wants "turn left": nobody in a hall is
+                // following prompts, and a 1:1 check needs one view. Parallax
+                // comes from moving the phone, which the copy asks for.
+                promptBox.classList.add('hidden');
+                ui.status('Recording - move the phone slightly.');
+                file = await cam.recordClip(opts.clipMs || CLIP_MS_PLAIN, setRing);
+            } else {
+                const control = { done: false };
+                [file] = await Promise.all([
+                    cam.recordClip(GUIDED_CAPTURE_MAX_MS, null, control),
+                    runGuidedSequence(control),
+                ]);
+            }
         } catch (err) {
             console.error('Guided capture failed:', err);
             file = null;
