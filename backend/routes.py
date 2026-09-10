@@ -279,7 +279,8 @@ def list_people(
     q = (
         "SELECT s.id, s.name, s.roll_no, s.photo_path, s.role, s.gender, s.sport, "
         "s.phone, s.centre_id, c.name AS centre_name, "
-        "(SELECT COUNT(*) FROM attendance a WHERE a.student_id = s.id) AS total_present, "
+        "(SELECT COUNT(*) FROM attendance a WHERE a.student_id = s.id "
+        "        AND a.status = 'confirmed') AS total_present, "
         "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id) AS templates "
         "FROM students s LEFT JOIN centres c ON c.id = s.centre_id WHERE 1=1"
     )

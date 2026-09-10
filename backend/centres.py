@@ -207,14 +207,16 @@ def centre_detail(centre_id: int) -> Optional[dict]:
             (centre_id,),
         ).fetchall()]
         centre["attendance_days"] = conn.execute(
-            "SELECT COUNT(DISTINCT date) FROM attendance WHERE centre_id = ?", (centre_id,)
+            "SELECT COUNT(DISTINCT date) FROM attendance "
+            "WHERE centre_id = ? AND status = 'confirmed'", (centre_id,)
         ).fetchone()[0]
         centre["attendance_records"] = conn.execute(
-            "SELECT COUNT(*) FROM attendance WHERE centre_id = ?", (centre_id,)
+            "SELECT COUNT(*) FROM attendance "
+            "WHERE centre_id = ? AND status = 'confirmed'", (centre_id,)
         ).fetchone()[0]
         centre["recent_attendance"] = [dict(r) for r in conn.execute(
             "SELECT a.date, COUNT(*) AS present FROM attendance a "
-            "WHERE a.centre_id = ? GROUP BY a.date ORDER BY a.date DESC LIMIT 14",
+            "WHERE a.centre_id = ? AND a.status = 'confirmed' GROUP BY a.date ORDER BY a.date DESC LIMIT 14",
             (centre_id,),
         ).fetchall()]
     centre["athlete_count"] = len(centre["athletes"])

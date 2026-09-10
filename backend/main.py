@@ -19,7 +19,7 @@ import csv
 import io
 import logging
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -503,14 +503,20 @@ async def process_attendance(
     All three are the same detector at different confidences. YOLO and SCRFD
     were removed with the licence migration; naming them here outlived them.
     """
+    # Stated as a statement, not only in the signature. Depends() runs on HTTP
+    # dispatch; this function was also being called in-process by
+    # process_attendance_video, where the dependency never executed and every
+    # coach reached the confirmed-attendance writer this guard withholds.
+    auth.assert_super_admin(user)
+
     data = await photo.read()
     try:
         img = utils.decode_image(data)
     except ValueError:
         raise HTTPException(400, "Uploaded file is not a valid image")
 
-    day = date_str or config.today_str()
-    thr = threshold if threshold is not None else config.MATCH_THRESHOLD
+    day = _validated_day(date_str)
+    thr = _validated_threshold(threshold)
 
     # A coach always marks for their own centre regardless of what was posted.
     active_centre = auth.scope_centre(user, centre_id) or user.get("centre_id")
@@ -833,10 +839,11 @@ class _MemoryUpload:
     correct and already tested.
     """
 
-    def __init__(self, data: bytes, filename: str = "frame.jpg"):
+    def __init__(self, data: bytes, filename: str = "frame.jpg",
+                 content_type: str = "image/jpeg"):
         self._data = data
         self.filename = filename
-        self.content_type = "image/jpeg"
+        self.content_type = content_type
 
     async def read(self, size: int = -1) -> bytes:  # noqa: ARG002 - API shape
         return self._data
@@ -872,6 +879,73 @@ async def process_attendance_video(
     data = await video.read()
     if not data:
         raise HTTPException(400, "Empty upload")
+
+    # A COACH GOES THROUGH THE REGISTER. This route used to call
+    # process_attendance as a plain function, which meant that route's
+    # Depends(require_super_admin) never ran: any coach reached the
+    # confirmed-attendance writer and wrote straight past the draft, the review
+    # and the signature - "the one thing v1 set out to stop", in its own words.
+    #
+    # Restricting this endpoint to admins would have taken Mark Attendance away
+    # from the coaches whose landing page it is, so the capture goes where the
+    # design says it should: into today's register, as drafts, for the same
+    # coach to review and sign.
+    #
+    # Delegating to the captures route rather than reimplementing it also means
+    # this path inherits its liveness handling, including the `too_far` verdict
+    # for a group across a room - which this endpoint did NOT have, so it was
+    # refusing every group clip on the coach's own landing page.
+    if user.get("role") != "super_admin":
+        day = _validated_day(date_str, back_days=config.SESSION_BACKDATE_DAYS)
+        centre = auth.scope_centre(user, centre_id) or user.get("centre_id")
+        if not centre:
+            raise HTTPException(
+                400, "This account has no centre, so it cannot take attendance")
+        started = time.time()
+        sess = sessions_mod.get_or_create(
+            int(centre), auth.coach_student_id(user), int(user["id"]), day)
+        out = await add_session_capture(
+            session_id=int(sess["id"]),
+            media=_MemoryUpload(data, video.filename or "clip.webm",
+                                content_type="video/webm"),
+            kind="video", threshold=threshold, detection_mode=detection_mode,
+            latitude=latitude, longitude=longitude, accuracy_m=accuracy_m,
+            user=user,
+        )
+        if out.get("ok") is False:
+            return out
+        # The Mark Attendance screen predates the register and reads
+        # `recognized`, `unknown` and `timings`. Rather than leave it broken or
+        # duplicate the capture logic, the register's answer is translated into
+        # the shape that screen already renders - with drafted_to_register set,
+        # so it can say what actually happened: these people are proposed, not
+        # yet present, and the coach still signs the register.
+        drafted = out.get("drafted") or []
+        return {
+            **out,
+            "drafted_to_register": True,
+            "session_id": out.get("session_id"),
+            "newly_marked": out.get("newly_drafted", 0),
+            "recognized_count": out.get("recognized_count", len(drafted)),
+            "recognized": [
+                {
+                    "student_id": d.get("student_id"),
+                    "name": d.get("name"),
+                    "roll_no": d.get("roll_no"),
+                    "similarity": d.get("similarity"),
+                    "confidence": d.get("confidence"),
+                    "face_url": (f"/api/uploads/{d['crop']}" if d.get("crop") else None),
+                    "marked_now": True,
+                }
+                for d in drafted
+            ],
+            "unknown": [],
+            "timings": {"total_ms": int((time.time() - started) * 1000)},
+            "message": (
+                f"{out.get('newly_drafted', 0)} added to today's register as drafts. "
+                "Open Register to review and submit."
+            ),
+        }
 
     result = liveness.analyse(data, get_detector())
 
@@ -1472,6 +1546,89 @@ def _session_or_404(session_id: int) -> dict:
     return sess
 
 
+def _validated_threshold(threshold: Optional[float]) -> float:
+    """The match threshold, kept inside the range it was calibrated over.
+
+    It arrived as a plain form field on the two routes that decide who is
+    recorded present, and was passed to the matcher unchecked. A caller could
+    send 0.0, which makes every face in frame match its nearest gallery entry
+    and writes those matches down as machine recognitions, or 2.0, which matches
+    nobody and quietly produces an empty register. Neither is a setting a client
+    gets to choose; the tunable exists for measurement, not for traffic.
+    """
+    if threshold is None:
+        return config.MATCH_THRESHOLD
+    try:
+        value = float(threshold)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Threshold must be a number")
+    lo, hi = config.MATCH_THRESHOLD_MIN, config.MATCH_THRESHOLD_MAX
+    if not (lo <= value <= hi):
+        raise HTTPException(400, f"Threshold must be between {lo} and {hi}")
+    return value
+
+
+def _validated_day(date_str: Optional[str], *, back_days: Optional[int] = None) -> str:
+    """A real date, not in the future, optionally within a recent window.
+
+    `date_str` arrived as an unvalidated form field on the routes that WRITE
+    attendance, so it decided which day a person was recorded present on and was
+    never checked. Three things went through:
+
+      nonsense    anything at all was stored verbatim; "banana" became a day
+                  with attendance against it, and every date-keyed query then
+                  quietly skipped it.
+      the future  a register could be opened, filled and submitted for a date
+                  that has not happened.
+      the past    attendance could be written for any day in history, which is
+                  the useful direction for anyone falsifying a record.
+
+    back_days=None allows any past date - that is the bulk-import path, which is
+    super-admin only and exists to load real historic registers.
+    """
+    if not date_str:
+        return config.today_str()
+    text = str(date_str).strip()
+    try:
+        day = datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "Date must be written as YYYY-MM-DD")
+    today = config.local_now().date()
+    if day > today:
+        raise HTTPException(400, "Attendance cannot be recorded for a future date")
+    if back_days is not None and (today - day).days > back_days:
+        raise HTTPException(
+            400,
+            f"That date is more than {back_days} day(s) ago. Ask an administrator "
+            f"to record attendance for it.",
+        )
+    return day.isoformat()
+
+
+def _person_in_scope(user: dict, student_id: int) -> dict:
+    """The person, if the caller's centre may act on them. 404 otherwise.
+
+    Scoping the COACH is not the same as scoping the PERSON. Several routes
+    checked who was asking - scope_coach pins a coach to themselves - and then
+    took a student_id straight off the URL without asking whether that person
+    was anything to do with the caller's centre. A coach could therefore tick
+    any of the ~1000 people in the database present on their own register, or
+    attach them to their roster, which both alters that person's record and
+    confirms to the caller that they exist.
+
+    404 rather than 403: existence is part of what is being protected.
+    """
+    person = database.get_student(student_id)
+    if not person:
+        raise HTTPException(404, "No such person")
+    if user.get("role") == "super_admin":
+        return person
+    if person.get("centre_id") is None or \
+            int(person["centre_id"]) != int(user.get("centre_id") or -1):
+        raise HTTPException(404, "No such person")
+    return person
+
+
 def _may_touch(user: dict, sess: dict) -> None:
     """A coach may only work on their own register."""
     if user["role"] == "super_admin":
@@ -1493,8 +1650,15 @@ def open_session(
     if scoped_centre is None:
         raise HTTPException(400, "A centre is required to open a register")
     scoped_coach = auth.scope_coach(user, coach_id)
+    # A coach opens today's register, or one of the last few days if they are
+    # catching up; anything older is an administrator's job. A super admin may
+    # open any past date, which is what the bulk import needs.
+    day = _validated_day(
+        date_str,
+        back_days=None if user["role"] == "super_admin" else config.SESSION_BACKDATE_DAYS,
+    )
     sess = sessions_mod.get_or_create(
-        scoped_centre, scoped_coach, int(user["id"]), date_str
+        scoped_centre, scoped_coach, int(user["id"]), day
     )
     return {"ok": True, "session": sess}
 
@@ -1689,7 +1853,7 @@ async def add_session_capture(
     active_centre = sess["centre_id"]
     geo = centres_mod.evaluate_location(active_centre, latitude, longitude)
 
-    thr = threshold if threshold is not None else config.MATCH_THRESHOLD
+    thr = _validated_threshold(threshold)
     det_mode = detection_mode or config.DETECTION_MODE
 
     # WHOLE gallery, filtered afterwards - see sessions.route_recognised.
@@ -1794,7 +1958,30 @@ async def submit_session(
     if sess["status"] != "draft":
         raise HTTPException(409, "This register has already been submitted")
 
-    who = auth.coach_student_id(user)
+    # A super admin has no person record of their own, so coach_student_id
+    # raised 400 and the sweep register they had just opened and captured into
+    # could never be submitted at all - opened, filled, and stuck. There is no
+    # face to check against, so the register is submitted and RECORDED as
+    # unverified, which is the same treatment a coach gets when the check fails
+    # and lands it on the oversight page for exactly this reason.
+    who = None
+    if user.get("student_id"):
+        who = auth.coach_student_id(user)
+    elif user["role"] != "super_admin":
+        who = auth.coach_student_id(user)      # raises, with the right message
+
+    if who is None:
+        out = sessions_mod.submit(session_id, False, 0.0, "no_person_record")
+        log.info("Register %s submitted unverified by super admin %s "
+                 "(no person record to check a face against)",
+                 session_id, user["id"])
+        return {
+            "ok": True, "verified": False, "score": 0.0,
+            "reason": "Submitted without a face check: this administrator "
+                      "account has no enrolled person record.",
+            **(out or {}),
+        }
+
     data = await clip.read()
     if not data:
         raise HTTPException(400, "Empty upload")
@@ -1855,6 +2042,7 @@ def toggle_roster(
     """Tick or untick one person by hand. Drafts only."""
     sess = _session_or_404(session_id)
     _may_touch(user, sess)
+    _person_in_scope(user, student_id)
     if sess["status"] != "draft":
         raise HTTPException(409, "This register has already been submitted")
     action = sessions_mod.set_present(
@@ -1929,8 +2117,7 @@ def write_roster(
 def link_athlete(coach_id: int, athlete_id: int,
                  user: dict = Depends(auth.require_staff)):
     scoped = auth.scope_coach(user, coach_id)
-    if not database.get_student(athlete_id):
-        raise HTTPException(404, "No such person")
+    _person_in_scope(user, athlete_id)
     try:
         created = sessions_mod.link_athlete(int(scoped), athlete_id)
     except ValueError as e:

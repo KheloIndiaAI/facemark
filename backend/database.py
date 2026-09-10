@@ -887,9 +887,24 @@ def mark_attendance(
 
 
 def attendance_for_day(day: str, centre_id: Optional[int] = None) -> List[dict]:
+    """Who was present on this day - ONE row per person.
+
+    An athlete coached by two people attends two sessions in a day and both
+    rows are real attendance: that is why _swap_attendance_uniqueness
+    deliberately moved uniqueness from (student, day) to (student, session).
+    Correct in the table, wrong on this screen - the day's register and the CSV
+    drawn from it listed the same child twice, which reads as a duplicate and
+    inflates any count taken from it.
+
+    So the constraint stays off and the READ collapses instead. DISTINCT ON
+    keeps the earliest record of the day, which is the one that answers "were
+    they here"; the extra sessions are still in the table for anyone auditing
+    a single register.
+    """
     with connect() as conn:
         rows = conn.execute(
-            "SELECT a.id, a.student_id, a.date, a.confidence, a.image_path, a.marked_at, "
+            "SELECT DISTINCT ON (a.student_id) "
+            "a.id, a.student_id, a.date, a.confidence, a.image_path, a.marked_at, "
             "a.latitude, a.longitude, a.accuracy_m, a.geo_status, a.distance_m, a.centre_id, "
             "s.name, s.roll_no, s.photo_path, s.role, s.sport, c.name AS centre_name "
             "FROM attendance a JOIN students s ON s.id = a.student_id "
@@ -898,10 +913,14 @@ def attendance_for_day(day: str, centre_id: Optional[int] = None) -> List[dict]:
             # are not attendance and must not appear in one.
             "WHERE a.status = 'confirmed' AND a.date = ?"
             + (" AND a.centre_id = ?" if centre_id is not None else "") +
-            " ORDER BY a.marked_at DESC",
+            # DISTINCT ON needs the deduplicated column to lead the ordering;
+            # marked_at then decides which of the day's rows survives.
+            " ORDER BY a.student_id, a.marked_at ASC",
             (day,) if centre_id is None else (day, centre_id),
         ).fetchall()
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        out.sort(key=lambda r: r.get("marked_at") or "", reverse=True)
+        return out
 
 
 def student_attendance_history(student_id: int) -> List[dict]:

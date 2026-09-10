@@ -1006,10 +1006,22 @@ function initMarkPage() {
                 // The toast fires whether or not the panel is still on screen,
                 // so a coach who navigated away still learns the mark landed.
                 const shown = renderMarkResults(data);
-                showToast('Success',
-                          `${data.recognized_count} student(s) marked present`
-                          + (shown ? '' : ' - reopen Mark Attendance to see the summary'),
-                          'success');
+                // A coach's capture goes into today's register as DRAFTS now -
+                // it always should have; writing confirmed attendance straight
+                // from a clip skipped the review and the signature. Say so,
+                // rather than reporting people "marked present" when what is
+                // waiting is a register somebody still has to sign.
+                if (data.drafted_to_register) {
+                    showToast('Added to today’s register',
+                              `${data.newly_marked || 0} draft(s) · review and submit in Register`
+                              + (shown ? '' : ' - reopen Mark Attendance to see the summary'),
+                              'success');
+                } else {
+                    showToast('Success',
+                              `${data.recognized_count} student(s) marked present`
+                              + (shown ? '' : ' - reopen Mark Attendance to see the summary'),
+                              'success');
+                }
             }, 300);
         } catch (err) {
             clearInterval(progressTimer);

@@ -356,10 +356,23 @@ def current_user(request: Request) -> dict:
     return user
 
 
-def require_super_admin(user: dict = Depends(current_user)) -> dict:
-    if user["role"] != "super_admin":
+def assert_super_admin(user: dict) -> dict:
+    """The same rule as require_super_admin, callable as a plain function.
+
+    A FastAPI dependency only runs when FastAPI dispatches the request. One
+    route called another route's function DIRECTLY - process_attendance_video
+    calling process_attendance - and the Depends(require_super_admin) on the
+    callee simply did not execute, handing every coach the confirmed-attendance
+    writer that guard exists to withhold. A route that may be called in-process
+    needs a check that is a statement, not a signature.
+    """
+    if user.get("role") != "super_admin":
         raise HTTPException(403, "This action is restricted to super admins")
     return user
+
+
+def require_super_admin(user: dict = Depends(current_user)) -> dict:
+    return assert_super_admin(user)
 
 
 def scope_centre(user: dict, requested: Optional[int] = None) -> Optional[int]:

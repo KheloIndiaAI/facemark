@@ -63,14 +63,23 @@ def expire_drafts() -> int:
         if not stale:
             return 0
         marks = ",".join("?" for _ in stale)
+        # Only the sessions still in 'draft' at this moment - one subquery, no
+        # second parameter list.
         conn.execute(
-            f"DELETE FROM attendance WHERE status = 'draft' AND session_id IN ({marks})",
+            f"DELETE FROM attendance WHERE status = 'draft' "
+            f"  AND session_id IN (SELECT id FROM attendance_sessions "
+            f"                      WHERE id IN ({marks}) AND status = 'draft')",
             stale)
-        conn.execute(
-            f"UPDATE attendance_sessions SET status = 'expired' WHERE id IN ({marks})",
+        cur = conn.execute(
+            f"UPDATE attendance_sessions SET status = 'expired' "
+            f" WHERE id IN ({marks}) AND status = 'draft'",
             stale)
-    log.info("Expired %d register(s) nobody submitted.", len(stale))
-    return len(stale)
+        expired = int(cur.rowcount or 0)
+        if expired != len(stale):
+            log.info("%d of %d stale registers were submitted while expiring; "
+                     "left alone.", len(stale) - expired, len(stale))
+    log.info("Expired %d register(s) nobody submitted.", expired)
+    return expired
 
 
 def purge_abandoned_signups() -> Dict[str, int]:

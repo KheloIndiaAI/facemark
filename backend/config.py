@@ -163,6 +163,14 @@ EMBED_SIZE = 112               # SFace's own aligner produces 112x112
 # check. Wrong-centre matches are zero at every threshold tested, so the wider
 # gallery is not what the threshold is defending against - strangers are.
 MATCH_THRESHOLD = 0.570
+# The range a caller-supplied threshold is allowed to sit in. The routes that
+# write attendance took this as a form field and passed it to the matcher
+# unchecked: 0.0 makes every face in frame match its nearest gallery entry and
+# records those as machine recognitions, 2.0 matches nobody. The bounds are
+# deliberately wide enough for real tuning and narrow enough that neither of
+# those is reachable from a request.
+MATCH_THRESHOLD_MIN = 0.30
+MATCH_THRESHOLD_MAX = 0.95
 SMALL_FACE_PX = 32             # faces narrower than this clear a higher bar
 SMALL_FACE_THRESHOLD_BUMP = 0.05
 
@@ -593,6 +601,19 @@ CORS_ORIGINS = [
 # --- Login throttling --------------------------------------------------------
 # Two separate problems, one guard.
 #
+# --- Which day a register may be opened for ----------------------------------
+# `date_str` was an unvalidated form field on the routes that WRITE attendance,
+# so it decided the day a person was recorded present on and was never checked:
+# a future date, a date years past, or a string that is not a date at all were
+# all accepted and stored verbatim. The past is the direction that matters -
+# writing attendance for a day that has already been reviewed is what
+# falsifying a record looks like.
+#
+# A coach may still catch up on a day or two; anything older is an
+# administrator's job. A super admin has no limit, because the bulk import
+# loads real historic registers.
+SESSION_BACKDATE_DAYS = 2
+
 # Brute force: nothing limited attempts, so a weak password fell to a script.
 #
 # CPU exhaustion: verifying a password is 600,000 PBKDF2 rounds, which is

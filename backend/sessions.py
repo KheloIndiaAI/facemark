@@ -231,6 +231,25 @@ def get_or_create(centre_id: int, coach_id: Optional[int], opened_by: int,
     with connect() as conn:
         row = _find(conn, centre_id, coach_id, day)
         if row:
+            # AN EXPIRED REGISTER IS NOT A CLOSED ONE. The sweep above closes a
+            # draft nobody submitted, and this returned that row as-is - so a
+            # coach who came back to a register that had timed out got a session
+            # in status 'expired', which every caller reads as "not draft" and
+            # reports as "already submitted". They were locked out of their own
+            # day with a message that was not true, and could not open another
+            # because (centre, coach, date) is unique.
+            #
+            # Asking for the register IS the intent to use it, so reopen it.
+            # Submitted stays submitted: that one really is finished.
+            if row["status"] == "expired":
+                conn.execute(
+                    "UPDATE attendance_sessions SET status = 'draft', expires_at = ? "
+                    " WHERE id = ? AND status = 'expired'",
+                    (expires, int(row["id"])),
+                )
+                log.info("Reopened expired register %s for coach %s on %s",
+                         row["id"], coach_id, day)
+                row = _find(conn, centre_id, coach_id, day)
             return dict(row)
         # ON CONFLICT cannot be used here: the uniqueness is two partial
         # indexes, and which one applies depends on coach_id being NULL. So the
@@ -350,6 +369,15 @@ def draft(session_id: int, student_id: int, day: str, confidence: float,
     route, where a name appears on a roster and somebody ticks it. Enforced at
     the write rather than in each caller, because there are three of them and
     the cost of missing one is an unapproved person marked present.
+
+    AND REFUSES A REGISTER THAT IS NO LONGER OPEN. Callers checked the status
+    first and then wrote - two statements, with a gap. A capture takes seconds
+    to recognise a group, and a submit landing inside that gap left draft rows
+    attached to a submitted register: never confirmed, never shown, silently
+    losing the attendance of everyone in that capture. Making the session's
+    status part of the INSERT closes the gap for every caller at once, because
+    the row cannot appear unless the register is open at the moment it is
+    written.
     """
     with connect() as conn:
         if not _is_active_person(conn, student_id):
@@ -358,25 +386,34 @@ def draft(session_id: int, student_id: int, day: str, confidence: float,
             "INSERT INTO attendance (student_id, date, confidence, image_path, "
             " marked_at, centre_id, latitude, longitude, accuracy_m, geo_status, "
             " distance_m, marked_by, session_id, capture_id, status, origin) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?) "
+            "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',? "
+            "  WHERE EXISTS (SELECT 1 FROM attendance_sessions "
+            "                 WHERE id = ? AND status = 'draft') "
             "ON CONFLICT (student_id, session_id) DO NOTHING",
             (student_id, day, confidence, image_path, config.now_stamp(),
              centre_id, latitude, longitude, accuracy_m, geo_status, distance_m,
-             marked_by, session_id, capture_id, origin),
+             marked_by, session_id, capture_id, origin, session_id),
         )
         return cur.rowcount > 0
 
 
 def set_present(session_id: int, student_id: int, present: bool, day: str,
                 centre_id: Optional[int], marked_by: Optional[int]) -> str:
-    # NOTE: adding goes through draft(), which refuses a non-active person.
-    # Removing deliberately does not check - if a row exists for somebody who
-    # has since been rejected, taking it off the register must still work.
     """Toggle someone in the register by hand. Returns 'added' | 'removed' | 'noop'.
 
     Only ever touches DRAFT rows. A confirmed row belongs to a submitted
     register and is not editable here - re-opening a submitted register is a
     different operation and deliberately does not exist yet.
+
+    THE ACTIVE-PERSON CHECK IS DONE HERE, not delegated. A note above this
+    function used to say "adding goes through draft(), which refuses a
+    non-active person" - it does not, and never did: the branch below writes its
+    own INSERT. So a pending applicant, or somebody already rejected, could be
+    ticked present by hand and then confirmed by submitting the register, which
+    is precisely what _is_active_person exists to prevent.
+
+    Removing deliberately does NOT check - if a row exists for somebody who has
+    since been rejected, taking it off the register must still work.
     """
     with connect() as conn:
         row = conn.execute(
@@ -388,14 +425,20 @@ def set_present(session_id: int, student_id: int, present: bool, day: str,
                 return "noop"
             if row:
                 return "noop"       # already confirmed - leave it alone
-            conn.execute(
+            if not _is_active_person(conn, student_id):
+                return "noop"
+            cur = conn.execute(
                 "INSERT INTO attendance (student_id, date, confidence, image_path, "
                 " marked_at, centre_id, marked_by, session_id, status, origin) "
-                "VALUES (?,?,?,?,?,?,?,?,'draft','coach_added')",
+                "VALUES (?,?,?,?,?,?,?,?,'draft','coach_added') "
+                # Two coaches ticking the same person at once raced the SELECT
+                # above and the loser got a UniqueViolation, which surfaces as a
+                # 500. The row they both wanted exists either way.
+                "ON CONFLICT (student_id, session_id) DO NOTHING",
                 (student_id, day, 0.0, None, config.now_stamp(),
                  centre_id, marked_by, session_id),
             )
-            return "added"
+            return "added" if cur.rowcount > 0 else "noop"
         if row and row["status"] == "draft":
             conn.execute("DELETE FROM attendance WHERE id = ?", (row["id"],))
             return "removed"
