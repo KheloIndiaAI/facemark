@@ -1033,6 +1033,22 @@ def _face_from_original(crop_name: str):
     box x), which is what makes the index meaningful.
 
     Returns (image, Face) or (None, None) when the original is unavailable.
+
+    THE INDEX IS A HINT, NOT THE ANSWER. This used to return `faces[i]` on the
+    strength of the filename alone, with `i >= len(faces)` as the only check.
+    The two detections are not guaranteed to agree: the original ran at the
+    CALLER-SUPPLIED detection mode (fast 0.85 / fused 0.80 / accurate 0.70)
+    while the recovery re-detects at config.DETECTION_MODE, which is an
+    environment variable. A different confidence bar finds a different number of
+    faces, every index after the difference shifts by one, and the caller is
+    telling this endpoint to learn a face - so a mismatch writes SOMEBODY ELSE'S
+    face into an athlete's gallery permanently, and every later register matches
+    against it.
+
+    The saved crop is the evidence, so it is used: re-cropping each candidate
+    from the original reproduces the file almost exactly for the right one. The
+    best candidate must also be clearly better than the runner-up, or this
+    refuses rather than guessing between two similar faces.
     """
     stem = Path(crop_name).stem                     # face_20260821_150840_062_13
     if not stem.startswith("face_"):
@@ -1049,10 +1065,73 @@ def _face_from_original(crop_name: str):
     except ValueError:
         return None, None
     faces = get_detector().detect(img, config.DETECTION_MODE)
-    i = int(idx)
-    if i >= len(faces):
+    if not faces:
         return None, None
-    return img, faces[i]
+
+    saved = storage.get("uploads", crop_name)
+    if saved is None:
+        # No crop to check against. The index alone is not enough to justify
+        # writing a template, which is the only thing this feeds.
+        return None, None
+    try:
+        want = utils.decode_image(saved)
+    except ValueError:
+        return None, None
+
+    # Matched with the RECOGNISER, not by eye. A grey thumbnail was tried and is
+    # too weak at these face sizes - measured on 56 archived crops, the right
+    # candidate scored 0.026-0.124 and the wrong ones 0.11-0.18, ranges that
+    # overlap. SFace is the tool this system already uses to answer "is this the
+    # same face", and MATCH_THRESHOLD is the bar it was calibrated at.
+    detector = get_detector()
+    in_crop = detector.detect(want, config.DETECTION_MODE)
+    if not in_crop:
+        return None, None
+    recognizer = get_recognizer()
+    weights = {m.name: m.weight for m in recognizer.models}
+    target = recognizer.embed_faces(want, [max(in_crop, key=lambda f: f.width * f.height)])
+    cand_vecs = recognizer.embed_faces(img, faces)
+    if not target or not cand_vecs:
+        return None, None
+
+    # Cosine similarity per model, combined with the same weights the matcher
+    # uses, so "the same face" means here what it means everywhere else.
+    scores = None
+    for name, weight in weights.items():
+        t, c = target.get(name), cand_vecs.get(name)
+        if t is None or c is None or not len(t) or not len(c):
+            continue
+        sims = (c @ t[0].reshape(-1, 1)).ravel()
+        scores = sims * weight if scores is None else scores + sims * weight
+    if scores is None or not len(scores):
+        return None, None
+
+    order = np.argsort(scores)[::-1]
+    best = float(scores[order[0]])
+    runner = float(scores[order[1]]) if len(order) > 1 else -1.0
+    hinted = int(idx)
+    # A HIGHER BAR THAN ORDINARY MATCHING. MATCH_THRESHOLD (0.570) is the
+    # open-set bar for "probably this person" in a register a human then
+    # reviews; this path WRITES A TEMPLATE, which is permanent and silently
+    # shapes every future match. Measured on this project's archive the correct
+    # candidate scores 0.94-0.97, so 0.75 refuses nothing real and does refuse
+    # the marginal cases - one crop matched at 0.590, and another crop from the
+    # same photo matched the same face at 0.942, so at most one of them was
+    # right.
+    if best < 0.75 or (len(order) > 1 and best - runner < 0.08):
+        log.warning(
+            "Refusing to attribute crop %s: best %.3f, runner-up %.3f over %d "
+            "candidate face(s). The archived photo no longer detects the same "
+            "way, and guessing here would teach an athlete somebody else's face.",
+            crop_name, best, runner, len(faces))
+        return None, None
+    chosen = int(order[0])
+    if chosen != hinted:
+        # Worth saying out loud: this is the case the old index-only code got
+        # wrong, and on this project's own archive it is 12 crops in 56.
+        log.info("Crop %s recovered as face %d, not the %d in its filename "
+                 "(similarity %.3f).", crop_name, chosen, hinted, best)
+    return img, faces[chosen]
 
 
 def _pose_label(face, requested: str) -> str:
