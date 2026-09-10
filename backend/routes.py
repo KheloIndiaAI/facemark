@@ -163,7 +163,7 @@ def get_centres(
 
 
 @router.get("/centres/{centre_id}")
-def get_centre_detail(centre_id: int, user: dict = Depends(auth.current_user)):
+def get_centre_detail(centre_id: int, user: dict = Depends(auth.require_staff)):
     auth.scope_centre(user, centre_id)      # raises 403 for a coach from elsewhere
     detail = centres_mod.centre_detail(centre_id)
     if not detail:
@@ -273,7 +273,7 @@ async def import_centres(file: UploadFile = File(...), user: dict = Depends(auth
 def list_people(
     role: Optional[str] = None,
     centre_id: Optional[int] = None,
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     scope = auth.scope_centre(user, centre_id)
     q = (

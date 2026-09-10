@@ -45,7 +45,13 @@ def _check(prefix: str, name: str) -> tuple[str, str]:
     # Path(...).name strips any directory component, so "../../etc/passwd"
     # collapses to "passwd" and cannot escape the prefix.
     safe = Path(name).name
-    if not safe:
+    # ...but NOT for ".." on its own: Path("..").name is "..", not "", so the
+    # emptiness check below waved it through and the caller went on to open
+    # <prefix>/.., which is the data directory itself. No route reaches this
+    # today - Starlette normalises ".." out of the path before routing, and
+    # /api/photos/.. answers 404 - so this is the guard being made to mean what
+    # its own comment claims, rather than a door being closed.
+    if not safe or safe in (".", ".."):
         raise ValueError("Empty storage key")
     return prefix, safe
 

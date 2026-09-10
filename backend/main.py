@@ -231,7 +231,7 @@ def _enroll_photo_templates(
 @app.get("/api/students")
 def get_students(
     role: Optional[str] = None,
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Enrolled people at the caller's centre, optionally one role.
 
@@ -1500,7 +1500,7 @@ def open_session(
 
 
 @app.get("/api/sessions/{session_id}")
-def read_session(session_id: int, user: dict = Depends(auth.current_user)):
+def read_session(session_id: int, user: dict = Depends(auth.require_staff)):
     """The register: every athlete of this coach, present and absent.
 
     Absent athletes are returned too, deliberately. A review screen that only
@@ -1865,7 +1865,7 @@ def toggle_roster(
 
 
 @app.get("/api/coaches/{coach_id}/athletes")
-def coach_roster(coach_id: int, user: dict = Depends(auth.current_user)):
+def coach_roster(coach_id: int, user: dict = Depends(auth.require_staff)):
     scoped = auth.scope_coach(user, coach_id)
     return {"ok": True, "coach_id": scoped,
             "athletes": sessions_mod.athletes_of(int(scoped))}
@@ -2085,7 +2085,7 @@ def admin_overview(
 
 
 @app.get("/api/approvals")
-def list_approvals(user: dict = Depends(auth.current_user)):
+def list_approvals(user: dict = Depends(auth.require_staff)):
     """Accounts waiting on THIS coach. A super admin sees every queue."""
     if user["role"] == "super_admin":
         return {"ok": True, "pending": sessions_mod.pending_for_coach(None)}
@@ -2100,7 +2100,7 @@ def decide_approval(
     guardian_name: Optional[str] = Form(None),
     guardian_consent: bool = Form(False),
     merge: bool = Form(False),
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Approve or reject. Approval activates, links and un-hides in one step.
 
@@ -2380,7 +2380,7 @@ def suggest_for_face(
     face_url: str,
     centre_id: Optional[int] = None,
     limit: int = 5,
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Rank the most likely identities for a face the matcher could not place.
 
@@ -2513,7 +2513,7 @@ async def assign_face_to_student(
 def get_attendance(
     day: Optional[str] = None,
     centre_id: Optional[int] = None,
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     day = day or config.today_str()
     records = database.attendance_for_day(day, auth.scope_centre(user, centre_id))
@@ -2530,7 +2530,7 @@ def get_attendance(
 
 
 @app.get("/api/students/{student_id}/history")
-def student_history(student_id: int, user: dict = Depends(auth.current_user)):
+def student_history(student_id: int, user: dict = Depends(auth.require_staff)):
     student = database.get_student(student_id)
     if not student:
         raise HTTPException(404, "Student not found")
@@ -2573,7 +2573,7 @@ def _csv_safe(value):
 def export_attendance(
     day: Optional[str] = None,
     centre_id: Optional[int] = None,
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     day = day or config.today_str()
     records = database.attendance_for_day(day, auth.scope_centre(user, centre_id))
@@ -2650,27 +2650,65 @@ def photo_history(
     student_id: Optional[int] = None,
     photo_type: Optional[str] = None,
     limit: int = 50,
-    user: dict = Depends(auth.current_user),
+    centre_id: Optional[int] = None,
+    user: dict = Depends(auth.require_staff),
 ):
-    """Photo metadata, including the stored filenames.
+    """Photo metadata, scoped to the caller's centre.
 
     Authenticated because those filenames are the keys the two routes below
     take: leaving this open turns "guess a filename" into "enumerate them all,
     then download every enrolment portrait".
+
+    That was only half the guard. `current_user` admits ANY signed-in account,
+    including a self-registered athlete, and the query underneath had no centre
+    predicate - so the enumeration this docstring set out to prevent worked
+    perfectly well for anyone with a login, across every centre in the country.
+    Staff only now, and narrowed by scope_centre, which pins a coach to their
+    own centre whatever they ask for.
     """
-    photos = database.get_photos(student_id=student_id, photo_type=photo_type, limit=limit)
+    photos = database.get_photos(
+        student_id=student_id, photo_type=photo_type, limit=limit,
+        centre_id=auth.scope_centre(user, centre_id),
+    )
     return {"photos": photos}
 
 
+def _may_read_media(user: dict, name: str) -> None:
+    """Refuse a media file that does not belong to the caller's centre.
+
+    A super admin reads anything. A coach reads what their centre owns - and
+    a file no table claims is not theirs either, because an unclaimed file is
+    exactly the case that used to leak.
+
+    The exception is liveness evidence (`clip_*`, `refused_*`): frames kept so a
+    coach can see WHY a capture was refused. They are never written to a table,
+    so they cannot be resolved to a centre, and they are not enumerable now that
+    the history route is scoped - the name carries a timestamp to the
+    millisecond. Staff may fetch those; nobody else can find them.
+    """
+    if user.get("role") == "super_admin":
+        return
+    base = Path(name).name
+    if base.startswith(("clip_", "refused_")):
+        return
+    found, centre = database.media_centre(base)
+    if not found or centre is None or int(centre) != int(user.get("centre_id") or -1):
+        # 404 rather than 403: whether a given filename exists is itself the
+        # thing being protected.
+        raise HTTPException(404, "Not found")
+
+
 @app.get("/api/photos/{name}")
-def student_photo(name: str, user: dict = Depends(auth.current_user)):
+def student_photo(name: str, user: dict = Depends(auth.require_staff)):
     """Enrolment portraits - photographs of children. Never unauthenticated."""
+    _may_read_media(user, name)
     return storage.response("students", name)
 
 
 @app.get("/api/uploads/{name}")
-def uploaded_file(name: str, user: dict = Depends(auth.current_user)):
+def uploaded_file(name: str, user: dict = Depends(auth.require_staff)):
     """Group photos and the face crops taken from them."""
+    _may_read_media(user, name)
     return storage.response("uploads", name)
 
 
@@ -2717,7 +2755,7 @@ def health():
 def get_analytics(
     centre_id: Optional[int] = None,
     days: int = 30,
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     """Aggregates behind the analytics page.
 
@@ -2732,7 +2770,7 @@ def get_analytics(
 
 
 @app.get("/api/stats")
-def get_stats(user: dict = Depends(auth.current_user)):
+def get_stats(user: dict = Depends(auth.require_staff)):
     s = database.stats(centre_id=auth.scope_centre(user, None))
     # `confidence` is stored as raw cosine similarity. The dashboard and the
     # attendance result screen must show the SAME number for a given match, so

@@ -94,6 +94,7 @@ async function doLogin(ev) {
 async function doLogout() {
     try { await fetch('/api/auth/logout', { method: 'POST' }); } catch { /* sign out locally anyway */ }
     session.user = null;
+    if (typeof resetSessionState === 'function') resetSessionState();
     showLogin();
 }
 
@@ -122,6 +123,9 @@ function applyRoleChrome() {
 /* Any 401 from anywhere drops straight back to the login gate. */
 function handleUnauthorized() {
     session.user = null;
+    // An expired session is a session end too: the same in-memory roster would
+    // otherwise still be on screen behind the login gate.
+    if (typeof resetSessionState === 'function') resetSessionState();
     showLogin('Your session expired. Sign in again.');
 }
 

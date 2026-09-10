@@ -563,9 +563,16 @@
         // already-open page keeps running the OLD app.js from memory even after
         // the new worker takes over, because JS that has already executed does
         // not re-run itself. This reloads once when that handover happens.
+        // Only when a worker is being REPLACED. On a first visit there is no
+        // controller yet, so the very first registration fires controllerchange
+        // too - and reloading there reloads a page whose code is already the
+        // newest there is, for every first-time visitor and every user who has
+        // just cleared their site data.
         let reloaded = false;
+        const hadController = !!navigator.serviceWorker.controller;
         navigator.serviceWorker.addEventListener('controllerchange', () => {
-            if (reloaded) return;      // controllerchange can fire more than once
+            if (!hadController) return;   // first install, nothing to replace
+            if (reloaded) return;         // controllerchange can fire more than once
             reloaded = true;
             location.reload();
         });

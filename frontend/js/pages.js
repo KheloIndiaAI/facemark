@@ -341,7 +341,14 @@ async function deleteUserAccount(id, name, role) {
 async function renderUsersPage() {
     const root = document.getElementById('users-root');
     root.innerHTML = '<div class="empty-state py-12">Loading accounts...</div>';
-    const [u, c] = await Promise.all([api.get('/api/users'), api.get('/api/centres')]);
+    let u, c;
+    try {
+        [u, c] = await Promise.all([api.get('/api/users'), api.get('/api/centres')]);
+    } catch (err) {
+        root.innerHTML = `<div class="empty-state py-12">Could not load accounts. `
+            + `${E((err && err.message) || 'The server did not answer.')}</div>`;
+        return;
+    }
     pageState.centres = c.centres;
     root.innerHTML = `
       <div class="card"><div class="card-body p-0">
@@ -434,7 +441,19 @@ async function submitUser() {
 async function toggleUser(id, active) {
     const fd = new FormData();
     fd.append('active', active ? 'true' : 'false');
-    await fetch(`/api/users/${id}/active`, { method: 'PATCH', body: fd });
+    try {
+        const res = await fetch(`/api/users/${id}/active`, { method: 'PATCH', body: fd });
+        if (!res.ok) {
+            let msg = 'The server refused that change';
+            try { msg = (await res.json()).detail || msg; } catch { /* not JSON */ }
+            showToast('Not changed', msg, 'error');
+            return;
+        }
+        showToast(active ? 'Account enabled' : 'Account disabled', '', 'success');
+    } catch {
+        showToast('Not changed', 'Could not reach the server', 'error');
+        return;
+    }
     renderUsersPage();
 }
 

@@ -12,6 +12,7 @@ import logging
 import secrets
 
 from datetime import date, datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -1018,22 +1019,98 @@ def get_photos(
     student_id: Optional[int] = None,
     photo_type: Optional[str] = None,
     limit: int = 50,
+    centre_id: Optional[int] = None,
+    include_unowned: bool = False,
 ) -> List[dict]:
-    """Query photo history with optional filters."""
-    query = "SELECT * FROM photos WHERE 1=1"
-    params = []
+    """Query photo history, scoped to one centre unless told otherwise.
+
+    THIS QUERY USED TO BE `SELECT * FROM photos WHERE 1=1` with no centre
+    predicate at all, behind a guard that only asked for *any* signed-in
+    account. Every row carries file_path, and file_path is the key the two
+    media routes take, so one ordinary account - an athlete's included - could
+    list every photograph in every centre and then fetch each one. The subjects
+    are children. DATA-HANDLING.md promises "every query is narrowed to their
+    centre_id"; this is that narrowing.
+
+    centre_id=None means all centres and is for a super admin only - callers
+    must pass auth.scope_centre's answer, never the client's.
+
+    Photos whose student was deleted (`ON DELETE SET NULL`) belong to nobody, so
+    no centre can claim them; they stay hidden unless include_unowned is set.
+
+    file_path is stored as an ABSOLUTE path on the server. That is a detail of
+    where this instance keeps its data, not something a caller needs, so only
+    the basename is returned - which is also all the media routes accept.
+    """
+    query = ("SELECT p.* FROM photos p "
+             "LEFT JOIN students s ON s.id = p.student_id WHERE 1=1")
+    params: List = []
+    if centre_id is not None:
+        query += " AND s.centre_id = ?"
+        params.append(centre_id)
+    elif not include_unowned:
+        query += " AND p.student_id IS NOT NULL"
     if student_id is not None:
-        query += " AND student_id = ?"
+        query += " AND p.student_id = ?"
         params.append(student_id)
     if photo_type is not None:
-        query += " AND photo_type = ?"
+        query += " AND p.photo_type = ?"
         params.append(photo_type)
-    query += " ORDER BY created_at DESC LIMIT ?"
-    params.append(limit)
-    
+    query += " ORDER BY p.created_at DESC LIMIT ?"
+    params.append(max(1, min(int(limit), 500)))
+
     with connect() as conn:
         rows = conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("file_path"):
+            d["file_path"] = Path(d["file_path"]).name
+        out.append(d)
+    return out
+
+
+def media_centre(name: str) -> tuple:
+    """(found, centre_id) for a stored media filename.
+
+    The media routes take a bare filename, so scoping them means answering
+    "whose picture is this?" from the name alone. Two tables can say: a
+    student's own portrait is in students.photo_path, and everything else that
+    was recorded - group captures, crops - is in photos.file_path, which is an
+    absolute path, hence the basename comparison.
+
+    found=False means no row claims the file. The caller must treat that as
+    "not for you" rather than "no restriction applies": an unclaimed file is
+    exactly the case that used to leak.
+    """
+    base = Path(name).name
+    if not base:
+        return False, None
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT centre_id FROM students WHERE photo_path = ? "
+            "   OR photo_path LIKE ? LIMIT 1",
+            (base, "%" + base),
+        ).fetchone()
+        if row:
+            return True, row["centre_id"]
+        row = conn.execute(
+            "SELECT s.centre_id AS centre_id FROM photos p "
+            "JOIN students s ON s.id = p.student_id "
+            "WHERE p.file_path = ? OR p.file_path LIKE ? LIMIT 1",
+            (base, "%" + base),
+        ).fetchone()
+        if row:
+            return True, row["centre_id"]
+        row = conn.execute(
+            "SELECT ses.centre_id AS centre_id FROM session_captures c "
+            "JOIN attendance_sessions ses ON ses.id = c.session_id "
+            "WHERE c.media_key = ? LIMIT 1",
+            (base,),
+        ).fetchone()
+        if row:
+            return True, row["centre_id"]
+    return False, None
 
 
 def photo_stats() -> dict:

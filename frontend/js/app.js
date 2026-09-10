@@ -411,6 +411,17 @@ function handleRoute() {
 
     // Default route
     if (hash === '/') hash = home;
+
+    // Role gate. `home` only chose a starting point; typing the URL walked
+    // straight past it. The server is the real boundary - every one of these
+    // routes' endpoints is staff-only now - but a page that loads and then
+    // fails every request is a worse answer than not opening it.
+    const STAFF_ROUTES = ['/dashboard', '/mark', '/oversight', '/register',
+                          '/students', '/centres', '/users'];
+    if (typeof isAthlete === 'function' && isAthlete() && STAFF_ROUTES.includes(hash)) {
+        window.location.hash = '#' + home;
+        return;
+    }
     
     state.currentRoute = hash;
     
@@ -493,7 +504,7 @@ function handleRoute() {
         // Redirected rather than left to fall through, so an old bookmark, an
         // installed PWA shortcut or a back button lands somewhere useful
         // instead of bouncing through the unknown-route branch.
-        window.location.hash = '#/mark';
+        window.location.hash = '#' + home;
         return;
     }
     else if (hash === '/centres') {
@@ -508,7 +519,7 @@ function handleRoute() {
         renderCentresPage();
     }
     else if (hash === '/users') {
-        if (!isSuperAdmin()) { window.location.hash = '#/dashboard'; return; }
+        if (!isSuperAdmin()) { window.location.hash = '#' + home; return; }
         title.textContent = 'Accounts';
         actions.innerHTML = `<button class="btn btn-primary" onclick="openAddUserModal()">Create account</button>`;
         root.appendChild(document.getElementById('tpl-users').content.cloneNode(true));
@@ -516,8 +527,9 @@ function handleRoute() {
     }
     else {
         // Unknown route - e.g. a bookmark to a page that no longer exists.
-        // Fall back to the landing page rather than leaving the shell blank.
-        window.location.hash = '#/mark';
+        // Fall back to the landing page rather than leaving the shell blank -
+        // the caller's landing page, not the coach's.
+        window.location.hash = '#' + home;
     }
 }
 
@@ -766,10 +778,10 @@ async function renderDashboard() {
             '<div class="p-4 text-center text-muted">No recent activity</div>' :
             stats.recent.map(r => `
                 <div class="activity-item">
-                    <div class="avatar">${r.name.charAt(0)}</div>
+                    <div class="avatar">${Charts.esc(String(r.name || '').charAt(0))}</div>
                     <div class="activity-details">
-                        <div class="activity-name">${r.name}</div>
-                        <div class="activity-sub">${r.roll_no}</div>
+                        <div class="activity-name">${Charts.esc(r.name)}</div>
+                        <div class="activity-sub">${Charts.esc(r.roll_no)}</div>
                     </div>
                     <div class="activity-meta">
                         <div class="badge badge-green mb-1">${(r.confidence * 100).toFixed(0)}% Match</div>
@@ -1218,11 +1230,11 @@ function renderMarkResults(data) {
             html += `
                 <div class="face-card" style="border: 1px solid var(--border-subtle); background: var(--bg-elevated);">
                     <div class="face-img-wrap" style="height: 140px;">
-                        <img src="${r.face_url}" class="face-img" alt="${r.name}">
+                        <img src="${Charts.esc(r.face_url)}" class="face-img" alt="${Charts.esc(r.name)}">
                     </div>
                     <div class="face-info">
-                        <div class="face-name" style="font-size: 14px; font-weight: 600;">${r.name}</div>
-                        <div class="face-sub" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">${r.roll_no}
+                        <div class="face-name" style="font-size: 14px; font-weight: 600;">${Charts.esc(r.name)}</div>
+                        <div class="face-sub" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">${Charts.esc(r.roll_no)}
                             ${r.role === 'coach' ? '<span class="badge badge-blue" style="margin-left:6px">Coach</span>' : ''}</div>
                         <div class="flex-between text-xs text-muted mb-1">
                             <span>Match Accuracy</span>
@@ -1707,11 +1719,11 @@ function regContinue() {
         title: `Record clip - ${regDetails.name}`,
         intro: "Look at the camera and move your head a little while recording. "
              + "Two seconds is enough.",
-        onClip: regSubmit,
+        onClip: enrolSubmit,
     });
 }
 
-async function regSubmit(file, ui) {
+async function enrolSubmit(file, ui) {
     ui.status('Checking the clip and registering...');
 
     // ONE request, deliberately. The old flow created the person from the first
@@ -1846,7 +1858,7 @@ let rosterState = { coachId: null, chosen: new Set() };
 
 async function openRosterEditor() {
     const coachId = (regSession && regSession.coach_id)
-        || (state.user && state.user.student_id) || '';
+        || (session.user && session.user.student_id) || '';
     try {
         const r = await api.get(`/api/coaches/${coachId}/roster`);
         rosterState.coachId = r.coach_id;
@@ -2080,7 +2092,7 @@ async function regDecide(userId, approve, name, role = 'athlete', merge = false)
 async function regOpen() {
     try {
         const fd = new FormData();
-        if (state.user && state.user.centre_id) fd.append('centre_id', state.user.centre_id);
+        if (session.user && session.user.centre_id) fd.append('centre_id', session.user.centre_id);
         const r = await api.postForm('/api/sessions', fd);
         regSession = r.session;
         await regLoad();
@@ -2181,6 +2193,17 @@ async function regLoad() {
 }
 
 let regLastNamed = [];
+
+/* Everything a signed-in coach accumulated in memory, dropped on the way out.
+   These are module-level and survive a logout on their own - the app never
+   reloads between sessions, because routing is hashchange - so the next person
+   to sign in on a shared centre phone inherited the last one's roster. */
+function resetSessionState() {
+    regLastNamed = [];
+    regSession = null;
+    regCounts = { present: 0, total: 0 };
+    rosterState = { coachId: null, chosen: new Set() };
+}
 
 async function regToggle(studentId, present) {
     try {
@@ -2437,7 +2460,7 @@ function meMark(coachId, coachName) {
 async function initOversightPage() {
     const picker = document.getElementById('ov-date');
     if (picker) {
-        picker.value = new Date().toISOString().slice(0, 10);
+        picker.value = localISODate();
         picker.addEventListener('change', () => ovLoad(picker.value));
     }
     await ovLoad(picker ? picker.value : null);
@@ -3230,8 +3253,56 @@ async function openClipCapture(opts) {
         }
 
         try { cam.stop(); } catch { /* already stopped */ }
+        // CANCEL HAS TO MEAN CANCEL. Closing the dialog mid-recording set
+        // state.closed and stopped the camera, but the recording promise then
+        // resolved anyway and this line ran regardless - so dismissing the
+        // capture went on to submit the register or mark attendance, which is
+        // the opposite of what the person just asked for. state.closed is
+        // one-way, so testing it here is the whole fix.
+        if (state.closed) return;
         await opts.onClip(file, ui);
     });
+}
+
+/** Attach one more photograph to an existing person.
+ *
+ * The "Add photo" button on every card in the directory called this by name and
+ * nothing defined it, so every click threw a ReferenceError and the button did
+ * nothing at all - silently, because the delegated handler swallows it. The
+ * endpoint it needs has existed and been centre-guarded the whole time.
+ *
+ * A file picker rather than the camera: the button's own tooltip offers "recent
+ * selfie or ID", which is a photograph the person already has. Liveness is not
+ * asked for here because this adds a gallery template for RECOGNITION, and the
+ * clip capture next to it remains the way to prove a real person is present.
+ */
+function openAddPhotoModal(studentId, studentName) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.addEventListener('change', async () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        showToast('Uploading', `Adding a photo for ${studentName || 'this athlete'}…`, 'info');
+        try {
+            const fd = new FormData();
+            fd.append('photo', file);
+            fd.append('source', 'upload');
+            const r = await api.postForm(`/api/students/${studentId}/photos`, fd);
+            if (r && r.ok === false) {
+                showToast('Not accepted', r.message || 'That photo was refused', 'error');
+                return;
+            }
+            showToast('Photo added',
+                      `${(r && r.templates_added) || 1} template(s) for ${studentName}`,
+                      'success');
+            renderStudents();
+        } catch (err) {
+            showToast('Upload failed', (err && err.message) || 'Could not reach the server',
+                      'error');
+        }
+    });
+    input.click();
 }
 
 /** Re-register an existing person from a clip. */
