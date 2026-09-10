@@ -327,13 +327,46 @@ def _fix_sweep_uniqueness(conn: Conn) -> None:
     could not be removed at all, with an error naming an index nobody would
     connect to the act of deleting a person.
 
-    Backfill is exact: before this column existed, coach_id IS NULL happened
-    only for sweeps, because detaching was the operation that failed.
+    THIS TOOK PRODUCTION DOWN ONCE ALREADY. The backfill below used to say
+    "coach_id IS NULL means sweep, unconditionally" and ran on EVERY startup,
+    not once. The first time it ran it was correct - before the narrower index
+    existed, detaching genuinely could not happen. But the moment the narrower
+    index made detaching possible, the NEXT coach deletion produced a second
+    coach_id IS NULL row for the same (centre_id, date) as a real sweep, and
+    the very next restart's backfill flagged BOTH as is_sweep=1, violating the
+    unique index it was about to (re)create and crashing startup - a container
+    that builds, starts, and then exits before ever binding the port, which is
+    indistinguishable from an infrastructure failure until you read this log.
+
+    So the backfill can no longer assume "no coach" means "sweep". Per
+    (centre_id, date), at most one row may become is_sweep=1: whichever
+    candidate is already flagged, or failing that, the oldest by id - a real
+    sweep predates any detachment that could collide with it. Every other
+    NULL-coach row for that slot stays an ordinary orphaned register. This is
+    idempotent and safe on every startup indefinitely, including after a coach
+    deletion nobody has restarted since.
     """
     conn.execute(
-        "UPDATE attendance_sessions SET is_sweep = 1 "
-        " WHERE coach_id IS NULL AND COALESCE(is_sweep, 0) = 0"
+        "WITH candidates AS ("
+        "  SELECT id, centre_id, date,"
+        "         ROW_NUMBER() OVER (PARTITION BY centre_id, date ORDER BY id) AS rn"
+        "  FROM attendance_sessions"
+        "  WHERE coach_id IS NULL AND COALESCE(is_sweep, 0) = 0"
+        ") "
+        "UPDATE attendance_sessions a SET is_sweep = 1 "
+        "FROM candidates c "
+        "WHERE a.id = c.id AND c.rn = 1 "
+        "  AND NOT EXISTS ("
+        "    SELECT 1 FROM attendance_sessions b "
+        "    WHERE b.centre_id = a.centre_id AND b.date = a.date "
+        "      AND b.is_sweep = 1 AND b.id <> a.id"
+        "  )"
     )
+    # Recreate rather than IF NOT EXISTS alone: this index changed definition.
+    # It began as UNIQUE (centre_id, date) WHERE coach_id IS NULL, and a
+    # database still holding that older, broader version would keep it - IF NOT
+    # EXISTS matches on the NAME, not the predicate, so the CREATE below would
+    # silently no-op and the bug this function exists to fix would survive.
     conn.execute("DROP INDEX IF EXISTS idx_sessions_sweep_day")
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sweep_day "
