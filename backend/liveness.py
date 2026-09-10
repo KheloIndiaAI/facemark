@@ -185,7 +185,10 @@ def sample_frames(data: bytes, max_frames: int = None) -> Tuple[List[np.ndarray]
 
 
 def _largest_face(frame: np.ndarray, detector):
-    faces = detector.detect(frame, mode="fused")
+    # config, not a literal, so this cannot drift away from the framing guide
+    # that tells people whether they are in shot - they were different, and the
+    # guide was the more permissive of the two.
+    faces = detector.detect(frame, mode=config.CLIP_DETECTION_MODE)
     if not faces:
         return None
     return max(faces, key=lambda f: f.width * f.height)

@@ -717,7 +717,9 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
             "LEFT JOIN centres c ON c.id = st.centre_id "
             "LEFT JOIN attendance_sessions s "
             "       ON s.coach_id = st.id AND s.date = ? "
-            "WHERE st.role = 'coach' AND s.id IS NULL"
+            # An unapproved coach application is not a coach who failed to
+            # open a register; they cannot open one at all.
+            "WHERE st.role = 'coach' AND st.status = 'active' AND s.id IS NULL"
             "  AND EXISTS (SELECT 1 FROM coach_athletes ca WHERE ca.coach_id = st.id)"
             + acs + " ORDER BY st.name", [day] + cp).fetchall()]
 

@@ -189,9 +189,12 @@ def search_centres(
         # Built column-by-column rather than dict(rows). A row is now a mapping,
         # so dict() over a list of them would consume each row's column NAMES as
         # the key/value pair and silently produce {"centre_id": "count"}.
+        # Enrolled people, not applications. This number is the one on the
+        # centre card, and it counted anybody who had started a registration.
         counts = {r[0]: r[1] for r in conn.execute(
             "SELECT centre_id, COUNT(*) FROM students "
-            "WHERE centre_id IS NOT NULL GROUP BY centre_id").fetchall()}
+            "WHERE centre_id IS NOT NULL AND status = 'active' "
+            "GROUP BY centre_id").fetchall()}
     for r in rows:
         r["people_count"] = counts.get(r["id"], 0)
     return rows
@@ -203,16 +206,30 @@ def centre_detail(centre_id: int) -> Optional[dict]:
     if not centre:
         return None
     with database.connect() as conn:
+        # ACTIVE ONLY. This page showed three unapproved coach applications
+        # (PEND-0C2F4634, PEND-1707B81B, PEND-A33A62F0) as the centre's
+        # coaching staff, indistinguishable from real people, and counted them
+        # in "Coaches (3)". Anybody who begins a registration and abandons it
+        # appeared on a centre's roster until the retention sweep removed them
+        # thirty days later.
         centre["athletes"] = [dict(r) for r in conn.execute(
             "SELECT id, name, roll_no, gender, sport, photo_path, role "
-            "FROM students WHERE centre_id = ? AND role = 'athlete' ORDER BY name",
+            "FROM students WHERE centre_id = ? AND role = 'athlete' "
+            "  AND status = 'active' ORDER BY name",
             (centre_id,),
         ).fetchall()]
         centre["coaches"] = [dict(r) for r in conn.execute(
             "SELECT id, name, roll_no, gender, sport, photo_path, role "
-            "FROM students WHERE centre_id = ? AND role = 'coach' ORDER BY name",
+            "FROM students WHERE centre_id = ? AND role = 'coach' "
+            "  AND status = 'active' ORDER BY name",
             (centre_id,),
         ).fetchall()]
+        # Surfaced as a NUMBER rather than hidden entirely: an administrator
+        # looking at a centre should know applications are waiting, and where.
+        centre["pending_count"] = conn.execute(
+            "SELECT COUNT(*) FROM students WHERE centre_id = ? "
+            "  AND status = 'pending'", (centre_id,)
+        ).fetchone()[0]
         centre["attendance_days"] = conn.execute(
             "SELECT COUNT(DISTINCT date) FROM attendance "
             "WHERE centre_id = ? AND status = 'confirmed'", (centre_id,)

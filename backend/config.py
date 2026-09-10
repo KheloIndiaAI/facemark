@@ -125,6 +125,18 @@ YUNET_MODEL = "face_detection_yunet_2023mar.onnx"
 YUNET_SCORE = 0.80             # detection confidence for the default mode
 YUNET_SCORE_FAST = 0.85        # fewer, surer boxes
 YUNET_SCORE_ACCURATE = 0.70    # more recall on hard photos
+
+# The mode used to judge a recorded CLIP, and therefore the mode the framing
+# guide must use as well.
+#
+# They disagreed. The guide detected at "accurate" (0.70) while liveness judged
+# the finished clip at "fused" (0.80), so a face scoring between the two was
+# told "Face found - tap to record", recorded for up to thirty-four seconds,
+# and was then answered "No face was found in the clip". The guide promised
+# something the judge refused, and the person had no way to know which to
+# believe. A framing guide may be STRICTER than what follows it - that only
+# costs a retry before recording - but never more permissive.
+CLIP_DETECTION_MODE = "fused"
 YUNET_NMS = 0.30
 DETECTION_MODE = os.environ.get("DETECTION_MODE", "fused")
 MIN_FACE_SIZE = 20             # px; below this a face carries no identity signal
