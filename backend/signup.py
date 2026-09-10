@@ -48,6 +48,11 @@ _hits: Dict[str, list] = {}
 _lock = threading.Lock()
 
 
+def throttled(key: str, limit: int, window_s: int) -> bool:
+    """Public name for the same counter, so routes can use it too."""
+    return _throttled(key, limit, window_s)
+
+
 def _throttled(key: str, limit: int, window_s: int) -> bool:
     now = time.time()
     cutoff = now - window_s
@@ -193,23 +198,48 @@ def start(username: str, password: str, full_name: str,
                         (int(centre_id),)).fetchone() is None:
             raise ValueError("Choose a centre")
 
+    # VALIDATE THE PASSWORD BEFORE WRITING ANYTHING. This used to happen inside
+    # create_user, which ran AFTER the students row had already been committed -
+    # so whether a password was six characters decided whether the centre's
+    # roster gained a permanent stranger. The check is a length test, not a
+    # hash, so it costs nothing.
+    auth.validate_password(password)
+
     # The person record comes first: an account with no person could never be
     # recognised, and users.student_id is required for an athlete. A coach gets
     # one too - they are recognised at capture time and sign the register with
     # their own face, so they are a person in `students` exactly like an athlete.
+    #
+    # THREE TRANSACTIONS, ONE APPLICATION. The person was committed, then the
+    # account, then both were marked pending - so an interruption anywhere in
+    # between left a person on the centre's roster with the DEFAULT status,
+    # which is 'active'. Nothing purges that: the retention sweep only looks at
+    # pending and rejected applications. With role=coach it was worse than
+    # untidy, because an active coach person appears in the signup coach picker
+    # for everyone who registers afterwards.
+    #
+    # The status is now written by the INSERT, so the row is never active even
+    # for an instant, and a failure part-way removes what was already made.
     roll = f"PEND-{secrets.token_hex(4).upper()}"
     student_id = database.add_student(
         full_name, roll, "", [], role=role, centre_id=centre_id,
     )
-    user_id = auth.create_user(username, password, role, full_name,
-                               centre_id=centre_id, student_id=student_id)
     with connect() as conn:
-        conn.execute("UPDATE users SET status = 'pending' WHERE id = ?", (user_id,))
-        # The person is marked too, not just the account. The face lands on
-        # this row and has to stay unmatchable even if the account is later
-        # deleted rather than decided.
         conn.execute("UPDATE students SET status = 'pending' WHERE id = ?",
                      (student_id,))
+    try:
+        user_id = auth.create_user(username, password, role, full_name,
+                                   centre_id=centre_id, student_id=student_id,
+                                   status="pending")
+    except Exception:
+        # Compensate. Half an application is worse than none: a person nobody
+        # can approve, sign in as, or find a reason for.
+        with connect() as conn:
+            conn.execute("DELETE FROM students WHERE id = ?", (student_id,))
+        log.warning("Signup failed after creating person %s; person removed",
+                    student_id)
+        raise
+    # The account was created pending; nothing to promote or demote here.
     log.info("Signup started: %s user %s (person %s), pending %s approval",
              role, user_id, student_id, approver_for(role))
     return {"token": _new_token(user_id), "user_id": user_id,
@@ -228,6 +258,26 @@ _APPROVED_COACH = (
     " AND NOT EXISTS (SELECT 1 FROM users u "
     "WHERE u.student_id = s.id AND u.status <> 'active')"
 )
+
+
+def centre_of(token: str) -> int:
+    """The centre the applicant behind this token registered at.
+
+    The centre was chosen when the application began and is recorded on the
+    account. Every later step should read it from there rather than accept it
+    again from the client: /api/signup/coaches took a centre_id parameter, so a
+    single self-issued token listed ANY centre's coach roster - names and
+    enrolment photographs - and choose_coach then accepted a coach from any
+    centre, dropping the application into a queue at a centre the applicant has
+    nothing to do with.
+    """
+    rec = resolve_signup(token)
+    with connect() as conn:
+        row = conn.execute("SELECT centre_id FROM users WHERE id = ?",
+                           (rec["user_id"],)).fetchone()
+    if not row or row["centre_id"] is None:
+        raise ValueError("This application has no centre")
+    return int(row["centre_id"])
 
 
 def coaches_at(centre_id: int) -> List[dict]:
@@ -318,12 +368,25 @@ def choose_coach(token: str, coach_id: int) -> None:
                              "so it does not choose a coach")
         # Re-checked here, not just filtered in the list above: the list is a
         # convenience for the browser, and this is the write.
+        # Same centre as the applicant. Without this an application could be
+        # attached to a coach anywhere in the country, landing in the approval
+        # queue of somebody who has never heard of them - and taking the
+        # applicant's name and face with it.
         row = conn.execute(
-            "SELECT 1 FROM students s WHERE s.id = ? AND s.role = 'coach'"
-            + _APPROVED_COACH, (int(coach_id),)
+            "SELECT 1 FROM students s WHERE s.id = ? AND s.role = 'coach' "
+            "  AND s.centre_id = (SELECT centre_id FROM users WHERE id = ?)"
+            + _APPROVED_COACH, (int(coach_id), rec["user_id"])
         ).fetchone()
         if not row:
             raise ValueError("That coach is not available to choose")
+        # A coach with no ACCOUNT cannot open an approval queue, so an
+        # application attached to one waits for somebody who will never be
+        # shown it. It is NOT refused here: coaches_at lists those coaches
+        # deliberately - most were enrolled by an admin and never needed a
+        # login - and refusing would empty the picker at every existing centre
+        # and block registration entirely. Instead admin_overview counts these
+        # as orphaned, which is the screen that exists to catch exactly the
+        # applications nobody else will see.
         conn.execute("UPDATE users SET chosen_coach_id = ? WHERE id = ?",
                      (int(coach_id), rec["user_id"]))
 

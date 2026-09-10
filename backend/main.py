@@ -377,7 +377,7 @@ async def add_student_photo(
     # The same guard enroll_multiview and assign_face_to_student already apply.
     # Without it a coach can attach templates to another centre's athlete,
     # which both alters that athlete's gallery and reveals they exist.
-    auth.scope_centre(user, student.get("centre_id"))
+    auth.owns_centre(user, student.get("centre_id"))
     if source not in ("id", "live"):
         source = "live"
 
@@ -419,7 +419,7 @@ def remove_student(student_id: int, user: dict = Depends(auth.require_staff)):
         raise HTTPException(404, "Student not found")
     # Without this a coach can delete any athlete at any centre in the country,
     # and ON DELETE CASCADE takes their templates and attendance history too.
-    auth.scope_centre(user, student.get("centre_id"))
+    auth.owns_centre(user, student.get("centre_id"))
     removed = database.delete_student(student_id)
     if student.get("photo_path"):
         storage.delete("students", Path(student["photo_path"]).name)
@@ -1238,7 +1238,7 @@ async def enroll_multiview(
     student = database.get_student(student_id)
     if not student:
         raise HTTPException(404, "Athlete not found")
-    auth.scope_centre(user, student.get("centre_id"))
+    auth.owns_centre(user, student.get("centre_id"))
 
     detector, recognizer = get_detector(), get_recognizer()
     accepted, rejected = [], []
@@ -1480,7 +1480,7 @@ async def enroll_from_video(
     student = database.get_student(student_id)
     if not student:
         raise HTTPException(404, "Athlete not found")
-    auth.scope_centre(user, student.get("centre_id"))
+    auth.owns_centre(user, student.get("centre_id"))
 
     data = await video.read()
     if not data:
@@ -2072,7 +2072,10 @@ def read_roster(coach_id: int, user: dict = Depends(auth.require_staff)):
                            (int(scoped),)).fetchone()
     if row is None:
         raise HTTPException(404, "No such coach")
-    centre = auth.scope_centre(user, row["centre_id"])
+    # Two questions, not one: may this caller act on that coach (ownership),
+    # and which centre's people should the options be drawn from (the coach's).
+    auth.owns_centre(user, row["centre_id"])
+    centre = row["centre_id"]
     return {"ok": True, "coach_id": int(scoped),
             **sessions_mod.roster_options(int(scoped), centre)}
 
@@ -2419,8 +2422,8 @@ def _pose_check_caller(request: Request, signup_token: Optional[str]) -> str:
 
 
 def _client_ip(request: Request) -> str:
-    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    return fwd or (request.client.host if request.client else "")
+    """See auth.client_ip - one derivation, so both throttles agree."""
+    return auth.client_ip(request)
 
 
 @app.post("/api/signup")
@@ -2448,14 +2451,21 @@ def signup_start(
 
 
 @app.get("/api/signup/coaches")
-def signup_coaches(token: str, centre_id: int):
-    """Coaches to choose from. Behind the token: a centre's coach roster with
-    photographs is not something to hand out to anyone who asks."""
+def signup_coaches(token: str, centre_id: Optional[int] = None):  # noqa: ARG001
+    """Coaches to choose from, at the applicant's OWN centre.
+
+    Behind the token, because a centre's coach roster with photographs is not
+    something to hand out to anyone who asks - but the token was only half the
+    guard: centre_id came from the caller, so one self-issued token walked the
+    whole country's coach lists, names and faces included. The centre is read
+    from the application now. The parameter is still accepted so an older
+    browser holding the previous page does not break, and is ignored.
+    """
     try:
-        signup_mod.resolve_signup(token)
+        centre = signup_mod.centre_of(token)
     except ValueError as e:
         raise HTTPException(401, str(e))
-    return {"ok": True, "coaches": signup_mod.coaches_at(centre_id)}
+    return {"ok": True, "coaches": signup_mod.coaches_at(centre)}
 
 
 @app.post("/api/signup/coach")
@@ -2469,6 +2479,7 @@ def signup_choose_coach(token: str = Form(...), coach_id: int = Form(...)):
 
 @app.post("/api/signup/face")
 async def signup_face(
+    request: Request,
     token: str = Form(...),
     video: UploadFile = File(...),
 ):
@@ -2477,7 +2488,18 @@ async def signup_face(
     Reuses the enrolment path unchanged, including its liveness requirement -
     a signup nobody is watching is exactly where a photograph of a photograph
     would be tried.
+
+    THROTTLED, which it was not. This route is unauthenticated, decodes a video
+    and runs the liveness pipeline on every call, and a token stays usable for
+    its whole 45-minute life - so one token could drive unlimited decodes and
+    unlimited permanent image writes. Both the token and the address are
+    counted: the token stops one applicant hammering it, the address stops
+    somebody minting tokens to get around that.
     """
+    if signup_mod.throttled(f"face:{token}", config.SIGNUP_FACE_PER_TOKEN, 3600)             or signup_mod.throttled(f"faceip:{_client_ip(request)}",
+                                    config.SIGNUP_FACE_PER_IP_HOUR, 3600):
+        raise HTTPException(
+            429, "Too many face captures. Wait a few minutes and try again.")
     try:
         student_id = signup_mod.student_for(token)
         applicant_role = signup_mod.role_for(token)
@@ -2651,7 +2673,7 @@ async def assign_face_to_student(
     student = database.get_student(student_id)
     if not student:
         raise HTTPException(404, "Athlete not found")
-    auth.scope_centre(user, student.get("centre_id"))
+    auth.owns_centre(user, student.get("centre_id"))
 
     crop_name = Path(face_url).name
     if not storage.exists("uploads", crop_name):
@@ -2722,7 +2744,7 @@ def student_history(student_id: int, user: dict = Depends(auth.require_staff)):
     if not student:
         raise HTTPException(404, "Student not found")
     # A coach may only read the attendance record of their own centre's people.
-    auth.scope_centre(user, student.get("centre_id"))
+    auth.owns_centre(user, student.get("centre_id"))
     records = database.student_attendance_history(student_id)
     return {
         "student": {

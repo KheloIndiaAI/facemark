@@ -29,10 +29,11 @@ router = APIRouter(prefix="/api")
 @router.post("/auth/login")
 def login(request: Request, response: Response,
           username: str = Form(...), password: str = Form(...)):
-    # X-Forwarded-For first, because behind CloudFront or an ALB every request
-    # appears to come from the proxy and one throttle would cover everybody.
-    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    ip = fwd or (request.client.host if request.client else "")
+    # Behind a proxy every request appears to come from the proxy, so the
+    # forwarded chain has to be read - but only as far as the number of hops
+    # actually in front of us. See auth.client_ip: taking the leftmost value
+    # let the caller choose their own throttle bucket.
+    ip = auth.client_ip(request)
 
     try:
         result = auth.login(username, password, ip=ip)
@@ -311,7 +312,7 @@ async def update_person(student_id: int, request: Request,
         row = conn.execute("SELECT centre_id FROM students WHERE id = ?", (student_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Person not found")
-    auth.scope_centre(user, row["centre_id"])
+    auth.owns_centre(user, row["centre_id"])
 
     form = dict(await request.form())
     allowed = {"name", "role", "centre_id", "gender", "sport", "phone", "roll_no"}

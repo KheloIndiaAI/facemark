@@ -730,9 +730,17 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
         # Counted separately because these are the ones nobody will action on
         # their own: no coach sees them, so they wait until someone goes
         # looking. A number on the oversight page is that someone.
+        # Two ways to end up in nobody's queue, not one: no coach chosen, or
+        # a coach chosen who has no account to open a queue with. The second
+        # was invisible - the applicant sees "waiting for your coach" and waits
+        # for a person who will never be shown them.
         orphaned = conn.execute(
-            "SELECT COUNT(*) FROM users WHERE status = 'pending' "
-            "  AND role = 'athlete' AND chosen_coach_id IS NULL"
+            "SELECT COUNT(*) FROM users u WHERE u.status = 'pending' "
+            "  AND u.role = 'athlete' AND ("
+            "        u.chosen_coach_id IS NULL"
+            "     OR NOT EXISTS (SELECT 1 FROM users c "
+            "                     WHERE c.student_id = u.chosen_coach_id "
+            "                       AND c.role = 'coach' AND c.status = 'active'))"
         ).fetchone()[0]
 
     now = config.local_now().replace(tzinfo=None).isoformat(timespec="seconds")
@@ -771,7 +779,14 @@ def pending_for_coach(coach_student_id: Optional[int]) -> List[dict]:
          "       dc.name AS duplicate_centre_name, "
          "       s.name AS person_name, s.roll_no, s.photo_path, s.centre_id, "
          "       c.name AS centre_name, "
-         "       (SELECT COUNT(*) FROM templates t WHERE t.student_id = u.student_id) AS templates "
+         "       (SELECT COUNT(*) FROM templates t WHERE t.student_id = u.student_id) AS templates, "
+         # Whether the coach they chose can actually be shown this queue.
+         # A coach enrolled by an admin may have no login at all, and an
+         # application attached to one waits for somebody who will never
+         # see it - which is what `orphaned` below is for.
+         "       EXISTS (SELECT 1 FROM users cu WHERE cu.student_id = u.chosen_coach_id "
+         "                 AND cu.role = 'coach' AND cu.status = 'active') "
+         "         AS chosen_coach_has_account "
          "FROM users u "
          "LEFT JOIN students s ON s.id = u.student_id "
          "LEFT JOIN students d ON d.id = u.duplicate_of "
@@ -794,7 +809,12 @@ def pending_for_coach(coach_student_id: Optional[int]) -> List[dict]:
     # sat in nobody's queue. Flagged rather than silently reassigned: which
     # coach they belong to now is a question for a person.
     for r in rows:
-        r["orphaned"] = bool(r.get("role") == "athlete" and not r.get("chosen_coach_id"))
+        # Matches the count above: no coach chosen, or one who cannot be
+        # notified because they have no account.
+        r["orphaned"] = bool(
+            r.get("role") == "athlete"
+            and (not r.get("chosen_coach_id") or not r.get("chosen_coach_has_account", True))
+        )
     return rows
 
 

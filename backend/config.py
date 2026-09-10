@@ -614,6 +614,30 @@ CORS_ORIGINS = [
 # loads real historic registers.
 SESSION_BACKDATE_DAYS = 2
 
+# The signup face step is unauthenticated, decodes a video and runs the whole
+# liveness pipeline per call, and writes an image that is kept. It had no limit
+# at all, and a signup token stays usable for its full 45 minutes - so one
+# token was an unbounded decode-and-write primitive. A real applicant needs a
+# handful of attempts; these are generous for that and useless for anything
+# else.
+SIGNUP_FACE_PER_TOKEN = 12
+SIGNUP_FACE_PER_IP_HOUR = 40
+
+# How many reverse proxies sit in front of this application.
+#
+# X-Forwarded-For is written by the client and APPENDED to by each proxy, so
+# only the last N entries were added by infrastructure - everything to their
+# left is whatever the caller typed. Both throttles used to key on the LEFTMOST
+# value with no trusted-proxy configuration at all, which let an anonymous
+# caller mint a fresh bucket per request and walk past the login lockout and
+# the signup limit alike.
+#
+# 0 means "no proxy": ignore the header and use the socket address, which is
+# always true and never forgeable. A deployment behind Caddy or a single ALB
+# sets 1. Setting this HIGHER than reality is what re-opens the hole, so the
+# default is the safe end.
+TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "0") or 0)
+
 # Brute force: nothing limited attempts, so a weak password fell to a script.
 #
 # CPU exhaustion: verifying a password is 600,000 PBKDF2 rounds, which is

@@ -39,10 +39,23 @@ TOKEN_BYTES = 32
 
 # --- password hashing --------------------------------------------------------
 
+MIN_PASSWORD_LEN = 6
+
+
+def validate_password(password: str) -> None:
+    """Raise if this password is unacceptable. Cheap - no hashing.
+
+    Split out of hash_password so a caller can check BEFORE doing anything
+    expensive or anything it would have to undo. Self-registration learned the
+    password was too short only after committing the person row.
+    """
+    if not password or len(password) < MIN_PASSWORD_LEN:
+        raise ValueError(f"Password must be at least {MIN_PASSWORD_LEN} characters")
+
+
 def hash_password(password: str) -> str:
     """-> 'pbkdf2_sha256$<iterations>$<salt_hex>$<hash_hex>'."""
-    if not password or len(password) < 6:
-        raise ValueError("Password must be at least 6 characters")
+    validate_password(password)
     salt = os.urandom(16)
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF2_ITERATIONS)
     return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt.hex()}${dk.hex()}"
@@ -73,6 +86,7 @@ def create_user(
     email: Optional[str] = None,
     phone: Optional[str] = None,
     student_id: Optional[int] = None,
+    status: str = "active",
 ) -> int:
     if role not in ("super_admin", "coach", "athlete"):
         raise ValueError(f"Unknown role: {role}")
@@ -90,12 +104,17 @@ def create_user(
     # never expiring.
     now = config.now_stamp()
     with database.connect() as conn:
+        # `status` is written by the INSERT rather than by a follow-up UPDATE.
+        # Self-registration used to create the row (default 'active'), then mark
+        # it pending in a second transaction - and in between, an account nobody
+        # had approved could sign in.
         return conn.insert(
             "INSERT INTO users (username, password_hash, role, full_name, email, phone, "
-            "centre_id, student_id, is_active, created_at) VALUES (?,?,?,?,?,?,?,?,1,?)",
+            "centre_id, student_id, is_active, created_at, status) "
+            "VALUES (?,?,?,?,?,?,?,?,1,?,?)",
             (
                 username.strip().lower(), hash_password(password), role, full_name.strip(),
-                email, phone, centre_id, student_id, now,
+                email, phone, centre_id, student_id, now, status,
             ),
         )
 
@@ -207,18 +226,34 @@ def _ip_throttled(ip: str) -> bool:
         return len(seen) > config.LOGIN_IP_MAX_ATTEMPTS
 
 
-def _note_failure(user_id: int, failures: int) -> None:
-    now = datetime.now()
-    failures += 1
-    locked = (now + timedelta(seconds=config.LOGIN_LOCKOUT_SECONDS)).isoformat(timespec="seconds") \
-        if failures >= config.LOGIN_MAX_FAILURES else None
+def _note_failure(user_id: int, failures: int) -> None:      # noqa: ARG001
+    """Count one failed attempt, atomically.
+
+    `failures` is accepted only for call compatibility and is deliberately
+    IGNORED: it was read before verify_password spent 600,000 PBKDF2 rounds, so
+    by the time it arrived here it was stale by hundreds of milliseconds. Every
+    concurrent guess read the same value and wrote the same value back, which
+    turned a burst of N attempts into a single increment - and a slow request
+    carrying an old count could overwrite a lock a faster one had just set,
+    because the UPDATE wrote locked_until unconditionally too.
+
+    The database does the arithmetic now, in one statement, so N concurrent
+    attempts cost N.
+    """
+    locked_at = (datetime.now() + timedelta(seconds=config.LOGIN_LOCKOUT_SECONDS)) \
+        .isoformat(timespec="seconds")
     with database.connect() as conn:
-        conn.execute(
-            "UPDATE users SET failed_attempts = ?, locked_until = ? WHERE id = ?",
-            (failures, locked, user_id),
-        )
-    if locked:
-        log.warning("Account %s locked after %d failed attempts", user_id, failures)
+        row = conn.execute(
+            "UPDATE users SET failed_attempts = COALESCE(failed_attempts, 0) + 1, "
+            "  locked_until = CASE "
+            "    WHEN COALESCE(failed_attempts, 0) + 1 >= ? THEN ? "
+            "    ELSE locked_until END "
+            " WHERE id = ? RETURNING failed_attempts, locked_until",
+            (config.LOGIN_MAX_FAILURES, locked_at, user_id),
+        ).fetchone()
+    if row and row["locked_until"]:
+        log.warning("Account %s locked after %d failed attempts",
+                    user_id, row["failed_attempts"])
 
 
 def login(username: str, password: str, ip: str = "") -> Optional[dict]:
@@ -356,6 +391,49 @@ def current_user(request: Request) -> dict:
     return user
 
 
+def client_ip(request) -> str:
+    """The address a throttle may safely be keyed on.
+
+    X-FORWARDED-FOR IS WRITTEN BY THE CLIENT. Both throttles used to take its
+    LEFTMOST value, and nothing in this application established a trusted proxy,
+    so an anonymous caller sending a different value on every request got a
+    fresh bucket every time. That defeated the login lockout and, worse, the
+    signup limit - and /api/signup is unauthenticated and runs 600,000 PBKDF2
+    rounds per call, which makes an unbounded one a way to saturate both workers
+    from a laptop as well as to flood every coach's approval queue.
+
+    A proxy APPENDS the peer address to the chain, so with N trusted proxies in
+    front the real client is the Nth entry from the RIGHT. Anything further left
+    was supplied by the caller and is not evidence of anything.
+
+    TRUSTED_PROXY_HOPS defaults to 0: no proxy, so the header is ignored
+    entirely and the socket address is used. Deployments behind Caddy or an ALB
+    set it to the number of hops they actually have. Getting it wrong in the
+    cautious direction costs a shared bucket; getting it wrong the other way is
+    what this fixes.
+    """
+    peer = ""
+    try:
+        peer = request.client.host if request.client else ""
+    except Exception:      # noqa: BLE001 - a missing client is not an error here
+        peer = ""
+    hops = config.TRUSTED_PROXY_HOPS
+    if hops <= 0:
+        return peer
+    chain = [p.strip() for p in
+             (request.headers.get("x-forwarded-for") or "").split(",") if p.strip()]
+    if not chain:
+        return peer
+    # The peer itself is the last hop and is not in the header, so N hops means
+    # the client sits N-1 from the right of what the header does contain.
+    idx = len(chain) - hops
+    if idx < 0:
+        # Fewer entries than hops claimed: the chain is shorter than configured,
+        # so nothing in it is trustworthy. Fall back to the socket.
+        return peer
+    return chain[idx] or peer
+
+
 def assert_super_admin(user: dict) -> dict:
     """The same rule as require_super_admin, callable as a plain function.
 
@@ -384,9 +462,36 @@ def scope_centre(user: dict, requested: Optional[int] = None) -> Optional[int]:
     """
     if user["role"] == "super_admin":
         return requested
+    # A coach with no centre used to fall through and return None, and None
+    # downstream means "every centre" - so losing a centre (it was deleted, or
+    # the account was created without one) silently widened access instead of
+    # removing it. A coach without a centre has no scope at all.
+    if user.get("centre_id") is None:
+        raise HTTPException(
+            403, "This account is not assigned to a centre, so it cannot read "
+                 "centre data. An administrator needs to assign one.")
     if requested is not None and requested != user["centre_id"]:
         raise HTTPException(403, "You can only access your own centre")
     return user["centre_id"]
+
+
+def owns_centre(user: dict, centre_id: Optional[int]) -> None:
+    """Refuse unless this caller's centre owns the thing being acted on.
+
+    scope_centre answers "which centre may this request READ", and a None from
+    the caller legitimately means "no filter asked for". Passing a PERSON's
+    centre into it therefore reads the wrong way round: a person whose
+    centre_id is NULL produced requested=None, which is the "no filter" case,
+    and the check silently passed - so any coach could act on any centre-less
+    person, including deleting them.
+
+    This is the other question, and it has no permissive case.
+    """
+    if user.get("role") == "super_admin":
+        return
+    if centre_id is None or user.get("centre_id") is None or \
+            int(centre_id) != int(user["centre_id"]):
+        raise HTTPException(403, "That person is not at your centre")
 
 
 def coach_student_id(user: dict) -> int:
@@ -466,17 +571,26 @@ def require_athlete(user: dict = Depends(current_user)) -> dict:
 def bootstrap_default_admin() -> Optional[str]:
     """Create the first super admin if no users exist yet.
 
-    The generated password is returned once so it can be printed to the server
-    console; it is never stored in plaintext. Override via FACEMARK_ADMIN_PASSWORD.
+    Returns the password ONLY when this function invented it, because then there
+    is no other way for the operator to learn it. A password supplied through
+    FACEMARK_ADMIN_PASSWORD is already known to whoever set it, and echoing it
+    into the application log - durable on this deployment, and readable by
+    anyone with log access long after the console has scrolled away - published
+    a production credential for no benefit at all.
     """
     with database.connect() as conn:
         if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
             return None
-    password = os.environ.get("FACEMARK_ADMIN_PASSWORD") or secrets.token_urlsafe(9)
+    supplied = os.environ.get("FACEMARK_ADMIN_PASSWORD")
+    password = supplied or secrets.token_urlsafe(9)
     create_user(
         username="admin",
         password=password,
         role="super_admin",
         full_name="System Administrator",
     )
+    if supplied:
+        log.info("First run: super admin 'admin' created with the password "
+                 "supplied in FACEMARK_ADMIN_PASSWORD (not logged).")
+        return None
     return password
