@@ -664,7 +664,8 @@ def delete_student(student_id: int) -> dict:
     return removed
 
 
-def list_students(centre_id: Optional[int] = None, role: Optional[str] = None) -> List[dict]:
+def list_students(centre_id: Optional[int] = None, role: Optional[str] = None,
+                  include_inactive: bool = False) -> List[dict]:
     with connect() as conn:
         # Correlated subqueries, NOT parallel LEFT JOINs: joining attendance and
         # templates in one query multiplies the two row sets together, so a student
@@ -677,6 +678,9 @@ def list_students(centre_id: Optional[int] = None, role: Optional[str] = None) -
             "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id AND t.source = 'adapted') AS adapted, "
             "s.role, s.centre_id, s.gender, s.sport, s.phone, s.status "
             "FROM students s WHERE 1=1"
+            # An unapproved applicant is not in the directory. They are in the
+            # approval queue, which is a different screen for a different job.
+            + ("" if include_inactive else ACTIVE_ONLY)
             + (" AND s.centre_id = ?" if centre_id is not None else "")
             + (" AND s.role = ?" if role else "")
             + " ORDER BY s.created_at DESC",
@@ -982,11 +986,15 @@ def stats(centre_id: Optional[int] = None) -> dict:
     cs = " AND centre_id = ?" if centre_id is not None else ""
     cp = [centre_id] if centre_id is not None else []
     with connect() as conn:
+        # Active only, like n_enrolled below. A tile that counts applications
+        # as athletes disagrees with every other number on the same screen.
         n_students = conn.execute(
-            "SELECT COUNT(*) FROM students WHERE role = 'athlete'" + cs, cp
+            "SELECT COUNT(*) FROM students WHERE role = 'athlete'"
+            + ACTIVE_ONLY_BARE + cs, cp
         ).fetchone()[0]
         n_coaches = conn.execute(
-            "SELECT COUNT(*) FROM students WHERE role = 'coach'" + cs, cp
+            "SELECT COUNT(*) FROM students WHERE role = 'coach'"
+            + ACTIVE_ONLY_BARE + cs, cp
         ).fetchone()[0]
         # A student with no templates can never be matched, so counting them in the
         # denominator makes a fully-present class look half-absent forever.
@@ -1128,6 +1136,21 @@ def get_photos(
             d["file_path"] = Path(d["file_path"]).name
         out.append(d)
     return out
+
+
+# Somebody who has actually been enrolled, as opposed to somebody who began
+# a registration. Self-signup writes a students row immediately - the applicant
+# needs somewhere to put their face - with status='pending' and a PEND-xxxxxxxx
+# placeholder roll number, and approval is what makes them real.
+#
+# Named once and reused, because seven different lists each decided this for
+# themselves and every one of them decided wrong: the centre page counted three
+# unapproved applications as its coaching staff.
+#
+# Use ACTIVE_ONLY where the table is aliased `s`, ACTIVE_ONLY_BARE where it is
+# not aliased.
+ACTIVE_ONLY = " AND s.status = 'active'"
+ACTIVE_ONLY_BARE = " AND status = 'active'"
 
 
 def count_students() -> int:
@@ -1278,7 +1301,8 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
                 "  (SELECT COUNT(*) FROM attendance a JOIN students s2 ON s2.id = a.student_id "
                 "     WHERE a.status = 'confirmed' AND a.centre_id = c.id "
                 "       AND s2.role = 'athlete'), "
-                "  (SELECT COUNT(*) FROM students s3 WHERE s3.centre_id = c.id AND s3.role = 'athlete') "
+                "  (SELECT COUNT(*) FROM students s3 WHERE s3.centre_id = c.id "
+                "     AND s3.role = 'athlete' AND s3.status = 'active') "
                 "FROM centres c ORDER BY 3 DESC"
             ) if r[2] or r[3]
         ]

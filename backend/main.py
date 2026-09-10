@@ -1218,7 +1218,11 @@ async def enroll_pose_check(
     except ValueError:
         raise HTTPException(400, "Frame is not a valid image")
 
-    faces = get_detector().detect(img, "accurate")
+    # The SAME bar the finished clip will be judged at - see
+    # config.CLIP_DETECTION_MODE. Detecting more permissively here told people
+    # their face was found and then refused the recording they made on the
+    # strength of it.
+    faces = get_detector().detect(img, config.CLIP_DETECTION_MODE)
     if not faces:
         return {"ok": False, "reason": "no_face", "message": "No face detected"}
     if len(faces) > 1:
@@ -2499,12 +2503,27 @@ def approval_coach_options(centre_id: int,
 
 
 def _pose_check_caller(request: Request, signup_token: Optional[str]) -> str:
-    """Refuse anybody who is neither staff nor mid-signup. Returns which."""
+    """Refuse anybody with no standing at all. Returns which kind they are.
+
+    ATHLETES COUNT. This used to admit only 'coach' and 'super_admin', and an
+    athlete marking themselves present is neither - so every poll from the
+    self-mark screen was a 403, the framing guide never answered, and after
+    five of them the camera reported "Lost connection - close and try again"
+    and disabled the shutter. Self-marking was completely dead for the only
+    role that uses it, and the message blamed the network.
+
+    There is nothing to withhold here. The endpoint analyses the single frame
+    the caller just sent and returns the pose of the face in it: no roster, no
+    identity, nothing about anybody else. The guard exists so it is not an
+    open face-detection service, not because the answer is sensitive - so the
+    bar is "a real account, or a registration in progress", which is what it
+    now checks.
+    """
     token = auth._token_from_request(request)
     if token:
         user = auth.resolve_token(token)
-        if user and user.get("role") in ("coach", "super_admin"):
-            return "staff"
+        if user:
+            return "staff" if user.get("role") in ("coach", "super_admin") else "athlete"
     if signup_token:
         try:
             signup_mod.resolve_signup(signup_token)

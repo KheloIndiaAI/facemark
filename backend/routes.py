@@ -299,7 +299,10 @@ def list_people(
         "(SELECT COUNT(*) FROM attendance a WHERE a.student_id = s.id "
         "        AND a.status = 'confirmed') AS total_present, "
         "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id) AS templates "
-        "FROM students s LEFT JOIN centres c ON c.id = s.centre_id WHERE 1=1"
+        "FROM students s LEFT JOIN centres c ON c.id = s.centre_id "
+        # Enrolled people. An unapproved application is not one of them - it
+        # belongs in the approval queue, not on a roster.
+        "WHERE s.status = 'active'"
     )
     p: list = []
     if role in ("athlete", "coach"):
