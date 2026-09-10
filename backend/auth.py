@@ -324,7 +324,17 @@ def login(username: str, password: str, ip: str = "") -> Optional[dict]:
         conn.execute(
             "UPDATE users SET last_login = ?, failed_attempts = 0, locked_until = NULL "
             "WHERE id = ?",
-            (now.isoformat(timespec="seconds"), user["id"]),
+            # The CENTRE's clock, not the server's. `now` here is
+            # datetime.now(), which is correct for the session expiry above -
+            # those values are only ever compared against each other, and
+            # moving one side is how sessions stop expiring. last_login is
+            # different: it is DISPLAYED, on the Accounts page, next to
+            # created_at and approved_at, which config.now_stamp() writes on the
+            # centre's clock. On a UTC server that put one column five and a
+            # half hours behind the ones beside it, and an administrator reading
+            # "last sign-in 03:40" for somebody who signed in at 09:10 has no
+            # way to tell which column is lying.
+            (config.now_stamp(), user["id"]),
         )
         conn.execute(
             "DELETE FROM auth_sessions WHERE expires_at < ?",
