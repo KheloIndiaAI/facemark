@@ -130,6 +130,13 @@ S3_REGION=${AWS_REGION}
 S3_ACCESS_KEY_ID=
 S3_SECRET_ACCESS_KEY=
 COOKIE_SECURE=1
+# Caddy terminates TLS in front of the app and appends the real client to
+# X-Forwarded-For, so the LAST entry is the client and everything to its left
+# was written by the caller. Without this the app ignores the header entirely
+# and throttles every request from this box as one address; with it wrong in
+# the other direction the login and signup throttles are bypassable by
+# sending a header. One proxy, one hop. See auth.client_ip.
+TRUSTED_PROXY_HOPS=1
 DETECTION_MODE=fused
 ENVFILE
 

@@ -2557,6 +2557,15 @@ async function ovLoad(day) {
                      x => row(x.coach_name || 'Centre sweep',
                               `${x.rows || 0} row(s) \u00b7 expires ${(x.expires_at || '').replace('T', ' ')}`),
                      'Nothing left unsubmitted.')
+            // A register that timed out appeared in none of the other lists -
+            // not submitted, not draft, and its coach is not "missing" because
+            // a session row exists. The attendance inside was deleted with it,
+            // so without this panel nothing on this page ever mentioned it.
+            + ovList('Expired unsubmitted', o.expired || [],
+                     x => row(x.coach_name || 'Centre sweep',
+                              `opened ${(x.created_at || '').replace('T', ' ')} \u00b7 `
+                              + `expired ${(x.expires_at || '').replace('T', ' ')}`),
+                     'No register timed out.')
             + ovList('Captures that could not be liveness-checked', o.photo_only,
                      x => row(x.coach_name || 'Centre sweep',
                               `${x.date} \u00b7 ${x.kind} \u00b7 ${x.liveness_verdict || 'not_checked'}`),

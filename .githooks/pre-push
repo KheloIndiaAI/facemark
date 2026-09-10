@@ -1,26 +1,54 @@
 #!/bin/sh
-# Refuse to push `master`.
+# Refuse to push any history that contains athletes' photographs.
 #
-# Its history contains data/roster_import/ at commit 687e494 - face crops, real
-# names and NSRS ids of athletes at a pilot centre, most of them minors. The
-# files were removed from the tip later, but a push sends the whole history and
-# the blobs are still reachable from that branch.
+# Commit 687e494 added data/roster_import/ - face crops, real names and NSRS ids
+# of athletes at a pilot centre, most of them minors. The files were removed
+# from the tip later, but a push sends the whole HISTORY and those blobs stay
+# reachable from any commit that has 687e494 as an ancestor.
 #
-# `dev` and `main` are clean and push normally. If master ever genuinely needs
-# to go out, its history has to be rewritten first (git-filter-repo) and the
-# blobs confirmed unreachable - not waved through with --no-verify.
+# THIS CHECKS OBJECTS, NOT NAMES. The previous version matched the string
+# "master" in the ref names, which stopped exactly one spelling of the problem:
+#
+#     git push origin master                      refused
+#     git push origin master:refs/heads/backup    refused (local ref says master)
+#     git push origin 687e494:refs/heads/backup   ALLOWED - no "master" anywhere
+#     git push origin HEAD:refs/heads/backup      ALLOWED - local ref is "HEAD"
+#
+# The branch name was never the hazard; the commits are. `merge-base
+# --is-ancestor` asks the only question that matters - does what I am about to
+# send contain that commit - and it does not care what anyone calls it.
+#
+# If that history ever genuinely needs to go out, rewrite it first
+# (git-filter-repo), confirm the blobs are unreachable, and update TAINTED
+# below. Do not wave it through with --no-verify.
 #
 # Install once:  git config core.hooksPath .githooks
 
-while read -r local_ref _local_sha remote_ref _remote_sha; do
-    case "$local_ref$remote_ref" in
-        *refs/heads/master*)
-            echo "pre-push: REFUSING to push master." >&2
-            echo "  Its history contains data/roster_import/ - face photographs" >&2
-            echo "  and names of athletes, most of them minors (commit 687e494)." >&2
-            echo "  Push dev instead, or rewrite that history first." >&2
-            exit 1
-            ;;
+TAINTED="687e494"
+
+# A commit that is not in this clone cannot be pushed from it, and a fresh
+# clone of a cleaned repository will not have it - so an unknown SHA here means
+# "nothing to refuse", not "fail open on everything".
+if ! git cat-file -e "${TAINTED}^{commit}" 2>/dev/null; then
+    exit 0
+fi
+
+status=0
+while read -r local_ref local_sha remote_ref _remote_sha; do
+    # All-zero local sha means a deletion. Nothing is being sent.
+    case "$local_sha" in
+        *[!0]*) ;;
+        *) continue ;;
     esac
+
+    if git merge-base --is-ancestor "$TAINTED" "$local_sha" 2>/dev/null; then
+        echo "pre-push: REFUSING to push $local_ref -> $remote_ref" >&2
+        echo "  That history contains commit $TAINTED, which added" >&2
+        echo "  data/roster_import/ - face photographs and names of athletes," >&2
+        echo "  most of them minors. Renaming the branch does not remove them." >&2
+        echo "  Push a branch that does not descend from it, or rewrite the" >&2
+        echo "  history first." >&2
+        status=1
+    fi
 done
-exit 0
+exit "$status"

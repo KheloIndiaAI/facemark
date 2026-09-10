@@ -266,10 +266,11 @@ def get_or_create(centre_id: int, coach_id: Optional[int], opened_by: int,
         try:
             conn.execute(
                 "INSERT INTO attendance_sessions "
-                "(centre_id, coach_id, opened_by, date, status, created_at, expires_at) "
-                "VALUES (?,?,?,?,'draft',?,?)",
+                "(centre_id, coach_id, opened_by, date, status, created_at, "
+                " expires_at, is_sweep) "
+                "VALUES (?,?,?,?,'draft',?,?,?)",
                 (centre_id, coach_id, opened_by, day,
-                 config.now_stamp(), expires),
+                 config.now_stamp(), expires, 1 if coach_id is None else 0),
             )
             conn.execute("RELEASE SAVEPOINT open_session")
         except Exception as e:
@@ -690,6 +691,21 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
             "WHERE s.date = ? AND s.status = 'draft'" + cs +
             " ORDER BY s.expires_at", [day] + cp).fetchall()]
 
+        # Registers that timed out. Without this list they were invisible:
+        # `submitted` and `drafts` both filter on a status an expired register
+        # no longer has, and `missing` only finds coaches with NO session row at
+        # all - so a coach who opened a register, captured into it and never
+        # submitted vanished from the one screen that exists to notice that.
+        # The attendance inside was deleted by the sweep, so nothing else was
+        # ever going to mention it either.
+        expired = [dict(r) for r in conn.execute(
+            "SELECT s.*, c.name AS centre_name, p.name AS coach_name "
+            "FROM attendance_sessions s "
+            "LEFT JOIN centres c ON c.id = s.centre_id "
+            "LEFT JOIN students p ON p.id = s.coach_id "
+            "WHERE s.date = ? AND s.status = 'expired'" + cs +
+            " ORDER BY s.expires_at DESC", [day] + cp).fetchall()]
+
         # Coaches with no register at all today. LEFT JOIN, not NOT IN: a coach
         # with no session produces a NULL row rather than being dropped, which
         # is the entire list this view exists to show.
@@ -710,8 +726,13 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
             "FROM attendance_sessions s "
             "LEFT JOIN centres c ON c.id = s.centre_id "
             "LEFT JOIN students p ON p.id = s.coach_id "
-            "WHERE s.status = 'submitted' AND COALESCE(s.submitter_verified, 0) = 0"
-            + cs + " ORDER BY s.submitted_at DESC LIMIT 50", cp).fetchall()]
+            # Scoped to the day, like every other list here. Without it the
+            # page showed a date, and this panel answered a different question -
+            # every unverified register ever submitted, anywhere in its centre
+            # scope - so changing the date changed four lists and not this one.
+            "WHERE s.date = ? AND s.status = 'submitted' "
+            "  AND COALESCE(s.submitter_verified, 0) = 0"
+            + cs + " ORDER BY s.submitted_at DESC LIMIT 50", [day] + cp).fetchall()]
 
         # A capture that could not be checked at all. Not an accusation - it is
         # the one thing the liveness guard cannot speak to, so it is listed.
@@ -749,6 +770,7 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
     return {
         "date": day,
         "submitted": submitted,
+        "expired": expired,
         "submitted_count": len(submitted),
         "drafts": drafts,
         "draft_count": len(drafts),

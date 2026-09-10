@@ -112,8 +112,16 @@ def add_user(
         uid = auth.create_user(username, password, role, full_name, centre_id, email, phone)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    except Exception as e:  # UNIQUE violation on username
+    except database.IntegrityError as e:
+        # ONLY a constraint violation is a duplicate. This used to catch every
+        # Exception and report all of them as "username already taken", so a
+        # database that was down, a bad centre_id, or a bug in create_user all
+        # came back as a name clash - and an administrator retried with a
+        # different username, forever, against a problem that was never that.
         raise HTTPException(409, f"Username '{username}' is already taken") from e
+    except Exception as e:  # noqa: BLE001
+        log.exception("Creating user %s failed", username)
+        raise HTTPException(500, "Could not create that account") from e
     return {"ok": True, "user_id": uid}
 
 
@@ -220,8 +228,13 @@ def add_centre(
             incharge_name=incharge_name, contact_phone=contact_phone,
             contact_email=contact_email, established=established, is_demo=False,
         )
-    except Exception as e:
+    except database.IntegrityError as e:
+        # Same correction as add_user: only a constraint violation is a
+        # duplicate. Everything else was being reported as one.
         raise HTTPException(409, f"Centre code '{code}' already exists") from e
+    except Exception as e:  # noqa: BLE001
+        log.exception("Creating centre %s failed", code)
+        raise HTTPException(500, "Could not create that centre") from e
     return {"ok": True, "centre_id": cid}
 
 
@@ -262,8 +275,11 @@ async def import_centres(file: UploadFile = File(...), user: dict = Depends(auth
         raise HTTPException(400, f"Could not parse {file.filename}: {e}")
     if not isinstance(rows, list) or not rows:
         raise HTTPException(400, "File contained no rows")
-    added = centres_mod.import_centres(rows)
-    return {"ok": True, "imported": added, "skipped": len(rows) - added}
+    out = centres_mod.import_centres(rows)
+    # The rows that failed are NAMED, not just counted. "197 imported, 3
+    # skipped" leaves an operator to find the three by eye in a spreadsheet.
+    return {"ok": True, "imported": out["imported"],
+            "skipped": len(out["skipped"]), "skipped_rows": out["skipped"][:50]}
 
 
 # =============================================================================

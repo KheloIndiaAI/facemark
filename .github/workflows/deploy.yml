@@ -15,10 +15,16 @@ name: Deploy
 # Deploys track `dev`, which is the branch the instance was cloned from and the
 # one it stays on. `main` deploys nowhere.
 #
-# Every push to dev deploys, and there is no test suite gating it - so the
-# safety net is `environment: production` below. Add required reviewers under
-# Settings -> Environments and each deploy pauses for a click. Worth having on
-# a system that holds photographs of children.
+# GATED ON THE CHECKS. Both workflows used to fire on the same push and run
+# side by side, so a commit that broke the lint gate or the drafts guard
+# deployed anyway - CI going red afterwards changed nothing, and cancelling a
+# CI run did not stop the deploy either. The `checks` job below reruns the two
+# gates that matter and the deploy `needs:` it, so a broken commit fails before
+# anything is built on the instance.
+#
+# `environment: production` remains the second net: add required reviewers under
+# Settings -> Environments and each deploy also pauses for a click. Worth having
+# on a system that holds photographs of children.
 #
 # One useful property of the command sequence: it runs under `set -eu`, so a
 # failed `docker compose build` stops before `up -d` runs and the previously
@@ -50,8 +56,37 @@ env:
   HEALTH_URL: https://at.ccki.in/api/health
 
 jobs:
+  # The same two gates CI runs, rerun here so the deploy can depend on them.
+  # Duplicated rather than chained off workflow_run: a workflow_run trigger
+  # fires on the DEFAULT branch's copy of the workflow file and reports against
+  # a detached commit, which makes "did this commit pass" hard to answer from
+  # the deploy's own logs. These take well under a minute.
+  checks:
+    name: Gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff - runtime errors
+        run: |
+          ruff check --select E9,F63,F7,F82             --exclude scripts/archive --output-format=github .
+
+      - name: Every module compiles
+        run: |
+          # Syntax and indentation across the whole backend. Cheap, needs no
+          # dependencies, and catches the class of breakage that would otherwise
+          # be discovered by the container failing to start on the instance.
+          python -m compileall -q backend scripts run.py
+
   deploy:
     name: Deploy to EC2
+    needs: checks               # a commit that fails the gates never deploys
     runs-on: ubuntu-latest
     environment: production     # add required reviewers here to gate deploys
 

@@ -58,3 +58,25 @@ services:
         sync: false
       - key: PYTHON_VERSION
         value: "3.11"
+      # REQUIRED. backend/config.py has no SQLite fallback - deliberately, so a
+      # deployment cannot come up quietly writing to a container-local file that
+      # vanishes on the next push - so without this the blueprint could not
+      # start at all. It declared neither the variable nor a database to get it
+      # from, which made this file a description of a deployment that has never
+      # worked.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: facemark-db
+          property: connectionString
+      # One proxy in front (Render's edge), so X-Forwarded-For's last entry is
+      # the real client. Anything to its left was written by the caller - see
+      # auth.client_ip. Wrong here and the login and signup throttles are
+      # bypassable by sending a header.
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"
+
+databases:
+  - name: facemark-db
+    plan: basic-256mb
+    region: singapore       # same region as the web service, or every query pays
+                            # a cross-region round trip

@@ -47,5 +47,17 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
     CMD curl -fsS http://localhost:${PORT}/api/health || exit 1
 
+# NOT ROOT. deploy/aws/user-data.sh already does `chown -R 1000:1000 /data`,
+# which only makes sense for a container running as uid 1000 - it has been
+# expecting this the whole time, while the image ran everything as root. A
+# process that decodes uploaded video and images from the public internet is
+# the last one that should own the filesystem it runs on.
+#
+# uid 1000 exactly, not "some non-root user": the mounted volume's ownership is
+# set by the host, and a mismatch means the app cannot write photographs at all.
+RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin facemark \
+    && chown -R 1000:1000 /app
+USER 1000:1000
+
 # Two workers are affordable now that the models total 37 MB rather than 1 GB.
 CMD uvicorn backend.main:app --host 0.0.0.0 --port ${PORT} --workers 2 --timeout-keep-alive 75

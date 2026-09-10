@@ -25,7 +25,8 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Request
+from fastapi import (Depends, FastAPI, File, Form, HTTPException, Request,
+                     Response, UploadFile)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -2936,7 +2937,7 @@ def uploaded_file(name: str, user: dict = Depends(auth.require_staff)):
 
 
 @app.get("/api/health")
-def health():
+def health(response: Response):
     try:
         detector = get_detector()
         det_label = detector.backend_label
@@ -2956,10 +2957,22 @@ def health():
     n_students = None
     if db_ok:
         try:
-            n_students = len(database.list_students())
+            # COUNT(*), not len(list_students()). This runs on every health
+            # probe - the container checks every 30s, and so does whatever sits
+            # in front of it - and it was loading every student row, with their
+            # photo paths, to take a length.
+            n_students = database.count_students()
         except Exception:  # noqa: BLE001
             db_ok = False
 
+    # 503 WHEN THE DATABASE IS DOWN. The body still explains what is wrong -
+    # that part was right, and an operator needs the detail - but the STATUS
+    # said 200, so `curl -fsS` succeeded, the Docker HEALTHCHECK passed and the
+    # platform's health check passed, and an instance that could not read or
+    # write anything was reported healthy and kept in rotation. A health check
+    # that cannot fail is not a health check.
+    if not db_ok:
+        response.status_code = 503
     return {
         "status": "ok" if db_ok else "degraded",
         "database": "ok" if db_ok else "unreachable",

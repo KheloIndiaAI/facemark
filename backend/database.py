@@ -241,6 +241,14 @@ def init_db() -> None:
             # and never went through approval.
             "status": "TEXT NOT NULL DEFAULT 'active'",  # active|pending|rejected
         })
+        _ensure_columns(conn, "attendance_sessions", {
+            # Whether this register was OPENED as a centre-wide sweep, as
+            # opposed to having merely lost its coach later. coach_id IS NULL
+            # meant both, and the uniqueness below has to distinguish them -
+            # see _fix_sweep_uniqueness.
+            "is_sweep": "INTEGER NOT NULL DEFAULT 0",
+        })
+        _fix_sweep_uniqueness(conn)
         _ensure_columns(conn, "users", {
             # Account lifecycle. The column arrives with the admin dashboard so
             # it has a pending count to show; the gate that makes it MEAN
@@ -305,6 +313,33 @@ def init_db() -> None:
             "coach_join_code": "TEXT",
         })
         _ensure_join_codes(conn)
+
+
+def _fix_sweep_uniqueness(conn: Conn) -> None:
+    """Make the sweep index mean "opened as a sweep", not "has no coach now".
+
+    idx_sessions_sweep_day is UNIQUE (centre_id, date) WHERE coach_id IS NULL.
+    Deleting a coach sets coach_id NULL on the registers they opened - so other
+    athletes' attendance is not destroyed with the account - and those detached
+    registers then fell under an index built for super-admin sweeps. The second
+    such deletion at a centre on a day already holding one raised a unique
+    violation, and the entire delete_student transaction rolled back: the coach
+    could not be removed at all, with an error naming an index nobody would
+    connect to the act of deleting a person.
+
+    Backfill is exact: before this column existed, coach_id IS NULL happened
+    only for sweeps, because detaching was the operation that failed.
+    """
+    conn.execute(
+        "UPDATE attendance_sessions SET is_sweep = 1 "
+        " WHERE coach_id IS NULL AND COALESCE(is_sweep, 0) = 0"
+    )
+    conn.execute("DROP INDEX IF EXISTS idx_sessions_sweep_day")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sweep_day "
+        "ON attendance_sessions(centre_id, date) "
+        " WHERE coach_id IS NULL AND is_sweep = 1"
+    )
 
 
 def _swap_attendance_uniqueness(conn: Conn) -> None:
@@ -958,8 +993,14 @@ def stats(centre_id: Optional[int] = None) -> dict:
         # Every count here is athlete-only so the four dashboard tiles agree with
         # each other. Mixing coaches into one tile and not the others produced
         # "11 enrolled, 13 absent".
+        # ...and ACTIVE. A pending or rejected applicant is excluded from the
+        # gallery and cannot be marked present by any path, so counting them in
+        # the denominator meant a centre with three people waiting on approval
+        # could never reach 100% attendance however many people turned up - and
+        # the number it did show was not a fact about anybody's attendance.
         n_enrolled = conn.execute(
             "SELECT COUNT(*) FROM students s WHERE s.role = 'athlete' "
+            "AND s.status = 'active' "
             "AND EXISTS (SELECT 1 FROM templates t WHERE t.student_id = s.id)"
             + (" AND s.centre_id = ?" if centre_id is not None else ""), cp
         ).fetchone()[0]
@@ -1089,6 +1130,16 @@ def get_photos(
     return out
 
 
+def count_students() -> int:
+    """How many people are enrolled. A count, not a list.
+
+    The health probe used len(list_students()), which loads every row on every
+    check - and the container checks every thirty seconds.
+    """
+    with connect() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM students").fetchone()[0])
+
+
 def photo_files_for(student_id: int) -> List[str]:
     """Every stored image filename belonging to this person.
 
@@ -1193,8 +1244,12 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
         # The denominator: athletes who could actually be matched. Someone with
         # no template can never be recognised, so counting them makes a full
         # session look half-empty.
+        # ...and active, for the same reason stats() is: a pending or rejected
+        # applicant cannot be matched or marked, so counting them puts a ceiling
+        # under 100% that no amount of attendance can reach.
         enrolled = conn.execute(
             "SELECT COUNT(*) FROM students s WHERE s.role = 'athlete' "
+            "AND s.status = 'active' "
             "AND EXISTS (SELECT 1 FROM templates t WHERE t.student_id = s.id)" + cs, cp
         ).fetchone()[0]
 
@@ -1238,7 +1293,11 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
                 # 20.0 alone is a numeric literal in Postgres, so the quotient
                 # comes back as Decimal where SQLite gave a float. Casting to
                 # float8 keeps the bucket a JSON number, as the chart expects.
-                "SELECT CAST(a.confidence * 20 AS INT) / 20.0::double precision, COUNT(*) "
+                # FLOOR, not CAST(... AS INT). Postgres ROUNDS on that cast
+                # where SQLite truncated, so every confidence landed half a
+                # bucket high and the histogram shifted right - a chart that
+                # says matching is more confident than it is.
+                "SELECT FLOOR(a.confidence * 20) / 20.0::double precision, COUNT(*) "
                 "FROM attendance a JOIN students s ON s.id = a.student_id "
                 "WHERE a.status = 'confirmed' AND s.role = 'athlete' "
                 "  AND a.confidence IS NOT NULL" + acs +

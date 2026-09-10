@@ -35,7 +35,14 @@ Enforced server-side, on every request. Hiding a button is not access control.
 
 - **Athlete** — their own attendance and their own record, through `/api/me/*`.
   Nothing else. They cannot enrol anybody, delete anybody, open a register,
-  capture a group, or write attendance for any person including themselves.
+  capture a group, or read any other person's record, photograph or attendance.
+
+  One exception, stated because it is a real one: an athlete may mark
+  **themselves** present, through `POST /api/me/attendance`, under their own
+  face and against a coach who already coaches them. That writes a DRAFT into
+  that coach's register, never confirmed attendance — the coach still reviews
+  and signs it. This section previously said they could not write attendance
+  "for any person including themselves", which was not true of that route.
 - **Coach** — one centre. Every query is narrowed to their `centre_id`, and
   register actions to their own `coach_id`. They approve the athletes who chose
   them, and nobody else.
@@ -92,8 +99,14 @@ Nothing used to be deleted, ever. That is now bounded.
 | Registers nobody submitted | 18 hours, then expired and their drafts deleted | `sessions.SESSION_TTL_HOURS` |
 | Enrolled people and their attendance | Indefinitely, until deleted by an admin | — |
 
-Purging a registration deletes the **person, their face templates and their
-account together**. Half a deletion is worse than none: a `students` row with no
+Purging a registration deletes the **person, their face templates, their
+stored photographs and their account together**.
+
+The photographs are recent: the sweep used to delete the rows and leave every
+image on disk — the enrolment frames, the signup capture, anything added later
+— which is the opposite of what a retention limit is for. Deleting a person
+through `DELETE /api/students/{id}` removes their images too, and for the same
+reason. Half a deletion is worse than none: a `students` row with no
 account is a name nobody can explain, and templates with no person are a face
 the gallery cannot name.
 

@@ -877,26 +877,27 @@ Fixed in `827fc37`: authentication on all four media routes, centre scoping on
 `sqlite3.IntegrityError` catch, connection pooling, and `/api/health` no longer
 returning 500 when the database is unreachable.
 
+Since closed:
+
+- **`LIKE` is now `ILIKE`** (`backend/centres.py`). SQLite's `LIKE` is
+  case-insensitive for ASCII and PostgreSQL's is not, so "pune" returned nothing
+  while "Pune" worked.
+- **The confidence histogram no longer shifts.** `CAST(x AS INT)` **rounds** in
+  PostgreSQL where SQLite **truncated**, so every value landed half a bucket
+  high; it uses `FLOOR(a.confidence * 20)`.
+- **`scipy` is in `requirements.txt`**, with the reason attached. This entry
+  said it was missing long after it was added — the greedy fallback it warned
+  about has not been in use.
+- **The Dockerfile runs as uid 1000**, not root — matching the `chown -R
+  1000:1000 /data` this file's own bootstrap has always done.
+- **`vercel.json` is not in the repository.** This entry outlived the file.
+
 Still outstanding:
 
-- **`LIKE` was not changed to `ILIKE`** (`backend/centres.py:125-126, 133`).
-  SQLite's `LIKE` is case-insensitive for ASCII; PostgreSQL's is not. Centre
-  search now misses lowercase queries — "pune" returns nothing.
-- **The confidence histogram is still shifted.** `backend/database.py:659` fixed
-  the Decimal-vs-float return type but kept `CAST(x AS INT)`, which **rounds**
-  in PostgreSQL where SQLite **truncated**. Needs `FLOOR(a.confidence * 20)`.
-- **`scipy` is absent from `requirements.txt`** while
-  `backend/metaheuristics.py:178` imports `linear_sum_assignment` from it. The
-  fallback at `:186` is a greedy sort, not the Hungarian algorithm, so every
-  container runs a different assignment solver than the benchmarks measured —
-  silently.
-- **The Dockerfile still specifies `--workers 2`**, runs as root, floats on
-  `python:3.11-slim`, and copies `scripts/` into the image. The compose
-  `command:` overrides the worker count; the rest stands.
 - **No upload size limit in the application.** Caddy caps it at the proxy, which
   is the mitigation available without a code change.
-- **`vercel.json` still points `/api/*` at a dead Cloudflare quick-tunnel
-  hostname.** Unused here, but it should not stay in the repo.
+- **The Dockerfile floats on `python:3.11-slim`** and copies `scripts/` into the
+  image.
 
 `deploy/aws/user-data.sh` and `deploy/aws/schedule.md` describe the abandoned
 architecture — the former leaks the admin password four ways and its S3 backup

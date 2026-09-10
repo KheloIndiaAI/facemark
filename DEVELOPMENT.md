@@ -29,8 +29,18 @@ python run.py                   # http://127.0.0.1:8000
 
 On an empty database the first start creates a super admin and prints the
 password once, at WARNING level. It is never stored in plaintext — if you lose
-it, reset it with `POST /api/users/{id}/password` as another admin, or drop the
-`users` table and restart.
+it, reset it with `POST /api/users/{id}/password` as another admin, or delete
+the rows and restart:
+
+```sql
+DELETE FROM users;
+```
+
+Not `DROP TABLE users` — on PostgreSQL other tables carry foreign keys into it
+(`attendance_sessions.opened_by`, `users.approved_by`), so the drop fails with a
+dependency error unless it is cascaded, and cascading it would take those tables
+with it. `DELETE` leaves the schema intact and the bootstrap recreates the admin
+on the next start.
 
 `.env` is gitignored and must stay that way. `.env.example` is the committed
 template, with empty credentials.
@@ -130,11 +140,24 @@ because a later statement failed and rolled the transaction back.
 
 ## Liveness: the one threshold that is not settled
 
-`LIVENESS_MIN_DEPTH = 0.006` separates a real face from a photograph held up to
-the camera, and it was fitted on **two real people** and three flat portraits.
-The clusters it sits between are 0.0055 (flat) and 0.0072 (real), so the margin
-on the real-person side is about 1.2x. That is thin, and it is the difference
-between an athlete being refused attendance and a photograph being accepted.
+`LIVENESS_MIN_DEPTH = 0.0025` separates a real face from a photograph held up
+to the camera.
+
+**The 0.006 this section used to defend was withdrawn**, along with the numbers
+behind it. That fit came from clips whose motion ranges barely overlapped, and
+comparing two classes over different parts of the motion range measures the
+mismatch rather than the classes. Re-measured on a matched corpus — 150 real
+clips against 150 photograph clips built to the same frame count and the same
+measured motion — photographs land at 0.00060–0.00197 and real faces at
+0.00313–0.256 (median 0.0111). 0.0025 sits inside that gap: nothing flat
+accepted, nobody real refused, across 270 judged clips.
+
+The same measurement found the algorithm itself was wrong, not just the number:
+matching frame 0 against every later frame asks more of Lucas-Kanade than it can
+do across three seconds, so the residual measured the tracker failing rather
+than the subject's shape — and failure looks exactly like depth. A photograph
+waved hard outscored a real face. Points are followed frame to frame and checked
+by tracking them back again now. `backend/config.py` carries the full note.
 
 It cannot be improved without more clips, and the pilot is where they exist. To
 re-measure there:
@@ -155,6 +178,10 @@ between them. Move `LIVENESS_MIN_DEPTH` only if the two clusters are cleanly
 apart, and bias it toward the flat side as the current value does — a genuine
 athlete turned away is a worse failure than a spoof let through, because the
 first happens to somebody standing in front of you.
+
+**Sample both classes across the same range of movement.** That is the mistake
+the previous calibration made, and it is invisible in the output: two clusters
+can look cleanly apart when what separates them is how hard each was waved.
 
 Those clips are face data. They live on disk under a gitignored path and are
 deleted once the numbers are recorded; see [DATA-HANDLING.md](DATA-HANDLING.md).

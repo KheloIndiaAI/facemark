@@ -10,12 +10,15 @@ placeholders with `delete_demo_centres()`.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import secrets
 from datetime import datetime
 from typing import List, Optional
 
 from . import config, database
+
+log = logging.getLogger(__name__)
 
 EARTH_RADIUS_M = 6_371_000.0
 
@@ -163,15 +166,19 @@ def search_centres(
     q = (query or "").strip()
     if q:
         sql += (
-            " AND (code LIKE ? OR name LIKE ? OR state LIKE ? OR district LIKE ?"
-            " OR address LIKE ? OR sports LIKE ? OR incharge_name LIKE ?)"
+            # ILIKE, not LIKE. SQLite's LIKE is case-insensitive for ASCII
+            # and PostgreSQL's is not, so after the migration searching "pune"
+            # returned nothing while "Pune" worked - a search box that silently
+            # depends on capitalisation reads as "we have no such centre".
+            " AND (code ILIKE ? OR name ILIKE ? OR state ILIKE ? OR district ILIKE ?"
+            " OR address ILIKE ? OR sports ILIKE ? OR incharge_name ILIKE ?)"
         )
         params += [f"%{q}%"] * 7
     if state:
         sql += " AND state = ?"
         params.append(state)
     if sport:
-        sql += " AND sports LIKE ?"
+        sql += " AND sports ILIKE ?"
         params.append(f"%{sport}%")
     sql += " ORDER BY name LIMIT ?"
     params.append(limit)
@@ -323,27 +330,62 @@ def delete_demo_centres() -> int:
         return conn.execute("DELETE FROM centres WHERE is_demo = 1").rowcount
 
 
-def import_centres(rows: List[dict]) -> int:
-    """Bulk-load real centres. Each row needs at least `code` and `name`."""
+def import_centres(rows: List[dict]) -> dict:
+    """Bulk-load real centres. Each row needs at least `code` and `name`.
+
+    ONE BAD ROW USED TO KILL THE WHOLE IMPORT, halfway through. `int(...)` on a
+    capacity of "n/a", a row that is a list rather than an object, or a code
+    already in the table all raised, the request became a 500, and the rows
+    before the bad one were already committed - so the operator saw a server
+    error, no idea how far it got, and a re-run then failed on the duplicates
+    it had itself created.
+
+    Each row is now judged on its own and the failures are REPORTED. An import
+    of two hundred centres with three typos should load a hundred and
+    ninety-seven and name the three.
+    """
     n = 0
-    for r in rows:
+    skipped: List[dict] = []
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            skipped.append({"row": i + 1, "reason": "not a record"})
+            continue
         if not r.get("code") or not r.get("name"):
+            skipped.append({"row": i + 1, "code": r.get("code"),
+                            "reason": "code and name are both required"})
             continue
         sports = r.get("sports")
         if isinstance(sports, str):
             sports = [s.strip() for s in sports.split(",") if s.strip()]
-        create_centre(
-            code=r["code"], name=r["name"], centre_type=r.get("centre_type", "KIC"),
-            state=r.get("state"), district=r.get("district"), address=r.get("address"),
-            pincode=r.get("pincode"), sports=sports, capacity=int(r.get("capacity") or 0),
-            latitude=_f(r.get("latitude")), longitude=_f(r.get("longitude")),
-            geofence_m=int(r.get("geofence_m") or 300),
-            incharge_name=r.get("incharge_name"), contact_phone=r.get("contact_phone"),
-            contact_email=r.get("contact_email"), established=r.get("established"),
-            is_demo=False,
-        )
+        try:
+            create_centre(
+                code=r["code"], name=r["name"], centre_type=r.get("centre_type", "KIC"),
+                state=r.get("state"), district=r.get("district"), address=r.get("address"),
+                pincode=r.get("pincode"), sports=sports,
+                capacity=_i(r.get("capacity"), 0),
+                latitude=_f(r.get("latitude")), longitude=_f(r.get("longitude")),
+                geofence_m=_i(r.get("geofence_m"), 300),
+                incharge_name=r.get("incharge_name"), contact_phone=r.get("contact_phone"),
+                contact_email=r.get("contact_email"), established=r.get("established"),
+                is_demo=False,
+            )
+        except Exception as e:      # noqa: BLE001 - one row must not sink the file
+            log.warning("Centre import skipped row %d (%s): %s",
+                        i + 1, r.get("code"), e)
+            skipped.append({"row": i + 1, "code": r.get("code"),
+                            "reason": str(e)[:120]})
+            continue
         n += 1
-    return n
+    return {"imported": n, "skipped": skipped}
+
+
+def _i(v, default: int) -> int:
+    """int() that treats junk as absent. "n/a" in a capacity column is a typo,
+    not a reason to abandon two hundred good rows."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
 
 
 def _f(v):
@@ -351,3 +393,4 @@ def _f(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+

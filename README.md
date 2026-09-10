@@ -127,15 +127,21 @@ is recorded as unverified, not rejected.
 
 ## Roles
 
-Two account roles, and the difference is enforced in SQL rather than by hiding
-buttons.
+Three account roles, and the difference is enforced in SQL rather than by
+hiding buttons.
 
-| | Super admin | Coach |
-|---|---|---|
-| Centres | All, plus create / edit / import | Own centre only |
-| Athletes and coaches | All centres | Own centre only |
-| Attendance | All centres | Own centre only |
-| Login accounts | Full management | No access |
+| | Super admin | Coach | Athlete |
+|---|---|---|---|
+| Centres | All, plus create / edit / import | Own centre only | None |
+| Athletes and coaches | All centres | Own centre only | None |
+| Attendance | All centres | Own centre only | Their own, via `/api/me/*` |
+| Login accounts | Full management | No access | No access |
+| Photographs | All centres | Own centre only | None |
+
+An athlete sees their own record and their own attendance through `/api/me/*`
+and nothing else. That is enforced on the routes: the roster, the day's
+register, the CSV export, the centre statistics and every media route are
+staff-only, not merely hidden from the athlete's navigation.
 
 A coach passing another centre's `centre_id` in a query string gets a 403 —
 `auth.scope_centre` narrows every query server-side. The centre selector on the
@@ -309,24 +315,37 @@ trusted.
 **Liveness thresholds** were re-measured on real people through real browser VP8
 encoding after synthetic clips proved misleading:
 
-| | depth | motion |
-|---|---|---|
-| Flat photo, real VP8 | 0.0038 – 0.0055 | 0.17 – 0.21 |
-| Real face, small natural motion | 0.0072 – 0.0097 | 0.098 – 0.099 |
-| Real face, deliberate pose change | 0.17 – 0.32 | 0.20 – 0.37 |
+**Those numbers were withdrawn.** They came from clips whose motion ranges
+barely overlapped — photographs that happened to move gently, real faces that
+happened to move a lot — and comparing two classes over different parts of the
+motion range measures the mismatch, not the classes. Re-measured against a
+matched corpus (150 real clips, 150 photograph clips built to the same frame
+count and the same measured motion):
 
-`LIVENESS_MIN_DEPTH` is 0.006, between the two clusters and biased toward the
-flat side on purpose. The margin is thin — two people, one capture pipeline —
-and needs more real clips before it can be called settled.
+| | depth |
+|---|---|
+| Photographs | 0.00060 – 0.00197 |
+| Real faces | 0.00313 – 0.256 (median 0.0111) |
+
+`LIVENESS_MIN_DEPTH` is **0.0025**, inside that gap: no photograph accepted and
+no real person refused across 270 judged clips. The old figure only separated
+the classes because the comparison was unfair — measured fairly, the previous
+algorithm had no separation at any motion, and a photograph waved hard scored
+ABOVE a real face. See the calibration note in `backend/config.py`.
+
+Two regimes remain unmeasured and are reported as *unmeasurable* rather than
+judged: a face closer than `LIVENESS_MIN_FACE_PX` cannot be told from a
+photograph at all, so a group across a hall is **not** liveness-checked.
 
 **Caveats that matter.** The identification numbers come from roughly 13
 enrolled athletes in one lighting condition. `data/eval_labels.json` has three
 photos, one of which is a second frame of the same burst — a repeatability
 check, not an independent sample. At that N, an "equal error rate of 0.00%" is
 not a measurable quantity, whatever the sweep prints. And `scripts/live_test.py`
-— the harness whose threshold table justifies `MATCH_THRESHOLD` — currently
-crashes, so that table is not reproducible today. See
-[DEVELOPMENT.md](DEVELOPMENT.md#script-status).
+— the harness whose threshold table justifies `MATCH_THRESHOLD` — has since
+been repaired (the Row-unpack bug it died on is fixed), so that table is
+reproducible again — the sample-size point above still stands, though.
+Read the script's own docstring before running it.
 
 The defensible claim is: *this identified a small number of known athletes under
 one set of conditions and rejected the strangers it was shown.* That is a
@@ -362,9 +381,15 @@ scripts/            models, migration, evaluation, calibration  (see DEVELOPMENT
   and prefixed `DEMO-`. They are **not** real Khelo India records. Replace via
   Centres → Import, or delete with Centres → Remove demo.
 - **Several scripts are stale or broken**, including two that are destructive.
-  [DEVELOPMENT.md](DEVELOPMENT.md#script-status) has the current status of each;
-  check it before running anything in `scripts/`.
-- **`/api/health` returns 200 even when the database is unreachable** — it
+  Read the docstring at the top of anything in `scripts/` before running it —
+  each one states its own status. (This used to link to a
+  `DEVELOPMENT.md#script-status` section that does not exist, on the line
+  telling operators to check before running destructive scripts.)
+- **`/api/health` returns 503 when the database is unreachable**, with a body
+  explaining what is wrong. It used to answer 200 with `status: degraded`, so
+  the container's own HEALTHCHECK and the platform's both passed while the
+  instance could neither read nor write. The paragraph below describes the old
+  behaviour: it
   reports `"database": "unreachable"` in the body. That is deliberate, so an
   operator can see *why*, but it means container health checks do not catch a
   database outage.
