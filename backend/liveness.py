@@ -351,14 +351,31 @@ def analyse(data: bytes, detector) -> LivenessResult:
             code="unreadable",
         )
 
+    # WHICH frame the face was found in matters, because the tracking below
+    # starts from that frame. The fallback used to find the face in the middle
+    # of the clip and then hand its box to a search that always began at frame
+    # 0 - so on exactly the clips the fallback exists to rescue, the mask sat
+    # over a region of frame 0 that had never been checked for a face, and
+    # frequently held none. Whatever was under it was tracked instead, and a
+    # region with no depth reads as flat: a real person, refused as a
+    # photograph. That is the failure this whole check was rewritten to stop,
+    # surviving in the one branch nobody measured.
+    start = 0
     face = _largest_face(frames[0], detector)
     if face is None:
-        # Try the middle of the clip: the first frame is often the worst, caught
-        # before the camera has settled or the subject is in position.
-        face = _largest_face(frames[len(frames) // 2], detector)
+        # The first frame is often the worst - caught before the camera has
+        # settled or the subject is in position.
+        start = len(frames) // 2
+        face = _largest_face(frames[start], detector)
     if face is None:
         return LivenessResult("no_face", "No face was found in the clip",
                               code="no_face", frames_used=len(frames), frames=frames)
+    # Track from the frame the face is actually in, to the end of the clip.
+    track_frames = frames[start:]
+    if len(track_frames) < 2:
+        # The face only appears in the last frame, so there is no second
+        # viewpoint to compare it against.
+        track_frames = frames
 
     face_px = int(face.box[2] - face.box[0])
     result = LivenessResult(
@@ -387,7 +404,7 @@ def analyse(data: bytes, detector) -> LivenessResult:
         )
         return result
 
-    depth, motion, n_pts, measured = _depth_from_parallax(frames, face.box)
+    depth, motion, n_pts, measured = _depth_from_parallax(track_frames, face.box)
     result.depth_score, result.motion, result.tracked_points = depth, motion, n_pts
 
     if n_pts < config.LIVENESS_MIN_POINTS:

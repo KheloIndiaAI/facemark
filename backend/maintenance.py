@@ -31,7 +31,7 @@ import time
 from datetime import timedelta
 from typing import Dict
 
-from . import config
+from . import config, database, storage
 from .db import connect
 
 log = logging.getLogger(__name__)
@@ -95,6 +95,7 @@ def purge_abandoned_signups() -> Dict[str, int]:
     anybody who has attendance against their name.
     """
     out = {"pending": 0, "rejected": 0}
+    doomed_files: list = []
     pend_before = _cutoff(config.PENDING_SIGNUP_TTL_DAYS)
     rej_before = _cutoff(config.REJECTED_SIGNUP_TTL_DAYS)
 
@@ -119,6 +120,13 @@ def purge_abandoned_signups() -> Dict[str, int]:
                     log.warning("Not purging person %s: they have %d attendance row(s) "
                                 "despite never being approved. Investigate.", sid, n)
                     continue
+                # BEFORE the rows go: after them there is nothing left to say
+                # which files belonged to this person. The sweep used to delete
+                # the person, their templates and their account and leave every
+                # photograph of them on disk - which is the opposite of what a
+                # retention limit is for, and these are photographs of children.
+                doomed_files.extend(database.photo_files_for(sid))
+                conn.execute("DELETE FROM photos WHERE student_id = ?", (sid,))
                 conn.execute("DELETE FROM coach_athletes WHERE coach_id = ? OR athlete_id = ?",
                              (sid, sid))
                 conn.execute("DELETE FROM templates WHERE student_id = ?", (sid,))
@@ -128,9 +136,21 @@ def purge_abandoned_signups() -> Dict[str, int]:
                 conn.execute("DELETE FROM students WHERE id = ?", (sid,))
             out[r["status"]] = out.get(r["status"], 0) + 1
 
+    # Outside the transaction: a storage failure must not roll back a deletion
+    # that has already been decided, and a file that is already gone is fine.
+    gone = 0
+    for name in dict.fromkeys(doomed_files):
+        for prefix in ("students", "uploads"):
+            try:
+                storage.delete(prefix, name)
+                gone += 1
+            except Exception:      # noqa: BLE001 - missing is the desired state
+                pass
+
     if out["pending"] or out["rejected"]:
         log.warning("Retention: forgot %d abandoned and %d refused registration(s), "
-                    "including their face templates.", out["pending"], out["rejected"])
+                    "including their face templates and %d image file(s).",
+                    out["pending"], out["rejected"], gone)
     return out
 
 

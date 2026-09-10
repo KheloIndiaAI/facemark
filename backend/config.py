@@ -565,7 +565,19 @@ RATIO_TEST = True
 PLATT_CALIBRATION = False          # keep pure cosine similarity for matching decisions
 
 # --- v3.0: Illumination normalization -------------------------------------
-CLAHE_ENABLED = True               # CLAHE on abnormally lit faces before embedding
+# NOT IN THE PIPELINE. backend/enhancer.py implements this and nothing calls it:
+# grep for `enhancer.` across backend/ returns the module itself and no callers,
+# so no crop is normalised before embedding however these are set. The flag said
+# True, which is how a setting comes to be believed - somebody reads it, assumes
+# hard faces are already being helped, and looks elsewhere for the accuracy.
+#
+# Left wired-up-able rather than deleted, because the code is sound and the idea
+# is reasonable. It is NOT switched on here, because turning an untested
+# transform on for every embedding would change recognition for all 35 enrolled
+# people with no measurement behind it, and every threshold in this file was
+# calibrated without it. Measure first - scripts/live_test.py and
+# scripts/benchmark_detection.py are the harnesses - then decide.
+CLAHE_ENABLED = False              # see above: no caller, so this is descriptive
 CLAHE_CLIP_LIMIT = 2.0
 CLAHE_TILE_SIZE = 8
 

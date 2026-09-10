@@ -1089,6 +1089,39 @@ def get_photos(
     return out
 
 
+def photo_files_for(student_id: int) -> List[str]:
+    """Every stored image filename belonging to this person.
+
+    Both places it can be recorded: the portrait on the students row, and every
+    row in `photos`. Callers delete the files; this only says which they are, so
+    the answer is gathered BEFORE the rows go and cannot be lost with them.
+    """
+    names: List[str] = []
+    with connect() as conn:
+        row = conn.execute("SELECT photo_path FROM students WHERE id = ?",
+                           (int(student_id),)).fetchone()
+        if row and row["photo_path"]:
+            names.append(Path(row["photo_path"]).name)
+        for r in conn.execute("SELECT file_path FROM photos WHERE student_id = ?",
+                              (int(student_id),)).fetchall():
+            if r["file_path"]:
+                names.append(Path(r["file_path"]).name)
+    # de-duplicated, order kept
+    return list(dict.fromkeys(n for n in names if n))
+
+
+def forget_photo_rows(student_id: int) -> int:
+    """Drop this person's photos rows. Returns how many.
+
+    photos.student_id is ON DELETE SET NULL, so deleting the person left the
+    rows behind pointing at files with no owner - unattributable, unscopeable,
+    and still listed to a super admin.
+    """
+    with connect() as conn:
+        return conn.execute("DELETE FROM photos WHERE student_id = ?",
+                            (int(student_id),)).rowcount
+
+
 def media_centre(name: str) -> tuple:
     """(found, centre_id) for a stored media filename.
 

@@ -409,6 +409,14 @@ function handleRoute() {
         currentCameraCapture = null;
     }
 
+    // And close any open dialog. The capture modal tears its own stream down
+    // when it hides - closeModal's comment says exactly that - but nothing was
+    // hiding it on a route change, so navigating away from a live capture left
+    // the dialog and its camera running behind the next page, with the phone's
+    // camera light on and no visible way back to it.
+    const openModalEl = document.getElementById('modal-container');
+    if (openModalEl && !openModalEl.classList.contains('hidden')) closeModal();
+
     // Default route
     if (hash === '/') hash = home;
 
@@ -1072,28 +1080,39 @@ function livenessBanner(l, message) {
     if (!l) return '';
     const kind = l.verdict === 'screen' ? 'bad'
                : l.verdict === 'live'   ? 'good' : 'warn';
-    const title = l.verdict === 'screen' ? 'This looks like a screen, not a person'
-                : l.verdict === 'live'   ? 'Live capture confirmed'
+    // Titled from the server's CODE, not guessed from the verdict. "Could not
+    // confirm this was live" is the right headline for a clip nobody moved,
+    // and the wrong one for a group across a hall - which the check does not
+    // reach at all, and which is not a failure the coach can do anything about.
+    const title = l.verdict === 'live'    ? 'Live capture confirmed'
+                : l.verdict === 'screen'  ? 'This looks like a screen, not a person'
                 : l.verdict === 'no_face' ? 'No face in the clip'
+                : l.code === 'too_far'    ? 'Too far away to check'
+                : l.code === 'no_motion'  ? 'The camera did not move'
+                : l.code === 'no_detail'  ? 'Could not follow the face'
                 : 'Could not confirm this was live';
     const frames = (l.frame_urls || []).map(u =>
         `<img src="${Charts.esc(u)}" alt="Frame from the clip">`).join('');
 
     // What was actually measured, on a refusal. Without this a rejection is
     // unfalsifiable - the coach cannot tell "you barely moved" from "the
-    // threshold is wrong", and neither can anyone debugging it later. The
-    // advice is chosen from the numbers rather than being generic.
+    // threshold is wrong", and neither can anyone debugging it later.
+    //
+    // THE ADVICE IS THE SERVER'S. This used to add its own line, picked from
+    // the numbers, and it contradicted the message printed directly above it:
+    // a clip refused for being too distant was answered with "turn your head
+    // slowly left and right", which is not what happened and not something the
+    // person could act on. The server knows which of six reasons it was; the
+    // browser was guessing between two. Only the measurements are added here,
+    // because those cannot disagree with anything.
     let detail = '';
     if (l.verdict === 'screen' || l.verdict === 'inconclusive') {
         const bits = [];
         if (typeof l.depth_score === 'number') bits.push(`depth ${l.depth_score}`);
         if (typeof l.motion === 'number') bits.push(`motion ${l.motion}`);
         if (l.tracked_points) bits.push(`${l.tracked_points} points`);
-        const advice = (l.motion !== undefined && l.motion < 0.02)
-            ? 'Almost nothing moved. Turn your head slowly left and right while recording.'
-            : 'Try again, turning your head further and more slowly through the whole clip.';
-        detail = `<div class="text-xs text-muted mt-1">${Charts.esc(advice)}</div>
-                  <div class="text-xs text-muted mt-1" style="font-family:var(--font-mono)">${
+        if (l.face_px) bits.push(`face ${l.face_px}px`);
+        detail = `<div class="text-xs text-muted mt-1" style="font-family:var(--font-mono)">${
                       Charts.esc(bits.join(' · '))}</div>`;
     }
     return `

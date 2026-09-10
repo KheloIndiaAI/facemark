@@ -251,9 +251,13 @@ class FaceDetector:
 
     def __init__(self, mode: Optional[str] = None):
         self._lock = threading.Lock()
+        # Held across detect-and-read so the counts a caller gets are the ones
+        # its own call produced.
+        self._stats_lock = threading.Lock()
         self.mode = (mode or config.DETECTION_MODE).lower()
         self.last_filtered_printed = 0
         self.last_filtered_screen = 0
+        self._last_stats = {"printed": 0, "screens": 0}
         self._model_path = config.MODELS_DIR / config.YUNET_MODEL
         if not self._model_path.exists():
             raise FileNotFoundError(
@@ -326,10 +330,30 @@ class FaceDetector:
                 "Rejected %d face(s) that look like a photograph shown on a screen.",
                 screens,
             )
+        # PER-REQUEST NUMBERS ON A SHARED OBJECT. get_detector() returns one
+        # instance for the whole process and FastAPI runs these endpoints in a
+        # thread pool, so these two attributes were written here by every
+        # concurrent request and read a whole pipeline later by whichever one
+        # got there first - a coach could be shown another centre's spoof count,
+        # or a zero for the screen that was just held up in front of them.
+        # Kept for compatibility, but the response should use the return value
+        # of detect_with_stats instead.
         self.last_filtered_printed = printed
         self.last_filtered_screen = screens
+        self._last_stats = {"printed": printed, "screens": screens}
         faces.sort(key=lambda f: f.box[0])
         return faces
+
+    def detect_with_stats(self, img_bgr: np.ndarray, mode: Optional[str] = None):
+        """(faces, {printed, screens}) - the counts for THIS call.
+
+        The only safe way to report them: they travel back with the result
+        rather than being left on an object every other request also writes to.
+        """
+        with self._stats_lock:
+            faces = self.detect(img_bgr, mode)
+            stats = dict(getattr(self, "_last_stats", {"printed": 0, "screens": 0}))
+        return faces, stats
 
 
 _detector: Optional[FaceDetector] = None

@@ -420,10 +420,24 @@ def remove_student(student_id: int, user: dict = Depends(auth.require_staff)):
     # Without this a coach can delete any athlete at any centre in the country,
     # and ON DELETE CASCADE takes their templates and attendance history too.
     auth.owns_centre(user, student.get("centre_id"))
+    # Gathered BEFORE the rows go, or the answer disappears with them. This
+    # used to delete students.photo_path alone, so every multi-view enrolment
+    # frame, every added photo and the signup capture stayed on disk after the
+    # person was gone - photographs of children, kept for no reason anybody
+    # could state, and still listable by a super admin because photos.student_id
+    # is ON DELETE SET NULL rather than CASCADE.
+    names = database.photo_files_for(student_id)
+    database.forget_photo_rows(student_id)
     removed = database.delete_student(student_id)
-    if student.get("photo_path"):
-        storage.delete("students", Path(student["photo_path"]).name)
-    log.info("Deleted person %s: %s", student_id, removed)
+    gone = 0
+    for name in names:
+        for prefix in ("students", "uploads"):
+            try:
+                storage.delete(prefix, name)
+                gone += 1
+            except Exception:      # noqa: BLE001 - a missing file is fine
+                pass
+    log.info("Deleted person %s: %s (%d image file(s))", student_id, removed, gone)
     return {"ok": True, "removed": removed}
 
 
@@ -549,7 +563,7 @@ async def process_attendance(
     weights = {m.name: m.weight for m in recognizer.models}
 
     t0 = time.perf_counter()
-    faces = detector.detect(img, mode=det_mode)
+    faces, det_stats = detector.detect_with_stats(img, mode=det_mode)
     t1 = time.perf_counter()
     queries = recognizer.embed_faces(img, faces)          # {model: (Q,512)} batched
     fused, gallery_ids = fuse_scores(queries, gallery, weights)
@@ -787,11 +801,11 @@ async def process_attendance(
         "athletes_present": sum(1 for r in recognized if r.get("role") != "coach"),
         "coaches_present": sum(1 for r in recognized if r.get("role") == "coach"),
         "unknown_count": len(unknown),
-        "filtered_faces": getattr(detector, "last_filtered_printed", 0),
+        "filtered_faces": det_stats["printed"],
         # Surfaced separately from the poster count: a printed face in frame is
         # an accident, a screen held up to the camera is someone trying to mark
         # an absent athlete present, and the operator should be told.
-        "filtered_screen": getattr(detector, "last_filtered_screen", 0),
+        "filtered_screen": det_stats["screens"],
         "photo_quality": _photo_quality(faces, img),
         # A person attends exactly one centre. Matching against every centre's
         # roster at once invites cross-centre false positives, so say so plainly
