@@ -47,8 +47,8 @@ anywhere. `/api/stats` is unchanged by the drafts.
 |---|---|---|---|
 | 1.10 | `POST /api/sessions` get-or-create, idempotent | `[x]` | verify_phase1 27/27 |
 | 1.11 | `GET /api/sessions/{id}` roster + drafts + unknowns + captures | `[x]` | verify_phase1 27/27 |
-| 1.12 | `POST /api/sessions/{id}/captures` video **or** photo | `[x]` | verify_phase1 27/27 |
-| 1.13 | Photo capture records `liveness_verdict='not_checked'` | `[x]` | verify_phase1 27/27 |
+| 1.12 | `POST /api/sessions/{id}/captures` video **only** | `[x]` | changed: a still cannot be liveness-checked, so it is refused with 400 |
+| 1.13 | ~~Photo capture records `liveness_verdict='not_checked'`~~ | `[-]` | **withdrawn.** This described the hole rather than a feature: a still skipped the check entirely and still wrote drafts. Photos are refused now |
 | 1.14 | `PATCH /api/sessions/{id}/roster/{student_id}` toggle | `[x]` | verify_phase1 27/27 |
 | 1.15 | `GET /api/coaches/{id}/athletes` | `[x]` | route registered; scope_coach |
 | 1.16 | `POST`/`DELETE /api/coaches/{id}/athletes/{athlete_id}` | `[x]` | route registered; scope_coach |
@@ -204,7 +204,7 @@ Each was reproduced before it was fixed. Verified by `verify_matchable.py`
 | 8.11 | Rejection is recoverable | `[x]` | `/api/approvals/{id}/reopen`, super admin only |
 | 8.12 | The Accounts page shows the decision | `[x]` | `list_users` did not even select `status` |
 | 8.13 | A rejected login is told so | `[x]` | was "not active", which reads as "wait" |
-| 8.14 | Coach registration needs the centre's code | `[x]` | `centres.coach_join_code`, rotatable, never leaked to a coach |
+| 8.14 | ~~Coach registration needs the centre's code~~ | `[-]` | **not wired up.** `centres.coach_join_code` exists, is rotatable and is shown on the centre page - but `backend/signup.py` never reads it and the registration screen never asks for it (0 references in both). A coach application is gated by super-admin approval instead, which is a real control; the code is not one until something checks it |
 | 8.15 | Orphaned applicants are flagged and reassignable | `[x]` | chosen coach deleted -> flag, oversight tile, super-admin reassign |
 | 8.16 | `RATIO_TEST_THRESHOLD` removed, with evidence | `[x]` | measured 988 assignments: 0 flagged at either polarity; see config.py |
 
@@ -317,8 +317,8 @@ Several of these fail **silently**. Each needs its own check.
 
 | Item | Note |
 |---|---|
-| `DEVELOPMENT.md` | Referenced by the plan; **not present in the repo**. Its traps (`Row` unpacking yields keys, storage keys, startup concurrency, `?`→`%s` dialect) are known from prior work and are respected regardless. |
-| `DATA-HANDLING.md` | Referenced by §6 (deletion) and §9 (consent withdrawal); **not present in the repo**. |
+| `DEVELOPMENT.md` | **Present.** This entry said it was missing while the same repository contained it - and it is the file the row below points at for the traps (`Row` unpacking yields keys, storage keys, startup concurrency, `?`→`%s` dialect). |
+| `DATA-HANDLING.md` | **Present**, covering deletion and retention. Same correction. |
 
 ---
 
