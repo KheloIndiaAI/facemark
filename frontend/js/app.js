@@ -1888,8 +1888,22 @@ async function initRegisterPage() {
 let rosterState = { coachId: null, chosen: new Set() };
 
 async function openRosterEditor() {
+    // student_id is the coach's own students row, which is what addresses a
+    // register. It was absent from the auth payload until it was added to
+    // public_user, so this fell through to '' and asked for
+    // /api/coaches//roster - a 404 that read as "you have no athletes".
     const coachId = (regSession && regSession.coach_id)
         || (session.user && session.user.student_id) || '';
+    if (!coachId) {
+        // Normal for a super admin who is an operator, not a coach: there is no
+        // register that belongs to them. Say which account is the problem
+        // rather than sending a request that cannot succeed.
+        return openModal('Choose my athletes',
+            '<div class="empty-state">This account is not linked to a person '
+            + 'record for a coach, so it has no register of its own. Open a centre and '
+            + 'pick a coach, or ask a super admin to link this account.</div>',
+            '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
+    }
     try {
         const r = await api.get(`/api/coaches/${coachId}/roster`);
         rosterState.coachId = r.coach_id;

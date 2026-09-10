@@ -368,7 +368,23 @@ def resolve_token(token: str) -> Optional[dict]:
 
 
 def public_user(user: dict) -> dict:
-    """The user object safe to send to the browser (no hash, no salt)."""
+    """The user object safe to send to the browser (no hash, no salt).
+
+    student_id is the students row this account IS - see coach_student_id. The
+    browser needs it because a coach's own id is what addresses their register:
+    /api/coaches/<student_id>/roster. Leaving it out did not fail loudly; the
+    frontend fell back to an empty string, requested /api/coaches//roster, and
+    "Choose my athletes" broke in a way that looked like a missing roster
+    rather than a missing field.
+
+    It is not a secret. It identifies the caller to themselves, it is the id
+    they already appear under everywhere they are listed, and every route that
+    accepts it re-derives ownership through scope_coach rather than trusting
+    what the browser sends - so knowing it grants nothing.
+
+    Null for an account not linked to a person, which is normal for a super
+    admin who is an operator rather than a coach. Callers must handle that.
+    """
     return {
         "id": user["id"],
         "username": user["username"],
@@ -377,6 +393,7 @@ def public_user(user: dict) -> dict:
         "email": user.get("email"),
         "centre_id": user.get("centre_id"),
         "centre_name": user.get("centre_name"),
+        "student_id": user.get("student_id"),
         "is_super_admin": user["role"] == "super_admin",
     }
 
