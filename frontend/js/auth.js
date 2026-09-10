@@ -304,7 +304,14 @@ async function suAfterCoach() {
 function suFace() {
     openClipCapture({
         title: 'Record your face',
-        intro: 'Follow the prompts and turn your head as asked.',
+        // Says what green MEANS as well as that it happens. This is the first
+        // camera an applicant ever sees - there is no coach standing beside
+        // them to explain that the shutter is waiting for the dots, so a
+        // disabled button reads as a broken one.
+        intro: 'Follow the prompts and turn your head as asked. Dots appear on '
+             + 'your face as the camera finds it: they turn green once you are '
+             + 'framed properly, and the record button switches on at the same '
+             + 'moment.',
         // The framing guide polls a route that needs to know this caller was
         // invited. An applicant has no session - the account is what they are
         // applying for - so the signup token stands in for one.

@@ -2835,6 +2835,14 @@ function _arrowSvg(direction) {
             </svg>`;
 }
 
+/* The two states the tracking overlay can be in.
+ *
+ * Read by the canvas AND by the on-screen legend, because the legend's whole
+ * job is to say what these colours mean - a swatch that has drifted from the
+ * dots it describes teaches the wrong thing, and nothing would catch it. */
+const POSE_ACCENT_WAIT = '#f59e0b';   // amber: a face, but not usable yet
+const POSE_ACCENT_GOOD = '#22c55e';   // green: framed, and the shutter is live
+
 async function openClipCapture(opts) {
     /* Every pose-check poll goes through here.
      *
@@ -2882,6 +2890,18 @@ async function openClipCapture(opts) {
         <div id="clip-cap-status" class="text-sm text-muted mt-3">
             ${Charts.esc(opts.intro || "Hold the phone at arm's length. Follow the on-screen prompts - "
                                       + "recording stops automatically once every step is done.")}
+        </div>
+        <!-- What the dots on the face mean. People saw them change colour and
+             had no way to know that green was the signal they were waiting
+             for, or that the record button stays disabled until it appears -
+             the button looked broken rather than not-yet-ready. -->
+        <div class="clip-legend" id="clip-cap-legend">
+            <span class="clip-legend-item">
+                <i class="clip-dot" id="clip-dot-wait"></i>Keep adjusting
+            </span>
+            <span class="clip-legend-item">
+                <i class="clip-dot" id="clip-dot-good"></i>Green - ready to record
+            </span>
         </div>`);
 
     const video   = document.getElementById('clip-cap-video');
@@ -2890,6 +2910,13 @@ async function openClipCapture(opts) {
     const shutter = document.getElementById('clip-cap-shutter');
     const ring    = document.getElementById('clip-cap-ring');
     const status  = document.getElementById('clip-cap-status');
+
+    // Painted here rather than in the stylesheet so the swatches and the dots
+    // cannot disagree; see POSE_ACCENT_WAIT / POSE_ACCENT_GOOD.
+    const dotWait = document.getElementById('clip-dot-wait');
+    const dotGood = document.getElementById('clip-dot-good');
+    if (dotWait) dotWait.style.background = POSE_ACCENT_WAIT;
+    if (dotGood) dotGood.style.background = POSE_ACCENT_GOOD;
 
     const cam = new CameraCapture(video, null, null);
     cam.facingMode = 'user';                 // enrolment photographs the holder
@@ -2946,7 +2973,7 @@ async function openClipCapture(opts) {
 
         // Preferred: the on-device mesh. 478 points at video rate.
         if (state.mesh) {
-            const accentM = state.good ? '#22c55e' : '#f59e0b';
+            const accentM = state.good ? POSE_ACCENT_GOOD : POSE_ACCENT_WAIT;
             // Small and semi-transparent: 478 opaque dots read as a blob and
             // hide the face they are meant to be tracking.
             const r = Math.max(0.8, Math.min(1.8, overlay.width * 0.0035));
@@ -2979,7 +3006,7 @@ async function openClipCapture(opts) {
 
         const X = x1 * scale + dx, Y = y1 * scale + dy;
         const W = (x2 - x1) * scale, H = (y2 - y1) * scale;
-        const accent = state.good ? '#22c55e' : '#f59e0b';
+        const accent = state.good ? POSE_ACCENT_GOOD : POSE_ACCENT_WAIT;
 
         // A light frame, kept thin - it says where the face is, and the dots
         // below say the face is actually being tracked.
