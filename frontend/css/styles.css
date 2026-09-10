@@ -398,12 +398,6 @@ a:hover { color: var(--accent-hover); }
 .rec-prompt-arrow { flex: 0 0 auto; display: flex; color: #fbbf24; }
 .rec-prompt-arrow.hidden { display: none; }
 .rec-prompt-text { font-size: 13px; font-weight: 600; text-align: center; line-height: 1.3; }
-/* The live coaching line and the moment a turn is accepted. Both sit inside
-   the prompt pill so the person is looking at one place, not three. */
-.rec-prompt-live { font-size: 11px; opacity: .85; text-align: center; line-height: 1.3;
-                   margin-top: 2px; min-height: 13px; }
-.rec-prompt.done { background: rgba(22, 163, 74, .92); }
-.rec-prompt.done .rec-prompt-arrow { color: #fff; }
 
 .clip-review { position: relative; width: 100%; aspect-ratio: 3/4; background: #000;
                border-radius: var(--radius-md); overflow: hidden; }

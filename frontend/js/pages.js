@@ -141,14 +141,6 @@ async function openCentreDetail(id) {
         <h3 style="margin:20px 0 8px">Coaches (${c.coach_count})</h3>
         ${roster(c.coaches, 'coaches')}
 
-        ${c.pending_count ? `<div class="notice notice-amber" style="margin-top:20px">
-            <strong>${c.pending_count} registration${c.pending_count === 1 ? '' : 's'}
-            waiting for approval</strong>
-            <div class="text-xs text-muted mt-1">Not counted above and not on any
-            roster until somebody approves them. They used to be listed here as
-            though they already trained at this centre.</div>
-        </div>` : ''}
-
         `,
         `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`);
 }

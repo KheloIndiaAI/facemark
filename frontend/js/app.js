@@ -2440,16 +2440,6 @@ function meMark(coachId, coachName) {
     const send = async (pos) => {
         openClipCapture({
             title: `Mark present \u2014 ${coachName}`,
-            // One face against one enrolled record - the same 1:1 check as
-            // signing the register, and it wants one view, not four.
-            //
-            // Without this the intro below ("move the phone slowly from side
-            // to side") ran the four-turn head-turning sequence instead, so
-            // the written instruction and the on-screen prompts asked for
-            // different things at the same time, and a mark that should take
-            // three seconds took up to thirty-four. The register-signing
-            // capture was fixed for exactly this and its twin here was missed.
-            guided: false,
             intro: 'Record a few seconds of your own face, moving the phone slowly '
                  + 'from side to side.',
             onClip: async (file, ui) => {
@@ -2848,11 +2838,6 @@ async function openClipCapture(opts) {
             <div class="rec-prompt hidden" id="clip-cap-prompt">
                 <div class="rec-prompt-arrow" id="clip-cap-prompt-arrow"></div>
                 <div class="rec-prompt-text" id="clip-cap-prompt-text"></div>
-                <!-- The server's own words for THIS frame ("turn further",
-                     "hold the phone at eye level"). pose-check has always
-                     returned it and the guided sequence threw it away, so the
-                     only feedback was a prompt that changed on a timer. -->
-                <div class="rec-prompt-live" id="clip-cap-prompt-live"></div>
             </div>
             <div class="camera-controls" style="justify-content:center">
                 <button type="button" class="camera-shutter" id="clip-cap-shutter"
@@ -3122,31 +3107,8 @@ async function openClipCapture(opts) {
     const promptBox   = document.getElementById('clip-cap-prompt');
     const promptText  = document.getElementById('clip-cap-prompt-text');
     const promptArrow = document.getElementById('clip-cap-prompt-arrow');
-    const promptLive  = document.getElementById('clip-cap-prompt-live');
-
-    /* What the server said about the frame just sent. Cleared between steps so
-       advice for the previous turn cannot linger over the next one. */
-    function setPromptLive(text) {
-        if (promptLive) promptLive.textContent = text || '';
-    }
-
-    /* A turn was actually measured. Say so - visibly, and for long enough to
-       be seen at arm's length - before moving on. Without this, doing it right
-       and doing nothing at all looked identical. */
-    async function flashStepDone(text) {
-        promptBox.classList.add('done');
-        promptText.textContent = text || 'Got it';
-        promptArrow.innerHTML = '';
-        promptArrow.classList.add('hidden');
-        setPromptLive('');
-        if (navigator.vibrate) navigator.vibrate([25, 40, 25]);
-        await new Promise(res => setTimeout(res, 450));
-        promptBox.classList.remove('done');
-    }
 
     function setPromptStep(step) {
-        promptBox.classList.remove('done');
-        setPromptLive('');
         promptText.textContent = step.text;
         promptArrow.innerHTML = step.arrow ? _arrowSvg(step.arrow) : '';
         promptArrow.classList.toggle('hidden', !step.arrow);
@@ -3186,11 +3148,6 @@ async function openClipCapture(opts) {
                         const r = await pollPose(fd);
                         if (r) {
                             if (r.box) { state.box = r.box; draw(); }
-                            // The server's coaching for THIS frame. It knows
-                            // whether the head is turning the wrong way, not
-                            // far enough, or out of frame; the browser was
-                            // showing a fixed instruction regardless.
-                            if (!r.ok) setPromptLive(r.message || '');
                             if (r.ok) return r;
                         }
                     }
@@ -3236,14 +3193,8 @@ async function openClipCapture(opts) {
                         const r = await pollPose(fd);
                         if (r) {
                             if (r.box) { state.box = r.box; draw(); }
-                            if (r.ok) {
-                                hold++;
-                                setPromptLive(hold >= 3 ? '' : 'Hold it\u2026');
-                                if (hold >= 3) { baseYaw = r.yaw; basePitch = r.pitch; }
-                            } else {
-                                hold = 0;
-                                setPromptLive(r.message || '');
-                            }
+                            if (r.ok) { hold++; if (hold >= 3) { baseYaw = r.yaw; basePitch = r.pitch; } }
+                            else hold = 0;
                         }
                     }
                 }
@@ -3258,25 +3209,15 @@ async function openClipCapture(opts) {
         if (baseYaw === null) { baseYaw = 0; basePitch = 0; }
         setRing(0.2);
 
-        const measured = [];
         for (let i = 0; i < GUIDED_DIRECTIONS.length && !state.closed; i++) {
             const step = GUIDED_DIRECTIONS[i];
             setPromptStep(step);
-            const got = await waitForStep(step.key, baseYaw, basePitch,
-                                          STEP_TIMEOUT_MS, POLL_MS);
-            // Still advances either way - see GUIDED_CAPTURE_MAX_MS's comment,
-            // a stuck step must not become a stuck recording - but the two
-            // outcomes no longer look the same to the person doing it.
-            if (got) {
-                measured.push(step.key);
-                await flashStepDone('Got it');
-            } else if (!state.closed) {
-                setPromptLive('Did not see that turn - carrying on');
-                await new Promise(res => setTimeout(res, 350));
-            }
+            await waitForStep(step.key, baseYaw, basePitch, STEP_TIMEOUT_MS, POLL_MS);
+            // Advances whether or not the step measured complete in time -
+            // see GUIDED_CAPTURE_MAX_MS's comment. A stuck step must not
+            // become a stuck recording.
             setRing(0.2 + 0.2 * (i + 1));
         }
-        control.measured = measured;
 
         const elapsed = Date.now() - t0;
         if (!state.closed && elapsed < MIN_TOTAL_MS) {
@@ -3319,24 +3260,11 @@ async function openClipCapture(opts) {
                 ui.status('Recording - move the phone slowly side to side.');
                 file = await cam.recordClip(opts.clipMs || CLIP_MS_PLAIN, setRing);
             } else {
-                const control = { done: false, measured: [] };
+                const control = { done: false };
                 [file] = await Promise.all([
                     cam.recordClip(GUIDED_CAPTURE_MAX_MS, null, control),
                     runGuidedSequence(control),
                 ]);
-                // Honest about what the clip actually contains. A recording
-                // where one turn was never seen is not the same as one where
-                // all four were, and the person is the only one who can decide
-                // whether to redo it.
-                const seen = (control.measured || []).length;
-                if (seen < GUIDED_DIRECTIONS.length) {
-                    showToast(
-                        seen ? 'Some turns were not seen' : 'No turns were seen',
-                        `${seen} of ${GUIDED_DIRECTIONS.length} measured. `
-                        + 'The clip was still recorded - if it is refused, try '
-                        + 'again in better light and turn a little further.',
-                        seen ? 'info' : 'error');
-                }
             }
         } catch (err) {
             console.error('Guided capture failed:', err);
