@@ -573,7 +573,16 @@ const api = {
             });
             if (res.status === 401) { handleUnauthorized(); throw new Error('Unauthorized'); }
             const data = await res.json();
-            if (!res.ok) throw new Error(data.detail || 'API Error');
+            if (!res.ok) {
+                // The STATUS travels with the error. Without it a caller sees
+                // only a sentence and cannot tell "you are not allowed" from
+                // "slow down" from "the server broke" from "the network is
+                // gone" - and the camera framing loop reported all four as a
+                // lost connection because that was all it could distinguish.
+                const err = new Error(data.detail || 'API Error');
+                err.status = res.status;
+                throw err;
+            }
             return data;
         } catch (err) {
             if (!quiet && err.message !== 'Unauthorized') showToast('Error', err.message, 'error');
@@ -3056,6 +3065,68 @@ async function openClipCapture(opts) {
         }
     }
 
+    /* How often the framing guide asks the server. Slow is not a penalty: it
+     * is for a server that is already struggling or rate-limiting, which three
+     * requests a second makes worse. A success puts it straight back to fast. */
+    const FAST_POLL_MS = 350;
+    const SLOW_POLL_MS = 1500;
+    let framePollMs = FAST_POLL_MS;
+    const setFramePoll = (ms) => {
+        if (framePollMs === ms) return;
+        framePollMs = ms;
+        // Only re-arm a timer that is already running. Recording clears it on
+        // purpose so the guided sequence owns pose-check, and resurrecting it
+        // here would put two pollers on the same camera.
+        if (state.timer && !state.closed) {
+            clearInterval(state.timer);
+            state.timer = setInterval(tick, ms);
+        }
+    };
+
+    /* What a failed poll actually was, in words that match it.
+     *
+     * Returning null means "not worth counting" - one frame the server could
+     * not read is not a fault in the camera or the connection.
+     *
+     * `fatal` means retrying cannot help: the caller is no longer allowed to
+     * use the guide, so the honest thing is to stop and say why. Everything
+     * else keeps polling, because it may well come back - and on a phone,
+     * usually does. */
+    function pollFailure(err) {
+        const code = err && err.status;
+        if (code === 403) {
+            return opts.signupToken
+                // The signup token is the only credential an applicant has and
+                // it expires. Telling them the connection dropped sends them
+                // to look at their wifi instead of starting again.
+                ? { text: 'This registration has timed out - close and start again.',
+                    fatal: true }
+                : { text: 'Your session has expired - sign in again.', fatal: true };
+        }
+        if (code === 400) return null;             // an unreadable frame, not a streak
+        if (code === 429) return { text: 'Too busy - still trying\u2026', fatal: false };
+        if (code >= 500) return { text: 'The server is having trouble - still trying\u2026',
+                                  fatal: false };
+        return { text: 'Connection trouble - still trying\u2026', fatal: false };
+    }
+
+    /* The guided sequence's version: same classification, but it reports
+     * through the live prompt and tells the loop whether to give up.
+     *
+     * Both guided loops used to swallow every failure and retry until they
+     * timed out. With an expired signup token that is six seconds of "hold
+     * still" followed by four seven-second turns - over half a minute of
+     * somebody dutifully turning their head at a camera whose every frame is
+     * being refused - and then a recording that could only ever be rejected.
+     * Nothing on screen said a word about it. */
+    function guidedPollFailed(err) {
+        const f = pollFailure(err);
+        if (!f) return false;                 // one unreadable frame; retry
+        if (!f.fatal) return false;           // transient; retry, as before
+        setPromptLive(f.text);
+        return true;
+    }
+
     function grab(maxW) {
         if (!video.videoWidth) return null;
         const c = document.createElement('canvas');
@@ -3095,16 +3166,42 @@ async function openClipCapture(opts) {
                 ? (state.recording ? 'Recording - keep moving gently' : 'Face found - tap to record')
                 : (r.message || 'No face detected');
             if (!state.recording) shutter.disabled = !state.good;
+            // Recovered. Anything the last failure put on screen has just been
+            // overwritten by a real answer, so drop back to the fast poll.
             state.fails = 0;
+            setFramePoll(FAST_POLL_MS);
             draw();
-        } catch {
-            // One dropped frame is not worth reporting. A run of them is: an
-            // expired session made this 401 three times a second indefinitely.
+        } catch (err) {
+            /* THIS USED TO END THE CAPTURE. Five consecutive failures - at a
+             * 350ms poll, 1.75 seconds - cleared the timer, disabled the
+             * shutter and printed "Lost connection - close and try again".
+             *
+             * Two things were wrong with that. It was usually untrue: a 403
+             * from an expired signup token, a 429, or a 500 is not a lost
+             * connection, and somebody sent to check their wifi cannot fix any
+             * of them. And it was permanent - nothing ever restarted the poll,
+             * so a phone that hiccuped for two seconds on a train had to be
+             * closed and begun again, which for an applicant means the whole
+             * registration.
+             *
+             * Now the reason is named, the loop keeps trying unless trying is
+             * pointless, and one good frame clears it. */
+            const f = pollFailure(err);
+            if (!f) return;
             state.fails += 1;
-            if (state.fails >= 5) {
-                if (state.timer) clearInterval(state.timer);
-                hint.textContent = 'Lost connection - close and try again';
+            if (f.fatal) {
+                if (state.timer) { clearInterval(state.timer); state.timer = null; }
+                hint.textContent = f.text;
                 shutter.disabled = true;
+                return;
+            }
+            // Wait for a short run before saying anything: single dropped
+            // frames are normal and a message that flickers on every one of
+            // them is worse than silence.
+            if (state.fails >= 3) {
+                hint.textContent = f.text;
+                shutter.disabled = true;
+                setFramePoll(SLOW_POLL_MS);
             }
         } finally {
             state.busy = false;
@@ -3129,14 +3226,15 @@ async function openClipCapture(opts) {
             state.alive = true;
             state.fails = 0;
             if (state.timer) clearInterval(state.timer);
-            state.timer = setInterval(tick, 350);
+            framePollMs = FAST_POLL_MS;
+            state.timer = setInterval(tick, framePollMs);
             shutter.disabled = false;
             return true;
         },
         close() { teardown(); closeModal(); },
     };
 
-    state.timer = setInterval(tick, 350);
+    state.timer = setInterval(tick, framePollMs);
     tick();
 
     // On-device landmarks, if the runtime was fetched at build time. This is
@@ -3236,7 +3334,7 @@ async function openClipCapture(opts) {
                         }
                     }
                 }
-            } catch { /* one dropped poll - retry */ }
+            } catch (err) { if (guidedPollFailed(err)) return null; }
             await new Promise(res => setTimeout(res, pollMs));
         }
         return null;
@@ -3288,7 +3386,7 @@ async function openClipCapture(opts) {
                         }
                     }
                 }
-            } catch { /* retry */ }
+            } catch (err) { if (guidedPollFailed(err)) break; }
             if (baseYaw === null) await new Promise(res => setTimeout(res, POLL_MS));
         }
         // Framing never stabilised - fall through on an absolute baseline
@@ -3401,7 +3499,10 @@ async function openClipCapture(opts) {
             // use of pose-check; restore it so the shutter re-enables/
             // disables correctly for the retry instead of staying stuck at
             // whatever state.good last was.
-            if (!state.closed && !state.timer) state.timer = setInterval(tick, 350);
+            if (!state.closed && !state.timer) {
+                framePollMs = FAST_POLL_MS;
+                state.timer = setInterval(tick, framePollMs);
+            }
             return;
         }
 

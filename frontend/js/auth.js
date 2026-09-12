@@ -269,7 +269,28 @@ async function suLoadCoaches() {
     const j = await r.json();
     const list = j.coaches || [];
     if (!list.length) {
-        host.innerHTML = '<div class="empty-state">No coaches at that centre yet.</div>';
+        // A DEAD END UNTIL NOW. The account is created by the step before this
+        // one, so "No coaches at that centre yet." stranded somebody who had
+        // already taken a username, could not record a face, and could not
+        // start again under the same name. Every centre without an enrolled
+        // coach - which is most of them before a centre is set up - turned
+        // athlete registration into a trap.
+        //
+        // Going on without one is already supported by the side that matters:
+        // an application with no chosen coach is flagged `orphaned` in
+        // pending_for_coach and appears in the super admin's queue, for a
+        // person to attach to the right coach later. So offer that instead of
+        // a full stop.
+        host.innerHTML = '<div class="empty-state">No coaches have been enrolled at '
+            + 'that centre yet. You can still finish - a centre administrator will '
+            + 'approve you and put you with a coach.</div>';
+        const go = document.createElement('button');
+        go.type = 'button';
+        go.className = 'btn btn-primary';
+        go.style.width = '100%';
+        go.textContent = 'Continue without choosing a coach';
+        go.addEventListener('click', () => suAfterCoach());
+        host.appendChild(go);
         return;
     }
     host.innerHTML = list.map(c => `
