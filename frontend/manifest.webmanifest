@@ -16,6 +16,6 @@
   ],
   "shortcuts": [
     { "name": "Mark attendance", "url": "/#/mark", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
-    { "name": "Records", "url": "/#/records", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
+    { "name": "Students", "url": "/#/students", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
   ]
 }

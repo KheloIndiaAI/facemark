@@ -109,6 +109,12 @@ class CameraCapture {
             this.video.srcObject = this.stream;
             this.isActive = true;
             this.torchEnabled = false;
+            // Mirror the PREVIEW for the front camera only. The overlay's box
+            // and landmark dots flip to match (see openClipCapture.draw), so
+            // the two must agree - a mirrored overlay over an unmirrored video
+            // tracks the wrong way the moment the head moves. Attendance uses
+            // the rear camera and is left alone.
+            this._applyMirror();
 
             // If metadata is already available the event has fired and will not
             // fire again, so waiting on it here hung start() forever.
@@ -237,18 +243,144 @@ class CameraCapture {
         });
     }
     
+    /** Keep the preview's mirroring in step with the facing mode. */
+    _applyMirror() {
+        if (!this.video || !this.video.classList) return;
+        this.video.classList.toggle('mirrored', this.facingMode === 'user');
+    }
+
+    // Safari records MP4/H.264, Chrome and Firefox WebM/VP8-9. Both decode
+    // server-side through the same FFmpeg backend, so the first type this
+    // browser supports wins rather than forcing one and failing on the other.
+    static pickMimeType() {
+        if (!window.MediaRecorder) return null;
+        const candidates = [
+            'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm',
+            'video/mp4;codecs=avc1', 'video/mp4',
+        ];
+        for (const t of candidates) {
+            try { if (MediaRecorder.isTypeSupported(t)) return t; } catch { /* older browsers throw */ }
+        }
+        return '';
+    }
+
+    /** Record a short clip from the live stream.
+     *
+     * The clip is what proves the subject is a person rather than a photograph:
+     * a picture on a screen is flat, so everything in it moves as one plane,
+     * and the server measures that. A still frame cannot show it.
+     *
+     * @param {number} ms      how long to record
+     * @param {function} onTick called with 0..1 progress, for the UI ring
+     */
+    /**
+     * @param ms       safety ceiling - recording stops here even if `control`
+     *                 never signals done. For a fixed-length capture (attendance)
+     *                 this IS the duration; for a gated capture it is a backstop.
+     * @param onTick   called with 0..1 = elapsed/ms. Meaningless for a gated
+     *                 capture with no fixed target, so gated callers pass null
+     *                 and drive their own progress indicator instead.
+     * @param control  optional mutable {done: false}. The caller flips
+     *                 control.done = true to end the recording before `ms`
+     *                 elapses - this is what makes "stop once every instruction
+     *                 is verified complete" possible instead of a blind timer.
+     */
+    async recordClip(ms = 2000, onTick = null, control = null) {
+        if (!this.isActive || !this.stream) return null;
+        if (!window.MediaRecorder) {
+            showToast('Recording unavailable',
+                      'This browser cannot record video. Update it, or open the app in Chrome or Safari.',
+                      'error');
+            return null;
+        }
+        const mime = CameraCapture.pickMimeType();
+        let rec;
+        try {
+            rec = mime ? new MediaRecorder(this.stream, { mimeType: mime })
+                       : new MediaRecorder(this.stream);
+        } catch (err) {
+            showToast('Recording unavailable', 'The camera stream could not be recorded.', 'error');
+            return null;
+        }
+
+        const chunks = [];
+        rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+        const stopped = new Promise(resolve => { rec.onstop = resolve; });
+
+        if (navigator.vibrate) navigator.vibrate(40);
+        try {
+            rec.start();
+        } catch (err) {
+            showToast('Recording unavailable', 'The camera could not start recording.', 'error');
+            return null;
+        }
+
+        const t0 = Date.now();
+        // A timer rather than requestAnimationFrame: rAF is paused when the tab
+        // is not visible, which would leave a recording running with a frozen
+        // progress ring and no way to end it.
+        await new Promise(resolve => {
+            const tick = setInterval(() => {
+                const p = Math.min(1, (Date.now() - t0) / ms);
+                if (onTick) onTick(p);
+                if (p >= 1 || (control && control.done)) { clearInterval(tick); resolve(); }
+            }, 50);
+        });
+
+        try { rec.stop(); } catch { /* already stopped */ }
+        await stopped;
+
+        if (!chunks.length) {
+            showToast('Nothing recorded', 'The camera produced no video. Try again.', 'error');
+            return null;
+        }
+        const type = (mime || 'video/webm').split(';')[0];
+        const ext = type.includes('mp4') ? 'mp4' : 'webm';
+        const blob = new Blob(chunks, { type });
+        const file = new File([blob], `clip_${Date.now()}.${ext}`, { type });
+        file.source = `camera_${this.facingMode}`;
+        file.isClip = true;
+        return file;
+    }
+
     _startQualityMonitor() {
         if (this.qualityTimer) clearInterval(this.qualityTimer);
-        
+        if (!this.qualityBadge) return;
+
+        // This used to write "Good Lighting" every second regardless of the
+        // frame, with a comment admitting it was a placeholder. In a product
+        // whose whole job is telling a coach when a photo cannot be trusted, an
+        // indicator that always says "good" is worse than none - it is a
+        // confident wrong answer. It now measures the frame.
+        const probe = document.createElement('canvas');
+        probe.width = 64; probe.height = 48;
+        const pctx = probe.getContext('2d', { willReadFrequently: true });
+
         this.qualityTimer = setInterval(() => {
             if (!this.isActive || !this.video.videoWidth) return;
-            
-            // Very basic quality heuristic - just simulate for now or leave as 'Ready'
-            // In a real app we'd draw to an offscreen canvas and calculate brightness/blur
-            if (this.qualityBadge) {
-                this.qualityBadge.textContent = 'Good Lighting';
-                this.qualityBadge.style.color = '#34d399'; // green
+            let mean = 0, spread = 0;
+            try {
+                pctx.drawImage(this.video, 0, 0, probe.width, probe.height);
+                const d = pctx.getImageData(0, 0, probe.width, probe.height).data;
+                let sum = 0, sumSq = 0, n = 0;
+                // Luma, sampled: enough to tell dark from blown out.
+                for (let i = 0; i < d.length; i += 16) {
+                    const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+                    sum += y; sumSq += y * y; n++;
+                }
+                mean = sum / n;
+                spread = Math.sqrt(Math.max(0, sumSq / n - mean * mean));
+            } catch {
+                return;                       // a tainted or not-yet-ready frame
             }
+
+            let label, colour;
+            if (mean < 45)        { label = 'Too dark';        colour = '#f87171'; }
+            else if (mean > 215)  { label = 'Too bright';      colour = '#f87171'; }
+            else if (spread < 18) { label = 'Low contrast';    colour = '#fbbf24'; }
+            else                  { label = 'Lighting OK';     colour = '#34d399'; }
+            this.qualityBadge.textContent = label;
+            this.qualityBadge.style.color = colour;
         }, 1000);
     }
 }
@@ -262,16 +394,42 @@ function initRouter() {
 let currentCameraCapture = null;
 
 function handleRoute() {
-    let hash = window.location.hash.slice(1) || '/dashboard';
-    
+    // Mark Attendance is the landing page: taking the register is the job the
+    // app exists for and the one people open it to do. The dashboard reports on
+    // work already done, which is a second question, not the first.
+    // Role-aware default. An athlete has no business on the coach's capture
+    // screen, and landing there is how someone concludes the app is not for
+    // them. Coaches and admins keep Mark Attendance as the first thing they see.
+    const home = (typeof isAthlete === 'function' && isAthlete()) ? '/me' : '/mark';
+    let hash = window.location.hash.slice(1) || home;
+
     // Stop camera if navigating away
     if (currentCameraCapture) {
         currentCameraCapture.stop();
         currentCameraCapture = null;
     }
-    
+
+    // And close any open dialog. The capture modal tears its own stream down
+    // when it hides - closeModal's comment says exactly that - but nothing was
+    // hiding it on a route change, so navigating away from a live capture left
+    // the dialog and its camera running behind the next page, with the phone's
+    // camera light on and no visible way back to it.
+    const openModalEl = document.getElementById('modal-container');
+    if (openModalEl && !openModalEl.classList.contains('hidden')) closeModal();
+
     // Default route
-    if (hash === '/') hash = '/dashboard';
+    if (hash === '/') hash = home;
+
+    // Role gate. `home` only chose a starting point; typing the URL walked
+    // straight past it. The server is the real boundary - every one of these
+    // routes' endpoints is staff-only now - but a page that loads and then
+    // fails every request is a worse answer than not opening it.
+    const STAFF_ROUTES = ['/dashboard', '/mark', '/oversight', '/register',
+                          '/students', '/centres', '/users'];
+    if (typeof isAthlete === 'function' && isAthlete() && STAFF_ROUTES.includes(hash)) {
+        window.location.hash = '#' + home;
+        return;
+    }
     
     state.currentRoute = hash;
     
@@ -319,8 +477,26 @@ function handleRoute() {
         root.appendChild(tpl);
         initMarkPage();
     }
+    else if (hash === '/oversight') {
+        title.textContent = 'Oversight';
+        const tpl = document.getElementById('tpl-oversight').content.cloneNode(true);
+        root.appendChild(tpl);
+        initOversightPage();
+    }
+    else if (hash === '/me') {
+        title.textContent = 'My attendance';
+        const tpl = document.getElementById('tpl-me').content.cloneNode(true);
+        root.appendChild(tpl);
+        initMePage();
+    }
+    else if (hash === '/register') {
+        title.textContent = 'Register';
+        const tpl = document.getElementById('tpl-register').content.cloneNode(true);
+        root.appendChild(tpl);
+        initRegisterPage();
+    }
     else if (hash === '/students') {
-        title.textContent = 'Students';
+        title.textContent = 'Directory';
         actions.innerHTML = `
             <button class="btn btn-primary" onclick="openRegisterModal()">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
@@ -331,15 +507,13 @@ function handleRoute() {
         root.appendChild(tpl);
         renderStudents();
     }
-    else if (hash === '/analytics') {
-        title.textContent = 'Analytics';
-        renderAnalytics();
-    }
-    else if (hash === '/records') {
-        title.textContent = 'Records';
-        const tpl = document.getElementById('tpl-records').content.cloneNode(true);
-        root.appendChild(tpl);
-        initRecordsPage();
+    else if (hash === '/analytics' || hash === '/records') {
+        // Analytics was removed; Records moved to the foot of Mark Attendance.
+        // Redirected rather than left to fall through, so an old bookmark, an
+        // installed PWA shortcut or a back button lands somewhere useful
+        // instead of bouncing through the unknown-route branch.
+        window.location.hash = '#' + home;
+        return;
     }
     else if (hash === '/centres') {
         title.textContent = 'Khelo India Centres';
@@ -353,7 +527,7 @@ function handleRoute() {
         renderCentresPage();
     }
     else if (hash === '/users') {
-        if (!isSuperAdmin()) { window.location.hash = '#/dashboard'; return; }
+        if (!isSuperAdmin()) { window.location.hash = '#' + home; return; }
         title.textContent = 'Accounts';
         actions.innerHTML = `<button class="btn btn-primary" onclick="openAddUserModal()">Create account</button>`;
         root.appendChild(document.getElementById('tpl-users').content.cloneNode(true));
@@ -361,8 +535,9 @@ function handleRoute() {
     }
     else {
         // Unknown route - e.g. a bookmark to a page that no longer exists.
-        // Fall back to the dashboard rather than leaving the shell blank.
-        window.location.hash = '#/dashboard';
+        // Fall back to the landing page rather than leaving the shell blank -
+        // the caller's landing page, not the coach's.
+        window.location.hash = '#' + home;
     }
 }
 
@@ -379,29 +554,59 @@ const api = {
             throw err;
         }
     },
-    async postForm(endpoint, formData) {
+    // `method` exists because the register toggle is a PATCH. Without it the
+    // third argument was silently ignored and every toggle POSTed to a route
+    // that only accepts PATCH, which is a 405 the caller reports as a generic
+    // failure.
+    /* `quiet` suppresses the error toast and only throws.
+     *
+     * Right for a button somebody pressed: they deserve to know it failed.
+     * Wrong for a POLL - the camera guide calls this several times a second,
+     * so one bad minute stacks dozens of identical toasts over the very screen
+     * being used. Those loops already count failures and report a run of them
+     * once; they just had no way to stop this layer shouting first. */
+    async postForm(endpoint, formData, method = 'POST', quiet = false) {
         try {
             const res = await fetch(endpoint, {
-                method: 'POST',
+                method,
                 body: formData
             });
             if (res.status === 401) { handleUnauthorized(); throw new Error('Unauthorized'); }
             const data = await res.json();
-            if (!res.ok) throw new Error(data.detail || 'API Error');
+            if (!res.ok) {
+                // The STATUS travels with the error. Without it a caller sees
+                // only a sentence and cannot tell "you are not allowed" from
+                // "slow down" from "the server broke" from "the network is
+                // gone" - and the camera framing loop reported all four as a
+                // lost connection because that was all it could distinguish.
+                const err = new Error(data.detail || 'API Error');
+                err.status = res.status;
+                throw err;
+            }
             return data;
         } catch (err) {
-            if (err.message !== 'Unauthorized') showToast('Error', err.message, 'error');
+            if (!quiet && err.message !== 'Unauthorized') showToast('Error', err.message, 'error');
             throw err;
         }
     },
-    async delete(endpoint) {
+    /* Same shape as postForm: it reports the SERVER's reason, and `quiet` lets
+     * a caller that shows its own message stop this one firing too.
+     *
+     * It used to throw a flat 'API Error' and toast 'Failed to delete', so
+     * "You cannot delete your own account" - a thing somebody would want to
+     * read - arrived as three words that explain nothing, twice. */
+    async delete(endpoint, quiet = false) {
         try {
             const res = await fetch(endpoint, { method: 'DELETE' });
             if (res.status === 401) { handleUnauthorized(); throw new Error('Unauthorized'); }
-            if (!res.ok) throw new Error('API Error');
-            return await res.json();
+            let data = null;
+            try { data = await res.json(); } catch { /* some deletes return no body */ }
+            if (!res.ok) throw new Error((data && data.detail) || `Failed (${res.status})`);
+            return data;
         } catch (err) {
-            if (err.message !== 'Unauthorized') showToast('Error', 'Failed to delete', 'error');
+            if (!quiet && err.message !== 'Unauthorized') {
+                showToast('Error', err.message, 'error');
+            }
             throw err;
         }
     }
@@ -409,6 +614,17 @@ const api = {
 
 // --- Application Init ---
 /* Resolve a device location, resolving null rather than rejecting. */
+// Local calendar date as YYYY-MM-DD.
+//
+// NOT toISOString().split('T')[0], which is the UTC date: in IST that is
+// yesterday between midnight and 05:30, so an early-morning session - which is
+// most of them here - would open the register on the wrong day and show it
+// empty.
+function localISODate(d = new Date()) {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 function captureLocation() {
     return new Promise(resolve => {
         if (!navigator.geolocation) return resolve(null);
@@ -433,10 +649,23 @@ async function boot() {
     await initApp();
 }
 
+let _appInitialised = false;
+
 async function initApp() {
+    // Called from BOTH boot() and doLogin(), so signing out and back in used to
+    // install a second health interval and a second hashchange listener - the
+    // router then re-rendered every navigation twice, and it compounded on
+    // every re-login. The work below is one-time setup; only the routing needs
+    // to happen again, so that is all that runs on a repeat call.
+    if (_appInitialised) {
+        handleRoute();
+        return;
+    }
+    _appInitialised = true;
+
     checkHealth();
     setInterval(checkHealth, 30000); // Check health every 30s
-    
+
     // Mobile Nav
     const hamburger = document.getElementById('hamburger-btn');
     const sidebar = document.querySelector('.sidebar');
@@ -537,15 +766,39 @@ async function renderDashboard() {
             Charts.initChartInteraction(document.getElementById('app-root'));
         }
 
+        // Last 7 calendar days, not the last 7 sessions. A week with four
+        // sessions must show three empty days: collapsing it to four bars would
+        // draw an unbroken week and hide exactly the gap worth seeing.
+        const weekBox = document.getElementById('dashboard-week');
+        if (weekBox) {
+            const byDate = new Map(trend.map(d => [d.date, d.present]));
+            const week = [];
+            for (let i = 6; i >= 0; i--) {
+                const dt = new Date();
+                dt.setDate(dt.getDate() - i);
+                const iso = localISODate(dt);
+                week.push({
+                    label: iso,
+                    short: dt.toLocaleDateString(undefined, { weekday: 'short' }),
+                    value: byDate.get(iso) || 0,
+                });
+            }
+            weekBox.innerHTML =
+                Charts.barChart(week, { height: 180, empty: 'No attendance in the last 7 days' })
+                + Charts.tableView(['Date', 'Present'],
+                    week.map(d => [d.label, d.value]), 'Attendance, last 7 days');
+            Charts.initChartInteraction(document.getElementById('app-root'));
+        }
+
         // Render Recent Activity
-        const recentHtml = stats.recent.length === 0 ? 
+        const recentHtml = stats.recent.length === 0 ?
             '<div class="p-4 text-center text-muted">No recent activity</div>' :
             stats.recent.map(r => `
                 <div class="activity-item">
-                    <div class="avatar">${r.name.charAt(0)}</div>
+                    <div class="avatar">${Charts.esc(String(r.name || '').charAt(0))}</div>
                     <div class="activity-details">
-                        <div class="activity-name">${r.name}</div>
-                        <div class="activity-sub">${r.roll_no}</div>
+                        <div class="activity-name">${Charts.esc(r.name)}</div>
+                        <div class="activity-sub">${Charts.esc(r.roll_no)}</div>
                     </div>
                     <div class="activity-meta">
                         <div class="badge badge-green mb-1">${(r.confidence * 100).toFixed(0)}% Match</div>
@@ -597,113 +850,91 @@ async function populateMarkCentres() {
 
 function initMarkPage() {
     populateMarkCentres();
-    const fileInput = document.getElementById('mark-file');
-    const dropzone = document.getElementById('mark-dropzone');
-    const previewContainer = document.getElementById('mark-preview-container');
-    const previewImg = document.getElementById('mark-preview');
-    const dropContent = document.getElementById('mark-dropzone-content');
-    const clearBtn = document.getElementById('mark-clear-btn');
-    const processBtn = document.getElementById('btn-process');
-    const form = document.getElementById('mark-form');
 
-    // Camera & Tabs
-    const tabBtns = document.querySelectorAll('.tab-btn');
-    const tabPanels = document.querySelectorAll('.tab-panel');
-    const sourceInput = document.getElementById('mark-source');
+    const camContainer = document.getElementById('camera-container');
+    const clipReview   = document.getElementById('clip-review');
+    const clipPreview  = document.getElementById('clip-preview');
+    const retakeBtn    = document.getElementById('mark-retake-btn');
+    const shutterBtn   = document.getElementById('camera-shutter');
+    const ringFill     = document.getElementById('rec-ring-fill');
+    const recHint      = document.getElementById('rec-hint');
+    const processBtn   = document.getElementById('btn-process');
+    const form         = document.getElementById('mark-form');
+    if (!form || !camContainer) return;
 
-    if (tabBtns.length > 0) {
-        currentCameraCapture = new CameraCapture(
-            document.getElementById('camera-video'),
-            document.getElementById('camera-overlay'),
-            document.getElementById('camera-quality')
-        );
-        // A group is photographed across the room, so attendance starts on the
-        // rear camera; registration photographs the person holding the device
-        // and keeps the front one. The switch button overrides either.
-        currentCameraCapture.facingMode = 'environment';
+    let clipUrl = null;              // object URL for the preview
+    let recording = false;
 
-        tabBtns.forEach(btn => {
-            btn.addEventListener('click', async () => {
-                tabBtns.forEach(b => b.classList.remove('active'));
-                tabPanels.forEach(p => p.classList.remove('active'));
-                btn.classList.add('active');
-                
-                const target = btn.getAttribute('data-target');
-                const panel = document.querySelector(`.tab-panel[data-tab="${target}"]`);
-                if (panel) panel.classList.add('active');
-                if (sourceInput) sourceInput.value = target;
+    currentCameraCapture = new CameraCapture(
+        document.getElementById('camera-video'),
+        document.getElementById('camera-overlay'),
+        document.getElementById('camera-quality')
+    );
+    // A group is photographed across the room, so attendance starts on the rear
+    // camera. The switch button overrides it.
+    currentCameraCapture.facingMode = 'environment';
+    currentCameraCapture.start();
 
-                if (target === 'camera') {
-                    await currentCameraCapture.start();
-                } else {
-                    currentCameraCapture.stop();
-                }
-            });
-        });
+    const switchBtn = document.getElementById('camera-switch');
+    const flashBtn  = document.getElementById('camera-flash');
+    if (switchBtn) switchBtn.addEventListener('click', () => currentCameraCapture.switchCamera());
+    if (flashBtn)  flashBtn.addEventListener('click', () => currentCameraCapture.toggleFlash());
 
-        const switchBtn = document.getElementById('camera-switch');
-        const flashBtn = document.getElementById('camera-flash');
-        const shutterBtn = document.getElementById('camera-shutter');
-        
-        if (switchBtn) switchBtn.addEventListener('click', () => currentCameraCapture.switchCamera());
-        if (flashBtn) flashBtn.addEventListener('click', () => currentCameraCapture.toggleFlash());
-        if (shutterBtn) shutterBtn.addEventListener('click', async () => {
-            const file = await currentCameraCapture.capture();
-            if (file) {
-                // switch to upload tab
-                tabBtns[0].click();
-                handleFile(file);
-            }
-        });
+    const RING = 126;                // circumference of the progress ring
+    function setRing(p) {
+        if (ringFill) ringFill.style.strokeDashoffset = String(RING * (1 - p));
     }
 
-    // File Handling
-    function handleFile(file) {
-        if (!file || !file.type.startsWith('image/')) return;
-        currentMarkFile = file;
-        
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            previewImg.src = e.target.result;
-            dropContent.classList.add('hidden');
-            previewContainer.classList.remove('hidden');
-            processBtn.disabled = false;
-        };
-        reader.readAsDataURL(file);
-    }
-
-    fileInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
-    
-    dropzone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        dropzone.classList.add('dragover');
-    });
-    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
-    dropzone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropzone.classList.remove('dragover');
-        handleFile(e.dataTransfer.files[0]);
-    });
-
-    clearBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
+    function showCamera() {
+        if (clipUrl) { URL.revokeObjectURL(clipUrl); clipUrl = null; }
         currentMarkFile = null;
-        fileInput.value = '';
-        previewImg.src = '';
-        dropContent.classList.remove('hidden');
-        previewContainer.classList.add('hidden');
+        clipReview.classList.add('hidden');
+        camContainer.classList.remove('hidden');
         processBtn.disabled = true;
+        setRing(0);
+        if (recHint) recHint.classList.remove('hidden');
+        if (!currentCameraCapture.isActive) currentCameraCapture.start();
+    }
+
+    if (shutterBtn) shutterBtn.addEventListener('click', async () => {
+        if (recording) return;
+        recording = true;
+        shutterBtn.classList.add('recording');
+        if (recHint) recHint.textContent = 'Recording - move the phone slowly side to side';
+
+        // Attendance stays a short, fixed-length capture, unlike registration's
+        // guided sequence - see the note by CLIP_MS_ATTENDANCE.
+        const file = await currentCameraCapture.recordClip(CLIP_MS_ATTENDANCE, setRing);
+
+        shutterBtn.classList.remove('recording');
+        recording = false;
+        setRing(0);
+        if (recHint) recHint.textContent = 'Move the phone slowly from side to side while recording';
+        if (!file) return;
+
+        currentMarkFile = file;
+        // Review the clip with the camera stopped: leaving the stream live
+        // behind a paused recording drains the battery and keeps the indicator
+        // light on for no reason.
+        currentCameraCapture.stop();
+        clipUrl = URL.createObjectURL(file);
+        clipPreview.src = clipUrl;
+        clipPreview.play().catch(() => {});
+        camContainer.classList.add('hidden');
+        clipReview.classList.remove('hidden');
+        processBtn.disabled = false;
     });
 
-    // Submit
+    if (retakeBtn) retakeBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        showCamera();
+    });
+
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
         if (!currentMarkFile) return;
-
         processBtn.disabled = true;
-        
-        // --- Heavy Processing Progress Bar UI ---
+
         const resultsContainer = document.getElementById('mark-results-container');
         resultsContainer.innerHTML = `
             <div style="padding: 40px 20px; background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); text-align: center;">
@@ -713,50 +944,43 @@ function initMarkPage() {
                         <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-linecap="round"></path>
                     </svg>
                 </div>
-                <div style="font-size: 14px; font-weight: 500; color: var(--text-primary); margin-bottom: 16px;" id="progress-text">Initializing AI Engine...</div>
+                <div style="font-size: 14px; font-weight: 500; color: var(--text-primary); margin-bottom: 16px;" id="progress-text">Uploading the clip...</div>
                 <div style="width: 100%; height: 6px; background: var(--bg-elevated); border-radius: 3px; overflow: hidden; margin-bottom: 12px;">
                     <div id="progress-bar" style="width: 0%; height: 100%; background: var(--accent); transition: width 0.3s ease;"></div>
                 </div>
-                <div style="font-size: 12px; color: var(--text-muted); id="progress-eta">Analyzing heavy crowd photo... estimating time</div>
             </div>
             <style>@keyframes spin { 100% { transform: rotate(360deg); } }</style>
         `;
 
-        let progress = 0;
+        // The bar is INDETERMINATE, not a percentage. The old one was a random
+        // walk that crept to 96% and parked there, so on a slow request it
+        // showed a number that meant nothing and implied the work was nearly
+        // done for minutes. The client cannot know the server's progress, so it
+        // says what stage is expected and animates without claiming a figure.
         const progressEl = document.getElementById('progress-bar');
         const textEl = document.getElementById('progress-text');
-        
-        // Every phase here once named a component that no longer exists -
-        // YOLO11, SCRFD, AdaFace, ArcFace, cascade verification, age-aware
-        // matching - all removed with the licence migration or at the
-        // customer's request. Naming the pipeline was never useful to the
-        // person waiting; naming the STAGE is.
+        progressEl.style.width = '35%';
+        progressEl.style.animation = 'indeterminate 1.4s ease-in-out infinite';
+
         const phases = [
-            {p: 5,  t: "Uploading photo..."},
-            {p: 35, t: "Detecting faces..."},
-            {p: 65, t: "Matching against the roster..."},
-            {p: 90, t: "Saving attendance..."}
+            "Uploading the clip...",
+            "Checking the clip is a live person...",
+            "Detecting faces...",
+            "Matching against the roster...",
+            "Saving attendance...",
         ];
-        
         let phaseIdx = 0;
         const progressTimer = setInterval(() => {
-            if (phaseIdx < phases.length && progress >= phases[phaseIdx].p) {
-                textEl.textContent = phases[phaseIdx].t;
-                phaseIdx++;
-            }
-            if (progress < 96) {
-                progress += Math.random() * 1.5; // Simulate progress climbing slowly
-                progressEl.style.width = Math.min(progress, 96) + '%';
-            }
-        }, 200);
+            if (phaseIdx < phases.length) textEl.textContent = phases[phaseIdx++];
+        }, 900);
 
         const formData = new FormData();
-        formData.append('photo', currentMarkFile);
+        formData.append('video', currentMarkFile);
         formData.append('detection_mode', 'fused');
 
-        // Geo marking: attach the device fix if the user granted permission.
-        // A refusal or timeout is not an error - the capture is simply recorded
-        // as `no_fix` rather than blocking attendance.
+        // Geo marking: attach the device fix if permission was granted. A
+        // refusal is not an error - the capture records as `no_fix` rather than
+        // blocking attendance.
         const fix = await captureLocation();
         if (fix) {
             formData.append('latitude', fix.latitude);
@@ -769,29 +993,147 @@ function initMarkPage() {
             const cs = document.getElementById('mark-centre');
             if (cs && cs.value) formData.append('centre_id', cs.value);
         }
-        if (currentMarkFile.source) {
-            formData.append('source', currentMarkFile.source);
-        } else if (document.getElementById('mark-source')) {
-            formData.append('source', document.getElementById('mark-source').value);
-        }
+        formData.append('source', currentMarkFile.source || 'video');
 
         try {
-            const data = await api.postForm('/api/attendance/process', formData);
+            const data = await api.postForm('/api/attendance/process-video', formData);
             clearInterval(progressTimer);
+            progressEl.style.animation = '';      // stop animating, settle full
             progressEl.style.width = '100%';
-            textEl.textContent = "Done!";
+            textEl.textContent = "Done";
+
             setTimeout(() => {
-                renderMarkResults(data);
-                showToast('Success', `${data.recognized_count} student(s) marked present`, 'success');
+                // Re-queried rather than reusing the reference captured before
+                // the upload: that one is a detached node after a route change,
+                // so writing to it silently goes nowhere.
+                const live = document.getElementById('mark-results-container');
+                if (data.ok === false) {
+                    // Refused. The frames the server judged are shown alongside
+                    // the reason: a rejection nobody can inspect is one nobody
+                    // can appeal, and a coach needs to see what the camera saw.
+                    if (live) {
+                        live.innerHTML = livenessBanner(data.liveness, data.message)
+                            + `<div class="empty-state" style="padding-top:8px">
+                                 <div class="text-xs text-muted">No attendance was recorded for this clip.</div>
+                               </div>`;
+                    }
+                    showToast('Not accepted', data.message || 'The clip was refused', 'error');
+                    return;
+                }
+                // The toast fires whether or not the panel is still on screen,
+                // so a coach who navigated away still learns the mark landed.
+                const shown = renderMarkResults(data);
+                // A coach's capture goes into today's register as DRAFTS now -
+                // it always should have; writing confirmed attendance straight
+                // from a clip skipped the review and the signature. Say so,
+                // rather than reporting people "marked present" when what is
+                // waiting is a register somebody still has to sign.
+                if (data.drafted_to_register) {
+                    showToast('Added to today’s register',
+                              `${data.newly_marked || 0} draft(s) · review and submit in Register`
+                              + (shown ? '' : ' - reopen Mark Attendance to see the summary'),
+                              'success');
+                } else {
+                    showToast('Success',
+                              `${data.recognized_count} student(s) marked present`
+                              + (shown ? '' : ' - reopen Mark Attendance to see the summary'),
+                              'success');
+                }
             }, 300);
         } catch (err) {
             clearInterval(progressTimer);
-            resultsContainer.innerHTML = `<div style="color: var(--red);">Error processing image. Check console.</div>`;
+            console.error('Attendance processing failed:', err);
+            const live = document.getElementById('mark-results-container');
+            if (live) {
+                live.innerHTML =
+                    `<div style="color: var(--red);">Could not process the clip. Try again.</div>`;
+            }
+            showToast('Could not process', 'The clip was not processed. Try again.', 'error');
         } finally {
             processBtn.disabled = false;
         }
     });
+
+    // Records, collapsed at the foot of the page.
+    const recToggle = document.getElementById('btn-toggle-records');
+    const recBody = document.getElementById('mark-records-body');
+    if (recToggle && recBody) {
+        recToggle.addEventListener('click', () => {
+            if (!recBody.classList.contains('hidden')) {
+                recBody.classList.add('hidden');
+                recToggle.setAttribute('aria-expanded', 'false');
+                return;
+            }
+            // Built on first open rather than at page load: the register is a
+            // follow-up question, and fetching it up front would delay the
+            // camera for a request most sessions never make.
+            if (!recBody.dataset.ready) {
+                recBody.appendChild(
+                    document.getElementById('tpl-records').content.cloneNode(true));
+                recBody.dataset.ready = '1';
+                initRecordsPage();
+            }
+            recBody.classList.remove('hidden');
+            recToggle.setAttribute('aria-expanded', 'true');
+        });
+    }
 }
+
+/** The liveness verdict, with the frames it was decided from.
+ *
+ * "inconclusive" is deliberately not styled as a failure: it means the clip
+ * carried no depth information either way, usually because nothing moved, and
+ * telling someone they were rejected when they were not is its own bug.
+ */
+function livenessBanner(l, message) {
+    if (!l) return '';
+    const kind = l.verdict === 'screen' ? 'bad'
+               : l.verdict === 'live'   ? 'good' : 'warn';
+    // Titled from the server's CODE, not guessed from the verdict. "Could not
+    // confirm this was live" is the right headline for a clip nobody moved,
+    // and the wrong one for a group across a hall - which the check does not
+    // reach at all, and which is not a failure the coach can do anything about.
+    const title = l.verdict === 'live'    ? 'Live capture confirmed'
+                : l.verdict === 'screen'  ? 'This looks like a screen, not a person'
+                : l.verdict === 'no_face' ? 'No face in the clip'
+                : l.code === 'too_far'    ? 'Too far away to check'
+                : l.code === 'no_motion'  ? 'The camera did not move'
+                : l.code === 'no_detail'  ? 'Could not follow the face'
+                : 'Could not confirm this was live';
+    const frames = (l.frame_urls || []).map(u =>
+        `<img src="${Charts.esc(u)}" alt="Frame from the clip">`).join('');
+
+    // What was actually measured, on a refusal. Without this a rejection is
+    // unfalsifiable - the coach cannot tell "you barely moved" from "the
+    // threshold is wrong", and neither can anyone debugging it later.
+    //
+    // THE ADVICE IS THE SERVER'S. This used to add its own line, picked from
+    // the numbers, and it contradicted the message printed directly above it:
+    // a clip refused for being too distant was answered with "turn your head
+    // slowly left and right", which is not what happened and not something the
+    // person could act on. The server knows which of six reasons it was; the
+    // browser was guessing between two. Only the measurements are added here,
+    // because those cannot disagree with anything.
+    let detail = '';
+    if (l.verdict === 'screen' || l.verdict === 'inconclusive') {
+        const bits = [];
+        if (typeof l.depth_score === 'number') bits.push(`depth ${l.depth_score}`);
+        if (typeof l.motion === 'number') bits.push(`motion ${l.motion}`);
+        if (l.tracked_points) bits.push(`${l.tracked_points} points`);
+        if (l.face_px) bits.push(`face ${l.face_px}px`);
+        detail = `<div class="text-xs text-muted mt-1" style="font-family:var(--font-mono)">${
+                      Charts.esc(bits.join(' · '))}</div>`;
+    }
+    return `
+        <div class="liveness-banner ${kind}">
+            <div class="liveness-title">${Charts.esc(title)}</div>
+            <div class="text-sm">${Charts.esc(message || l.reason || '')}</div>
+            ${detail}
+            ${frames ? `<div class="liveness-frames">${frames}</div>
+                        <div class="text-xs text-muted mt-1">Frames the check was made from</div>` : ''}
+        </div>`;
+}
+
 
 function geoBanner(geo) {
     if (!geo) return '';
@@ -816,10 +1158,20 @@ function geoBanner(geo) {
 }
 
 function renderMarkResults(data) {
+    // Re-queried, and allowed to be absent. Results are rendered from a
+    // setTimeout after an upload, and changing route REPLACES the mark page's
+    // markup - so a coach who walks to another tab while a clip processes used
+    // to land here with a null container and throw. The attendance was already
+    // recorded by then, so the throw lost the summary AND the success toast
+    // that follows this call, making a successful mark look like a failure.
     const container = document.getElementById('mark-results-container');
+    if (!container) return false;
     const totalSec = (data.timings.total_ms / 1000).toFixed(1);
-    
-    let html = `
+
+    // Shown on success too, not only on refusal. A coach should be able to see
+    // that the liveness check ran and passed - a guard that is invisible when
+    // it works is one nobody trusts when it fires.
+    let html = livenessBanner(data.liveness) + `
         <!-- Sticky Quick Jump Slider Bar -->
         <div style="position: sticky; top: 0; z-index: 20; background: var(--bg-surface); padding-bottom: 12px; margin-bottom: 16px; border-bottom: 1px solid var(--border-subtle); display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
             <button type="button" class="btn btn-secondary" style="height: 30px; font-size: 12px; padding: 0 10px;" onclick="document.getElementById('sec-summary').scrollIntoView({behavior:'smooth'})">
@@ -918,11 +1270,11 @@ function renderMarkResults(data) {
             html += `
                 <div class="face-card" style="border: 1px solid var(--border-subtle); background: var(--bg-elevated);">
                     <div class="face-img-wrap" style="height: 140px;">
-                        <img src="${r.face_url}" class="face-img" alt="${r.name}">
+                        <img src="${Charts.esc(r.face_url)}" class="face-img" alt="${Charts.esc(r.name)}">
                     </div>
                     <div class="face-info">
-                        <div class="face-name" style="font-size: 14px; font-weight: 600;">${r.name}</div>
-                        <div class="face-sub" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">${r.roll_no}
+                        <div class="face-name" style="font-size: 14px; font-weight: 600;">${Charts.esc(r.name)}</div>
+                        <div class="face-sub" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">${Charts.esc(r.roll_no)}
                             ${r.role === 'coach' ? '<span class="badge badge-blue" style="margin-left:6px">Coach</span>' : ''}</div>
                         <div class="flex-between text-xs text-muted mb-1">
                             <span>Match Accuracy</span>
@@ -986,14 +1338,148 @@ function renderMarkResults(data) {
     }
 
     container.innerHTML = html;
+    return true;
 }
 
 // --- Students Page ---
+/* ---------------------------------------------------------------------------
+   One athlete, in full
+
+   The directory is a grid of thumbnails; this is where somebody actually looks
+   at a person - the photo at a size worth having, what is on record, and a copy
+   of the picture if they need one for a form.
+--------------------------------------------------------------------------- */
+
+function openStudentDetail(studentId) {
+    // From the list the grid was drawn from, not a fresh request: there is no
+    // GET /api/students/{id}, and adding one would be a new route and a new
+    // access decision for data this page already holds.
+    const p = (state.students || []).find(x => String(x.id) === String(studentId));
+    if (!p) {
+        return showToast('Could not open', 'That athlete is no longer listed.', 'error');
+    }
+    const line = (k, v) => v ? `
+        <div><span class="ck">${Charts.esc(k)}</span><div>${Charts.esc(String(v))}</div></div>` : '';
+
+    openModal(p.name || 'Athlete', `
+        <div style="display:flex;gap:18px;flex-wrap:wrap">
+            <div style="flex:0 0 220px;max-width:100%">
+                <img src="${p.photo_url}" alt="${Charts.esc(p.name || '')}"
+                     style="width:220px;height:220px;object-fit:cover;border-radius:12px;background:var(--bg-subtle)">
+                <button class="btn btn-secondary" style="width:220px;margin-top:8px"
+                        data-download-photo data-url="${p.photo_url}"
+                        data-filename="${Charts.esc((p.roll_no || p.name || 'athlete'))}.jpg">
+                    Download photo
+                </button>
+            </div>
+            <div style="flex:1;min-width:220px">
+                <div class="detail-grid">
+                    <div><span class="ck">NSRS ID</span>
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                            <span${isPlaceholderId(p.roll_no)
+                                ? ' style="opacity:.65;font-style:italic"' : ''
+                            }>${Charts.esc(rollLabel(p.roll_no))}</span>
+                            <button class="btn btn-secondary"
+                                style="min-height:26px;padding:0 8px;font-size:11px"
+                                data-set-nsrs data-student-id="${p.id}"
+                                data-current="${Charts.esc(p.roll_no || '')}"
+                                data-name="${Charts.esc(p.name || '')}">
+                                ${isPlaceholderId(p.roll_no) ? 'Set' : 'Change'}</button>
+                        </div></div>
+                    ${line('Role', p.role)}
+                    ${line('Gender', p.gender)}
+                    ${line('Sport', p.sport)}
+                    ${line('Days present', p.total_present ?? 0)}
+                    ${line('Face templates', p.templates ?? 0)}
+                    ${line('Enrolled', (p.created_at || '').replace('T', ' '))}
+                </div>
+            </div>
+        </div>`,
+        `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`);
+}
+
+async function downloadStudentPhoto(url, filename) {
+    // Fetched, not linked. /api/photos needs a session, and a plain
+    // <a download> hands the URL to the browser's downloader, which does not
+    // send the Authorization header - the file would come back as a 401 page
+    // saved under a .jpg name.
+    try {
+        const res = await fetch(url, { credentials: 'same-origin' });
+        if (!res.ok) throw new Error(`Server said ${res.status}`);
+        const blob = await res.blob();
+        const href = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = href;
+        a.download = filename || 'athlete.jpg';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(href), 10000);
+    } catch (err) {
+        showToast('Could not download', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+/* A signup has to fill roll_no with something - the column is unique and NOT
+   NULL - so it gets PEND-xxxxxxxx. That is a placeholder, not an NSRS ID, and
+   showing it verbatim put an official-looking code next to somebody's name
+   that nobody could look up or correct. */
+function isPlaceholderId(roll) {
+    return !roll || String(roll).startsWith('PEND-');
+}
+
+function rollLabel(roll) {
+    return isPlaceholderId(roll) ? 'NSRS ID not set' : roll;
+}
+
+async function setNsrsId(studentId, current, name) {
+    const next = window.prompt(
+        `NSRS ID for ${name}.\n\nThis is the official Khelo India identifier. `
+        + `Leave blank to cancel.`, isPlaceholderId(current) ? '' : current);
+    if (next === null) return;
+    const val = next.trim();
+    if (!val) return;
+    try {
+        const fd = new FormData();
+        fd.append('roll_no', val);
+        await api.postForm(`/api/people/${studentId}`, fd, 'PATCH');
+        showToast('NSRS ID set', `${name} is now ${val}.`, 'success');
+        closeModal();
+        renderStudents();
+    } catch (err) {
+        // A duplicate is the likely failure and worth naming: two people cannot
+        // share an NSRS ID, and the server's unique constraint says so.
+        showToast('Could not set it',
+                  (err && err.message) || 'That ID may already belong to somebody.',
+                  'error');
+    }
+}
+
+let studentRole = 'athlete';
+
 async function renderStudents() {
     try {
-        const data = await api.get('/api/students');
+        // The page is the ATHLETE Directory, so it asks for athletes. Coaches
+        // are enrolled people too and this is the only screen that can enrol
+        // one, so they are one button away rather than unreachable.
+        const data = await api.get(`/api/students?role=${encodeURIComponent(studentRole)}`);
         state.students = data.students;
         drawStudents(state.students);
+
+        document.querySelectorAll('[data-role-filter]').forEach(b => {
+            b.className = 'btn ' + (b.dataset.roleFilter === studentRole
+                ? 'btn-primary' : 'btn-secondary');
+            b.onclick = () => {
+                if (studentRole === b.dataset.roleFilter) return;
+                studentRole = b.dataset.roleFilter;
+                renderStudents();
+            };
+        });
+        const title = document.getElementById('page-title');
+        if (title) {
+            title.textContent = studentRole === 'coach'
+                ? 'Coaches' : 'Athletes';
+        }
 
         document.getElementById('student-search').addEventListener('input', (e) => {
             const term = e.target.value.toLowerCase();
@@ -1021,24 +1507,58 @@ function drawStudents(students) {
             `<span class="badge ${nTmpl >= 6 ? 'badge-green' : 'badge-blue'}" style="font-size: 10px;" title="Face templates stored for this person">${nTmpl} template${nTmpl === 1 ? '' : 's'}</span>` : '';
         return `
         <div class="student-card">
-            <button class="btn-icon btn-delete-student" onclick="confirmDeleteStudent('${s.id}', '${s.name}')" title="Delete">
+            <!-- This handler interpolated s.name with NO escaping at all, so a
+                 person named  ');alert(1);//  ran code on this page for every
+                 coach who opened it. dataset removes the JS-string context. -->
+            <button class="btn-icon btn-delete-student" title="Delete"
+                    data-delete-student data-student-id="${s.id}" data-student-name="${Charts.esc(s.name)}">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
             </button>
-            <div class="student-photo-wrap">
-                <img src="${s.photo_url}" class="student-photo" alt="${s.name}">
-            </div>
+            <!-- The photo is the obvious thing to click, so it is the way in.
+                 A button, not a div with a handler, so it is reachable by
+                 keyboard and announced as something that does anything. -->
+            <button class="student-photo-wrap" data-open-student data-student-id="${s.id}"
+                    title="See ${Charts.esc(s.name)}'s photo and details"
+                    style="display:block;width:100%;padding:0;border:0;background:none;cursor:pointer">
+                ${s.photo_url
+                    ? `<img src="${s.photo_url}" class="student-photo" alt="${Charts.esc(s.name)}">`
+                    : `<div class="student-photo" style="display:flex;align-items:center;justify-content:center;
+                            background:var(--bg-subtle);color:var(--text-secondary);font-size:13px">
+                           No photo yet</div>`}
+            </button>
             <div class="student-info">
-                <div class="student-name">${s.name}</div>
+                <button class="student-name" data-open-student data-student-id="${s.id}"
+                        style="border:0;background:none;padding:0;font:inherit;color:inherit;cursor:pointer;text-align:left">
+                    ${Charts.esc(s.name)}</button>
                 <div class="student-meta">
-                    <span class="student-roll">${s.roll_no}</span>
+                    <span class="student-roll"${isPlaceholderId(s.roll_no)
+                        ? ' style="opacity:.65;font-style:italic"' : ''
+                    }>${Charts.esc(rollLabel(s.roll_no))}</span>
                     <span title="Days marked present">${s.total_present || 0} present</span>
                 </div>
                 <div class="student-meta" style="margin-top: 6px; gap: 6px; display: flex; flex-wrap: wrap; align-items: center;">
                     ${tmplBadge}
-                    <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;" onclick="openAddPhotoModal('${s.id}', '${s.name.replace(/'/g, "\\'")}')" title="Add another photo (recent selfie or ID)">
+                    <!-- dataset + delegated listeners, never an interpolated
+                         handler. Backslash-escaping a quote does not work here:
+                         the HTML parser decodes the attribute BEFORE the JS is
+                         parsed, so a name containing a quote still breaks out.
+                         Passing the value as data and reading it with .dataset
+                         removes the JS-string context altogether. -->
+                    <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;"
+                            data-add-photo data-student-id="${s.id}" data-student-name="${Charts.esc(s.name)}"
+                            title="Add another photo (recent selfie or ID)">
                         ${Icon('upload', 12)}Add photo
                     </button>
-                    <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;" onclick="openMultiViewEnrol('${s.id}', '${s.name.replace(/'/g, "\\'")}')" title="Scan the face from several angles with the camera - the strongest way to improve recognition">
+                    <!-- One button, not two. "Register face" and "Record clip"
+                         did the same job by different means; the clip is the
+                         one that also proves a real person is present, so the
+                         head-circle scan is gone and this keeps the familiar
+                         label. dataset + a delegated listener, never an
+                         interpolated onclick - a name containing a quote breaks
+                         out of a handler string. -->
+                    <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;"
+                            data-clip-enrol data-student-id="${s.id}" data-student-name="${Charts.esc(s.name)}"
+                            title="Record a two second clip - captures several views and checks a real person is present">
                         ${Icon('camera', 12)}Register face
                     </button>
                 </div>
@@ -1051,7 +1571,8 @@ function drawStudents(students) {
 // --- Records Page ---
 async function initRecordsPage() {
     const dateInput = document.getElementById('records-date');
-    const today = new Date().toISOString().split('T')[0];
+    if (!dateInput) return;
+    const today = localISODate();
     dateInput.value = today;
 
     dateInput.addEventListener('change', () => loadRecords(dateInput.value));
@@ -1100,7 +1621,7 @@ async function loadRecords(dateStr) {
                         <span class="font-medium">${Charts.esc(r.name)}</span>
                     </div>
                 </td>
-                <td class="font-mono" data-label="Roll No">${Charts.esc(r.roll_no)}</td>
+                <td class="font-mono" data-label="NSRS ID">${Charts.esc(r.roll_no)}</td>
                 <td data-label="Role">${r.role === 'coach' ? '<span class="badge badge-blue">Coach</span>'
                                          : '<span class="badge badge-green">Athlete</span>'}</td>
                 <td class="font-mono" data-label="Confidence">${(r.confidence * 100).toFixed(1)}%</td>
@@ -1118,16 +1639,24 @@ async function loadRecords(dateStr) {
 // --- Modals ---
 function openModal(title, contentHTML, footerHTML) {
     document.getElementById('modal-title').textContent = title;
-    document.getElementById('modal-body').innerHTML = `
-        ${contentHTML}
-        <div class="modal-footer" style="margin: 20px -20px -20px; padding: 16px 20px; border-top: 1px solid var(--border-subtle); display: flex; justify-content: flex-end; gap: 12px; background: var(--bg-surface);">
-            ${footerHTML}
-        </div>
-    `;
+    // The footer is omitted entirely when there is nothing to put in it. The
+    // previous version always emitted the bar and interpolated footerHTML, so
+    // every caller that passes only a title and body - and several do - printed
+    // the literal word "undefined" under an empty rule.
+    const footer = footerHTML
+        ? `<div class="modal-footer" style="margin: 20px -20px -20px; padding: 16px 20px; border-top: 1px solid var(--border-subtle); display: flex; justify-content: flex-end; gap: 12px; background: var(--bg-surface);">
+               ${footerHTML}
+           </div>`
+        : '';
+    document.getElementById('modal-body').innerHTML = `${contentHTML}${footer}`;
     document.getElementById('modal-container').classList.remove('hidden');
 }
 
 function closeModal() {
+    // Any camera running inside the modal cleans itself up: openClipCapture
+    // watches this element's class and tears its stream down when it hides, so
+    // the X, Escape and every Cancel are all covered without this function
+    // knowing what the modal happens to contain.
     document.getElementById('modal-container').classList.add('hidden');
 }
 
@@ -1153,6 +1682,7 @@ const REG_GUIDELINES = [
     'Remove cap, sunglasses and mask',
     'Hold the device at arm\'s length, at eye level',
     'Only the person being registered should be in frame',
+    'Follow the on-screen prompts and turn your head as asked - that is what shows a real person is present, not a photograph',
 ];
 
 let regDetails = null;
@@ -1164,14 +1694,18 @@ async function openRegisterModal() {
     } catch { /* the select simply renders empty and the field stays required */ }
 
     const html = `
-        <form id="register-form" autocomplete="off">
+        <!-- onsubmit is load-bearing: the footer buttons are type="button", but
+             pressing Enter in a text field (a phone keyboard's "Go" key) still
+             submits natively, which reloaded the app and silently discarded
+             everything typed. Enter now does what the person meant. -->
+        <form id="register-form" autocomplete="off" onsubmit="event.preventDefault(); regContinue(); return false;">
             <div class="form-group">
                 <label class="form-label" for="reg-name">Full name</label>
                 <input type="text" id="reg-name" class="form-input" required placeholder="As it appears on the roster">
             </div>
             <div class="form-row">
                 <div class="form-group">
-                    <label class="form-label" for="reg-roll">Roll number</label>
+                    <label class="form-label" for="reg-roll">NSRS ID</label>
                     <input type="text" id="reg-roll" class="form-input" required placeholder="e.g. WEAA039F11">
                 </div>
                 <div class="form-group">
@@ -1197,7 +1731,7 @@ async function openRegisterModal() {
             </div>
 
             <div class="notice notice-blue" style="margin-top:4px">
-                <strong>Before you scan the face</strong>
+                <strong>Before you record</strong>
                 <ul style="margin:6px 0 0 18px;padding:0;font-size:12px;line-height:1.7">
                     ${REG_GUIDELINES.map(g => `<li>${Charts.esc(g)}</li>`).join('')}
                 </ul>
@@ -1206,7 +1740,7 @@ async function openRegisterModal() {
 
     openModal('Register person', html, `
         <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-        <button type="button" class="btn btn-primary" onclick="regContinue()">Continue to face scan</button>`);
+        <button type="button" class="btn btn-primary" onclick="regContinue()">Continue to recording</button>`);
 }
 
 function regContinue() {
@@ -1219,114 +1753,63 @@ function regContinue() {
         role:      document.getElementById('reg-role').value,
         sport:     document.getElementById('reg-sport').value.trim(),
     };
-    // The scan is the same component used to re-register an existing person;
-    // only what happens with the frames at the end differs.
-    openFaceScan({
-        title: `Scan face - ${regDetails.name}`,
-        onComplete: regSubmit,
+    // Same capture component as re-registering an existing person; only what
+    // happens with the clip at the end differs.
+    openClipCapture({
+        title: `Record clip - ${regDetails.name}`,
+        intro: "Look at the camera and move your head a little while recording. "
+             + "Two seconds is enough.",
+        onClip: enrolSubmit,
     });
 }
 
-async function regSubmit(frames) {
-    const btn = document.getElementById('mv-save');
-    if (btn) { btn.disabled = true; btn.textContent = 'Registering...'; }
+async function enrolSubmit(file, ui) {
+    ui.status('Checking the clip and registering...');
+
+    // ONE request, deliberately. The old flow created the person from the first
+    // frame and then added the rest, so a failure part-way left a roster entry
+    // with no usable templates - someone who can never be recognised and whom
+    // nobody is prompted to fix. The server now checks liveness before writing
+    // anything and creates the person only if the clip passes.
+    const fd = new FormData();
+    fd.append('video', file);
+    fd.append('name', regDetails.name);
+    fd.append('roll_no', regDetails.roll_no);
+    fd.append('centre_id', regDetails.centre_id);
+    fd.append('role', regDetails.role);
+    if (regDetails.sport) fd.append('sport', regDetails.sport);
+
     try {
-        // The straight-ahead frame becomes the person's profile photo and their
-        // first template; the rest are added as additional views.
-        const fd = new FormData();
-        fd.append('photo', frames[0].blob, 'face.jpg');
-        fd.append('name', regDetails.name);
-        fd.append('roll_no', regDetails.roll_no);
-        fd.append('centre_id', regDetails.centre_id);
-        fd.append('role', regDetails.role);
-        if (regDetails.sport) fd.append('sport', regDetails.sport);
-
-        const data = await api.postForm('/api/students', fd);
-        const student = data.student || {};
-
-        let added = 0;
-        if (frames.length > 1 && student.id) {
-            const fd2 = new FormData();
-            frames.slice(1).forEach((f, i) => fd2.append('frames', f.blob, `${f.key}_${i}.jpg`));
-            try {
-                const r2 = await api.postForm(`/api/students/${student.id}/enroll-multiview`, fd2);
-                added = r2.templates_added || 0;
-            } catch {
-                // The person exists and is usable from the frontal view; losing
-                // the extra angles is worth reporting but not worth failing on.
-                showToast('Registered, but not all views saved',
-                          'The extra angles could not be stored. Use "Register face" on their card to retry.',
-                          'error');
-            }
+        const r = await api.postForm('/api/students/register-video', fd);
+        if (r.ok === false) {
+            ui.status(livenessBanner(r.liveness, r.message), true);
+            showToast('Not registered', r.message || 'The clip was refused', 'error');
+            await ui.resume();
+            return;
         }
-        closeFaceScan();
-        showToast('Registered', `${regDetails.name} enrolled with ${1 + added} view${1 + added === 1 ? '' : 's'}`, 'success');
+        const n = r.templates || 1;
+        const poses = (r.poses_captured || []).join(', ');
+        ui.close();
+        showToast('Registered',
+                  `${regDetails.name} enrolled with ${n} template${n === 1 ? '' : 's'}`
+                  + (poses ? ` (${poses})` : ''),
+                  'success');
         if (state.currentRoute === '/students') renderStudents();
     } catch (err) {
-        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+        // A duplicate NSRS ID is a 409 the person can act on, so it must not
+        // be swallowed into a generic failure.
+        const msg = (err && err.message) ? err.message : 'Could not register. Try again.';
+        ui.status(msg);
+        await ui.resume();
     }
 }
 
-// --- Add photo to existing student ---
-window.openAddPhotoModal = function(studentId, name) {
-    const html = `
-        <form id="add-photo-form">
-            <p style="margin-bottom: 14px; color: var(--text-secondary); font-size: 13px;">
-                Add a photo for <strong>${name}</strong>. The system stores it as an extra
-                biometric template - great for refreshing an old Aadhaar enrollment.
-            </p>
-            <div class="form-group">
-                <label class="form-label">Photo</label>
-                <input type="file" id="addp-file" accept="image/*" class="form-input" required style="padding: 6px;">
-            </div>
-            <div class="form-group">
-                <label class="form-label">Photo Type</label>
-                <select id="addp-source" class="form-input">
-                    <option value="live" selected>Recent / live photo</option>
-                    <option value="id">ID card photo (Aadhaar)</option>
-                </select>
-            </div>
-        </form>
-    `;
-    const footer = `
-        <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-        <button type="button" class="btn btn-primary" onclick="submitAddPhoto(${studentId})">Add Photo</button>
-    `;
-    openModal('Add Photo', html, footer);
-};
-
-window.submitAddPhoto = async function(studentId) {
-    const form = document.getElementById('add-photo-form');
-    if (!form.checkValidity()) {
-        form.reportValidity();
-        return;
-    }
-    const file = document.getElementById('addp-file').files[0];
-    const source = document.getElementById('addp-source').value;
-
-    const fd = new FormData();
-    fd.append('photo', file);
-    fd.append('source', source);
-
-    try {
-        const btn = document.querySelector('.modal-footer .btn-primary');
-        btn.disabled = true;
-        btn.textContent = 'Adding...';
-        const data = await api.postForm(`/api/students/${studentId}/photos`, fd);
-        showToast('Success', `${data.templates_added} template(s) added`, 'success');
-        closeModal();
-        renderStudents();
-    } catch (err) {
-        const btn = document.querySelector('.modal-footer .btn-primary');
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = 'Add Photo';
-        }
-    }
-};
 
 function confirmDeleteStudent(id, name) {
-    const html = `<p>Are you sure you want to delete <strong>${name}</strong>? This action cannot be undone and will not remove past attendance records, but will prevent future recognition.</p>`;
+    // Escaped here as well as in the attribute: .dataset DECODES the entity on
+    // read, so `name` arrives as the raw string and interpolating it into
+    // innerHTML would put the injection straight back.
+    const html = `<p>Are you sure you want to delete <strong>${Charts.esc(name)}</strong>? This action cannot be undone and will not remove past attendance records, but will prevent future recognition.</p>`;
     const footer = `
         <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
         <button type="button" class="btn btn-danger" onclick="executeDeleteStudent('${id}')">Delete</button>
@@ -1345,6 +1828,791 @@ async function executeDeleteStudent(id) {
     }
 }
 
+
+/* ---------------------------------------------------------------------------
+   The register (v1)
+
+   The coach's review screen. Attendance is no longer whatever the recogniser
+   returned - it is this list, after a human has looked at it.
+
+   Two things this screen must do that a results panel does not:
+     * show athletes who are ABSENT as well as present, because a register you
+       cannot use to notice who is missing is not a register; and
+     * make every row togglable, since the recogniser is the draft and the
+       coach is the authority.
+--------------------------------------------------------------------------- */
+
+let regSession = null;
+let regCounts = { present: 0, total: 0 };
+
+async function initRegisterPage() {
+    const btn = document.getElementById('reg-capture-btn');
+    if (btn) btn.addEventListener('click', regCapture);
+    const sub = document.getElementById('reg-submit-btn');
+    if (sub) sub.addEventListener('click', regSubmit);
+
+    // Delegated, not per-row: the roster is re-rendered after every toggle and
+    // per-row listeners would leak one per render.
+    const host = document.getElementById('reg-roster');
+    if (host) {
+        host.addEventListener('click', (e) => {
+            const el = e.target.closest('[data-toggle-student]');
+            if (!el) return;
+            regToggle(parseInt(el.dataset.toggleStudent, 10), el.dataset.present !== 'true');
+        });
+    }
+    const appr = document.getElementById('reg-approvals');
+    if (appr) {
+        appr.addEventListener('click', (e) => {
+            const re = e.target.closest('[data-reassign-user]');
+            if (re) return regReassign(parseInt(re.dataset.reassignUser, 10),
+                                       parseInt(re.dataset.centreId, 10),
+                                       re.dataset.personName || '');
+            const el = e.target.closest('[data-approve-user]');
+            if (el) regDecide(parseInt(el.dataset.approveUser, 10),
+                              el.dataset.decision === 'approve',
+                              el.dataset.personName || '',
+                              el.dataset.personRole || 'athlete',
+                              el.dataset.merge === 'true');
+        });
+    }
+    const rosterBtn = document.getElementById('reg-roster-btn');
+    if (rosterBtn) rosterBtn.addEventListener('click', openRosterEditor);
+    const rosterBtn2 = document.getElementById('reg-roster-btn-empty');
+    if (rosterBtn2) rosterBtn2.addEventListener('click', openRosterEditor);
+    await Promise.all([regOpen(), regLoadApprovals()]);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Who is on the register
+
+   coach_athletes decides what the register lists, and until now nothing wrote
+   it except signup approval - so a centre whose athletes were enrolled by an
+   admin had an empty register and no way to fill it. The whole roster is sent
+   at once and the server reconciles, so a coach ticks their boxes and presses
+   save once.
+--------------------------------------------------------------------------- */
+
+let rosterState = { coachId: null, chosen: new Set() };
+
+async function openRosterEditor() {
+    // student_id is the coach's own students row, which is what addresses a
+    // register. It was absent from the auth payload until it was added to
+    // public_user, so this fell through to '' and asked for
+    // /api/coaches//roster - a 404 that read as "you have no athletes".
+    const coachId = (regSession && regSession.coach_id)
+        || (session.user && session.user.student_id) || '';
+    if (!coachId) {
+        // Normal for a super admin who is an operator, not a coach: there is no
+        // register that belongs to them. Say which account is the problem
+        // rather than sending a request that cannot succeed.
+        return openModal('Choose my athletes',
+            '<div class="empty-state">This account is not linked to a person '
+            + 'record for a coach, so it has no register of its own. Open a centre and '
+            + 'pick a coach, or ask a super admin to link this account.</div>',
+            '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
+    }
+    try {
+        const r = await api.get(`/api/coaches/${coachId}/roster`);
+        rosterState.coachId = r.coach_id;
+        rosterState.chosen = new Set((r.linked || []).map(Number));
+        const list = r.athletes || [];
+        if (!list.length) {
+            return openModal('Choose my athletes',
+                '<div class="empty-state">There are no enrolled athletes at this centre yet. '
+                + 'Add them on the Students page first.</div>',
+                '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
+        }
+        openModal('Choose my athletes', `
+            <div class="text-sm text-muted" style="margin-bottom:10px">
+                Tick everyone you take attendance for. Removing somebody does not
+                delete any attendance already recorded for them.
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:10px">
+                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
+                        id="roster-all">Select all</button>
+                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
+                        id="roster-none">Clear</button>
+                <span class="text-xs text-muted" id="roster-count" style="margin-left:auto;align-self:center"></span>
+            </div>
+            <div id="roster-list" style="max-height:46vh;overflow-y:auto">
+                ${list.map(a => `
+                <label style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border-subtle);cursor:pointer">
+                    <input type="checkbox" data-roster-id="${a.id}" ${a.linked ? 'checked' : ''}>
+                    <div style="flex:1;min-width:0">
+                        <div style="font-weight:600;font-size:13px">${Charts.esc(a.name)}</div>
+                        <div class="text-xs text-muted font-mono">${Charts.esc(a.roll_no || '')}</div>
+                    </div>
+                </label>`).join('')}
+            </div>`,
+            `<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+             <button class="btn btn-primary" id="roster-save">Save register</button>`);
+
+        const box = document.getElementById('roster-list');
+        const count = () => {
+            const n = box.querySelectorAll('[data-roster-id]:checked').length;
+            const el = document.getElementById('roster-count');
+            if (el) el.textContent = `${n} of ${list.length} selected`;
+        };
+        box.addEventListener('change', count);
+        document.getElementById('roster-all').addEventListener('click', () => {
+            box.querySelectorAll('[data-roster-id]').forEach(c => { c.checked = true; });
+            count();
+        });
+        document.getElementById('roster-none').addEventListener('click', () => {
+            box.querySelectorAll('[data-roster-id]').forEach(c => { c.checked = false; });
+            count();
+        });
+        document.getElementById('roster-save').addEventListener('click', saveRoster);
+        count();
+    } catch (err) {
+        showToast('Could not load the roster', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+async function saveRoster() {
+    const box = document.getElementById('roster-list');
+    if (!box) return;
+    const ids = Array.from(box.querySelectorAll('[data-roster-id]:checked'))
+        .map(c => c.dataset.rosterId);
+    const fd = new FormData();
+    fd.append('athlete_ids', ids.join(','));
+    try {
+        const r = await api.postForm(`/api/coaches/${rosterState.coachId}/roster`, fd, 'PUT');
+        closeModal();
+        showToast('Register updated',
+                  `${r.total} athlete${r.total === 1 ? '' : 's'} on your register.`, 'success');
+        await regLoad();
+    } catch (err) {
+        showToast('Could not save', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+async function regLoadApprovals() {
+    const card = document.getElementById('reg-approvals-card');
+    const host = document.getElementById('reg-approvals');
+    const count = document.getElementById('reg-approvals-count');
+    if (!card || !host) return;
+    try {
+        const r = await api.get('/api/approvals');
+        const list = r.pending || [];
+        card.style.display = list.length ? '' : 'none';
+        if (count) count.textContent = list.length ? `(${list.length})` : '';
+        host.innerHTML = list.map(p => {
+            const name = p.person_name || p.full_name || p.username;
+            const photo = p.photo_path
+                ? `<img src="/api/photos/${encodeURIComponent(String(p.photo_path).split(/[\\/]/).pop())}"
+                        alt="" style="width:44px;height:44px;border-radius:8px;object-fit:cover">`
+                : '<div style="width:44px;height:44px;border-radius:8px;background:var(--bg-subtle)"></div>';
+            // A coach application is called out rather than left looking like
+            // every other row. Only a super admin ever sees one here, and
+            // approving it hands over a whole centre - so it should not be
+            // clearable in the same rhythm as a queue of athletes.
+            const flag = p.role === 'coach'
+                ? `<div class="text-xs" style="color:#b45309;font-weight:600">
+                       Asking for COACH access to ${Charts.esc(p.centre_name || 'a centre')}</div>`
+                : '';
+            const role = Charts.esc(p.role || 'athlete');
+
+            // Somebody already enrolled whose face this matched. Offered as a
+            // question with its own button, because approving it as a new
+            // person is what creates the duplicate - two lines on the
+            // register, and one of them marked absent every day.
+            const dup = p.duplicate_of ? `
+                <div class="text-xs" style="color:#b45309;font-weight:600">
+                    Looks like ${Charts.esc(p.duplicate_name || 'someone already enrolled')}
+                    ${p.duplicate_roll_no ? `(${Charts.esc(p.duplicate_roll_no)})` : ''}
+                    &middot; ${(Number(p.duplicate_score) || 0).toFixed(2)}
+                    ${p.duplicate_centre_name ? `&middot; ${Charts.esc(p.duplicate_centre_name)}` : ''}
+                </div>` : '';
+            // Their coach was deleted, so nobody is looking at this but a
+            // super admin - who has no way to know that without being told.
+            const orphan = p.orphaned ? `
+                <div class="text-xs" style="color:#b45309;font-weight:600">
+                    No coach &mdash; the one they chose has been removed</div>` : '';
+            const mergeBtn = p.duplicate_of ? `
+                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
+                        data-approve-user="${p.user_id}" data-decision="approve" data-merge="true"
+                        data-person-role="${role}"
+                        data-person-name="${Charts.esc(name)}">Same person</button>` : '';
+            const reassignBtn = p.orphaned ? `
+                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
+                        data-reassign-user="${p.user_id}" data-centre-id="${p.centre_id || ''}"
+                        data-person-name="${Charts.esc(name)}">Assign a coach</button>` : '';
+            return `
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border-subtle)">
+                ${photo}
+                <div style="flex:1;min-width:0">
+                    <div style="font-weight:600">${Charts.esc(name)}</div>
+                    ${flag}
+                    ${dup}
+                    ${orphan}
+                                        <div class="text-xs text-muted font-mono">${Charts.esc(p.roll_no || '')}</div>
+                    <div class="text-xs text-muted">${p.templates || 0} face template(s)</div>
+                </div>
+                ${reassignBtn}
+                ${mergeBtn}
+                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
+                        data-approve-user="${p.user_id}" data-decision="reject"
+                        data-person-role="${role}"
+                        data-person-name="${Charts.esc(name)}">Reject</button>
+                <button type="button" class="btn btn-primary" style="height:30px;font-size:12px;padding:0 10px"
+                        data-approve-user="${p.user_id}" data-decision="approve"
+                        data-person-role="${role}"
+                        data-person-name="${Charts.esc(name)}">Approve</button>
+            </div>`;
+        }).join('');
+    } catch (err) {
+        card.style.display = 'none';
+    }
+}
+
+async function regReassign(userId, centreId, name) {
+    try {
+        const r = await api.get(`/api/approvals/coaches?centre_id=${centreId}`);
+        const list = r.coaches || [];
+        if (!list.length) {
+            return showToast('No coaches', `There are no active coaches at that centre yet.`, 'info');
+        }
+        const menu = list.map((c, i) => `${i + 1}. ${c.name}`).join("\n");
+        const pick = window.prompt(
+            `Who should decide ${name}?\n\n${menu}\n\nEnter a number.`, '');
+        if (pick === null) return;
+        const idx = parseInt(pick, 10) - 1;
+        if (!(idx >= 0 && idx < list.length)) return;
+        const fd = new FormData();
+        fd.append('coach_id', list[idx].id);
+        await api.postForm(`/api/approvals/${userId}/coach`, fd);
+        showToast('Assigned', `${name} is now in ${list[idx].name}'s queue.`, 'success');
+        await regLoadApprovals();
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+async function regDecide(userId, approve, name, role = 'athlete', merge = false) {
+    let guardian = null;
+    if (approve && merge) {
+        // The merge is the destructive half of this screen - it deletes the
+        // record just created and moves its faces onto an existing person - so
+        // it is confirmed on its own terms rather than folded into Approve.
+        if (!window.confirm(
+            `Treat ${name} as somebody already enrolled?\n\nTheir new face `
+            + `captures move onto the existing record and this duplicate is removed. `
+            + `Their attendance stays on the one record instead of splitting `
+            + `between two.`)) return;
+    }
+    if (approve && role === 'coach') {
+        // Typed, not clicked. Approving a coach grants a whole centre, and it
+        // arrives in a list where the muscle memory is to tap Approve - so the
+        // confirmation has to break that rhythm rather than join it.
+        const typed = window.prompt(
+            `Approving ${name} as a COACH.\n\nThey will see every athlete at `
+            + `their centre, take attendance, and approve athletes themselves.\n\n`
+            + `Type APPROVE to confirm.`, '');
+        if ((typed || '').trim().toUpperCase() !== 'APPROVE') return;
+    } else if (approve) {
+        // Guardian consent is asked for on approval, not at signup: the coach is
+        // the person who knows whether this athlete is a minor.
+        guardian = window.prompt(
+            `Approving ${name}.\n\nIf this athlete is under 18, enter the guardian's `
+            + `name to record consent. Leave blank if they are an adult.`, '');
+        if (guardian === null) return;          // cancelled
+    }
+    try {
+        const fd = new FormData();
+        fd.append('approve', approve ? 'true' : 'false');
+        if (merge) fd.append('merge', 'true');
+        if (guardian) {
+            fd.append('guardian_name', guardian);
+            fd.append('guardian_consent', 'true');
+        }
+        await api.postForm(`/api/approvals/${userId}`, fd);
+        showToast(approve ? (merge ? 'Merged' : 'Approved') : 'Rejected',
+                  approve ? (merge
+                             ? `${name} was folded into the record already enrolled.`
+                             : role === 'coach'
+                             ? `${name} can now sign in as a coach at their centre.`
+                             : `${name} can now sign in and be recognised.`)
+                          : `${name} was rejected.`,
+                  approve ? 'success' : 'info');
+        await Promise.all([regLoadApprovals(), regLoad()]);
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+async function regOpen() {
+    try {
+        const fd = new FormData();
+        if (session.user && session.user.centre_id) fd.append('centre_id', session.user.centre_id);
+        const r = await api.postForm('/api/sessions', fd);
+        regSession = r.session;
+        await regLoad();
+    } catch (err) {
+        const meta = document.getElementById('reg-session-meta');
+        if (meta) meta.textContent = (err && err.message) || 'Could not open a register.';
+    }
+}
+
+async function regLoad() {
+    if (!regSession) return;
+    const data = await api.get(`/api/sessions/${regSession.id}`);
+    regSession = data.session;
+
+    // Kept for the submit confirmation, which has to say what it is about to
+    // record. regLoad already has the authoritative counts from the server;
+    // recounting them from the DOM would be a second source of the same truth.
+    regCounts = { present: data.present_count, total: data.roster_count };
+
+    const meta = document.getElementById('reg-session-meta');
+    if (meta) {
+        meta.textContent =
+            `${data.session.date} \u00b7 ${data.present_count} of ${data.roster_count} present`
+            + ` \u00b7 ${data.captures.length} capture${data.captures.length === 1 ? '' : 's'}`
+            + ` \u00b7 ${data.session.status}`;
+    }
+
+    // An empty roster is the state every coach starts in, and it looks
+    // identical to "everybody is absent". Say which it is.
+    const emptyCard = document.getElementById('reg-empty-roster');
+    if (emptyCard) emptyCard.style.display = data.roster_count ? 'none' : '';
+
+    const submitted = data.session.status === 'submitted';
+    const capBtn = document.getElementById('reg-capture-btn');
+    const subBtn = document.getElementById('reg-submit-btn');
+    if (capBtn) capBtn.disabled = submitted;
+    if (subBtn) {
+        subBtn.disabled = submitted;
+        subBtn.textContent = submitted
+            ? (data.session.submitter_verified ? 'Submitted' : 'Submitted (unverified)')
+            : 'Submit register';
+    }
+
+    const host = document.getElementById('reg-roster');
+    if (!host) return;
+    if (!data.roster.length) {
+        host.innerHTML = `<div class="empty-state">
+            <div>No athletes are linked to you yet.</div>
+            <div class="text-xs text-muted" style="margin-top:6px">
+                A super admin links athletes to a coach.</div></div>`;
+        return;
+    }
+
+    host.innerHTML = data.roster.map(e => {
+        const on = e.present;
+        const badge = !on ? ''
+            : e.origin === 'self_marked'
+                ? '<span class="badge badge-blue">Self-marked</span>'
+                : e.origin === 'coach_added'
+                    ? '<span class="badge badge-blue">Added by you</span>'
+                    : `<span class="badge badge-green">Recognised${
+                        e.confidence ? ' \u00b7 ' + Math.round(e.confidence * 100) + '%' : ''}</span>`;
+        const geo = (on && e.geo_status && e.geo_status !== 'inside')
+            ? `<span class="badge badge-amber">${Charts.esc(e.geo_status)}${
+                e.distance_m ? ' \u00b7 ' + Math.round(e.distance_m) + 'm' : ''}</span>` : '';
+        const crop = e.crop_url
+            ? `<img src="${e.crop_url}" alt="" style="width:40px;height:40px;border-radius:8px;object-fit:cover">`
+            : '<div style="width:40px;height:40px;border-radius:8px;background:var(--bg-subtle)"></div>';
+        return `
+        <div class="list-row" style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border-subtle)">
+            ${crop}
+            <div style="flex:1;min-width:0">
+                <div style="font-weight:600">${Charts.esc(e.name)}</div>
+                <div class="text-xs text-muted font-mono">${Charts.esc(e.roll_no || '')}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">${badge}${geo}</div>
+            <button type="button" class="btn ${on ? 'btn-secondary' : 'btn-primary'}"
+                    style="height:30px;font-size:12px;padding:0 12px"
+                    data-toggle-student="${e.student_id}" data-present="${on}">
+                ${on ? 'Present' : 'Mark present'}
+            </button>
+        </div>`;
+    }).join('');
+
+    const namedCard = document.getElementById('reg-named-card');
+    const named = document.getElementById('reg-named');
+    if (namedCard && named) {
+        const list = regLastNamed || [];
+        namedCard.style.display = list.length ? '' : 'none';
+        named.innerHTML = list.map(x => `
+            <div style="padding:6px 0;border-bottom:1px solid var(--border-subtle)">
+                <span style="font-weight:600">${Charts.esc(x.name || '')}</span>
+                <span class="text-xs text-muted font-mono"> ${Charts.esc(x.roll_no || '')}</span>
+                <span class="text-xs text-muted"> \u2014 ${
+                    (x.coaches || []).map(c => Charts.esc(c.coach_name)).join(', ') || 'no coach'}</span>
+            </div>`).join('');
+    }
+}
+
+let regLastNamed = [];
+
+/* Everything a signed-in coach accumulated in memory, dropped on the way out.
+   These are module-level and survive a logout on their own - the app never
+   reloads between sessions, because routing is hashchange - so the next person
+   to sign in on a shared centre phone inherited the last one's roster. */
+function resetSessionState() {
+    regLastNamed = [];
+    regSession = null;
+    regCounts = { present: 0, total: 0 };
+    rosterState = { coachId: null, chosen: new Set() };
+}
+
+async function regToggle(studentId, present) {
+    try {
+        const fd = new FormData();
+        fd.append('present', present ? 'true' : 'false');
+        await api.postForm(`/api/sessions/${regSession.id}/roster/${studentId}`, fd, 'PATCH');
+        await regLoad();
+    } catch (err) {
+        showToast('Could not change that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+function regCapture() {
+    if (!regSession) return;
+    openClipCapture({
+        title: 'Capture the group',
+        // No turn prompts: this is a room, not one person being enrolled.
+        guided: false,
+        intro: 'Point the camera at the group and record a few seconds, moving the '
+             + 'phone slowly from side to side. Capture again for anyone missed.',
+        onClip: async (file, ui) => {
+            ui.status('Checking the clip\u2026');
+            try {
+                const fd = new FormData();
+                fd.append('media', file);
+                fd.append('kind', 'video');
+                const r = await api.postForm(`/api/sessions/${regSession.id}/captures`, fd);
+                if (r.ok === false) {
+                    ui.status(livenessBanner(r.liveness, r.message), true);
+                    showToast('Not accepted', r.message || 'The clip was refused', 'error');
+                    await ui.resume();
+                    return;
+                }
+                regLastNamed = r.other_coach || [];
+                ui.close();
+                // An unchecked capture is not a failure and not a success - the
+                // faces were too far off for the liveness test to reach, so it
+                // is recorded as unchecked and flagged for an admin. Saying so
+                // is the difference between a caveat and a silent assumption.
+                showToast('Capture added',
+                          `${r.newly_drafted} added \u00b7 ${r.recognized_count} recognised`
+                          + (r.unchecked ? ' \u00b7 too far to check for a live person' : ''),
+                          r.unchecked ? 'info' : 'success');
+                await regLoad();
+            } catch (err) {
+                ui.status((err && err.message) || 'Could not add that capture.');
+                await ui.resume();
+            }
+        },
+    });
+}
+
+
+/* Submitting is what turns drafts into attendance, so it asks for the coach's
+   own face. A failed check may be retried; after config.VERIFY_MAX_RETRIES the
+   server submits anyway and records it as unverified for an admin to see. The
+   attempt counter is tracked here because the server is stateless about it. */
+let regAttempt = 1;
+
+function regSubmit() {
+    if (!regSession) return;
+
+    // Submitting is the irreversible step: it turns drafts into attendance and
+    // closes the register. Until now the only thing between a stray tap and
+    // that was the face check, which reads as a formality rather than a
+    // decision. Say what is about to be recorded, and let it be cancelled.
+    const present = regCounts.present || 0;
+    const total = regCounts.total || 0;
+    const absent = Math.max(0, total - present);
+    if (!window.confirm(
+            `Submit today's register?
+
+`
+            + `Present: ${present}
+`
+            + `Absent:  ${absent}
+`
+            + `Total:   ${total}
+
+`
+            + `This records attendance for ${present} `
+            + `${present === 1 ? 'athlete' : 'athletes'} and closes the register `
+            + `for today. It cannot be undone from here.`)) {
+        return;
+    }
+
+    regAttempt = 1;
+    openClipCapture({
+        // One face against one enrolled record. Several views were never needed
+        // here, and the prompts contradicted this screen's own instruction.
+        guided: false,
+        title: 'Confirm it is you',
+        intro: 'Record a few seconds of your own face to sign this register. '
+             + 'Move the phone slowly from side to side while recording.',
+        onClip: async (file, ui) => {
+            ui.status('Checking\u2026');
+            try {
+                const fd = new FormData();
+                fd.append('clip', file);
+                fd.append('attempt', String(regAttempt));
+                const r = await api.postForm(`/api/sessions/${regSession.id}/submit`, fd);
+
+                if (r.submitted === false) {
+                    regAttempt += 1;
+                    ui.status(`${r.message}. ${r.retries_left} attempt`
+                              + `${r.retries_left === 1 ? '' : 's'} left.`);
+                    await ui.resume();
+                    return;
+                }
+                ui.close();
+                if (r.verified) {
+                    showToast('Register submitted',
+                              `${r.promoted} marked present`, 'success');
+                } else {
+                    // Not an error: the register IS submitted. Saying otherwise
+                    // would leave a coach re-recording something already done.
+                    showToast('Submitted, unverified',
+                              'Your face could not be verified, so this has been '
+                              + 'flagged for an administrator.', 'warning');
+                }
+                await regLoad();
+            } catch (err) {
+                ui.status((err && err.message) || 'Could not submit.');
+                await ui.resume();
+            }
+        },
+    });
+}
+
+
+/* ---------------------------------------------------------------------------
+   The athlete's own page
+
+   An athlete is not a coach with fewer buttons. This is the only screen they
+   need: who their coaches are, a way to mark themselves present with one of
+   them, and their own history. A self-mark is a DRAFT - the coach still
+   confirms it - and the copy says so, because an athlete who thinks they are
+   already marked will not chase it up.
+--------------------------------------------------------------------------- */
+
+async function initMePage() {
+    const host = document.getElementById('me-coaches');
+    if (host) {
+        host.addEventListener('click', (e) => {
+            const el = e.target.closest('[data-mark-coach]');
+            if (el) meMark(parseInt(el.dataset.markCoach, 10), el.dataset.coachName || '');
+        });
+    }
+    await Promise.all([meLoadCoaches(), meLoadHistory()]);
+}
+
+async function meLoadCoaches() {
+    const host = document.getElementById('me-coaches');
+    if (!host) return;
+    try {
+        const r = await api.get('/api/me/coaches');
+        if (!r.coaches.length) {
+            host.innerHTML = `<div class="empty-state">
+                <div>You are not linked to a coach yet.</div>
+                <div class="text-xs text-muted" style="margin-top:6px">
+                    Your coach adds you to their roster.</div></div>`;
+            return;
+        }
+        host.innerHTML = r.coaches.map(c => `
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border-subtle)">
+                <div style="flex:1;min-width:0">
+                    <div style="font-weight:600">${Charts.esc(c.name)}</div>
+                    <div class="text-xs text-muted">${Charts.esc(c.centre_name || '')}</div>
+                </div>
+                <button type="button" class="btn btn-primary" style="height:32px;font-size:12px;padding:0 14px"
+                        data-mark-coach="${c.id}" data-coach-name="${Charts.esc(c.name)}">
+                    Mark me present
+                </button>
+            </div>`).join('');
+    } catch (err) {
+        host.innerHTML = `<div class="empty-state">Could not load your coaches.</div>`;
+    }
+}
+
+async function meLoadHistory() {
+    const host = document.getElementById('me-history');
+    if (!host) return;
+    try {
+        const r = await api.get('/api/me/attendance');
+        if (!r.records.length) {
+            host.innerHTML = `<div class="empty-state">No attendance recorded yet.</div>`;
+            return;
+        }
+        host.innerHTML = r.records.slice(0, 60).map(x => `
+            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-subtle)">
+                <span class="font-mono">${Charts.esc(x.date)}</span>
+                <span class="text-xs text-muted">${Charts.esc((x.marked_at || '').replace('T', ' '))}</span>
+            </div>`).join('');
+    } catch (err) {
+        host.innerHTML = `<div class="empty-state">Could not load your history.</div>`;
+    }
+}
+
+function meMark(coachId, coachName) {
+    // Location is requested but never required. A refused or missing fix still
+    // marks the athlete - it is flagged for the coach instead, because a
+    // genuine athlete with bad GPS should not lose their attendance silently.
+    const send = async (pos) => {
+        openClipCapture({
+            title: `Mark present \u2014 ${coachName}`,
+            // One face against one enrolled record - the same 1:1 check as
+            // signing the register, and it wants one view, not four.
+            //
+            // Without this the intro below ("move the phone slowly from side
+            // to side") ran the four-turn head-turning sequence instead, so
+            // the written instruction and the on-screen prompts asked for
+            // different things at the same time, and a mark that should take
+            // three seconds took up to thirty-four. The register-signing
+            // capture was fixed for exactly this and its twin here was missed.
+            guided: false,
+            intro: 'Record a few seconds of your own face, moving the phone slowly '
+                 + 'from side to side.',
+            onClip: async (file, ui) => {
+                ui.status('Checking\u2026');
+                try {
+                    const fd = new FormData();
+                    fd.append('clip', file);
+                    fd.append('coach_id', String(coachId));
+                    if (pos) {
+                        fd.append('latitude', pos.coords.latitude);
+                        fd.append('longitude', pos.coords.longitude);
+                        fd.append('accuracy_m', pos.coords.accuracy);
+                    }
+                    const r = await api.postForm('/api/me/attendance', fd);
+                    if (r.ok === false) {
+                        ui.status(r.message || 'Could not confirm that was you.');
+                        await ui.resume();
+                        return;
+                    }
+                    ui.close();
+                    showToast('Marked', r.message || 'Your coach will confirm it.',
+                              r.geo && r.geo.status === 'inside' ? 'success' : 'warning');
+                    await meLoadHistory();
+                } catch (err) {
+                    ui.status((err && err.message) || 'Could not mark you present.');
+                    await ui.resume();
+                }
+            },
+        });
+    };
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(send, () => send(null),
+                                                 { timeout: 6000, maximumAge: 60000 });
+    } else {
+        send(null);
+    }
+}
+
+
+/* ---------------------------------------------------------------------------
+   Oversight (super admin)
+
+   The question this answers is not "how many were present" - the dashboard
+   already does that. It is which registers are MISSING, and which of the ones
+   that exist should not be taken at face value. Those two lists come first
+   because they are the only ones that require somebody to do something.
+--------------------------------------------------------------------------- */
+
+async function initOversightPage() {
+    const picker = document.getElementById('ov-date');
+    if (picker) {
+        picker.value = localISODate();
+        picker.addEventListener('change', () => ovLoad(picker.value));
+    }
+    await ovLoad(picker ? picker.value : null);
+}
+
+function ovTile(label, value, tone) {
+    const colour = tone === 'bad' ? 'var(--red)'
+                 : tone === 'warn' ? 'var(--amber, #b45309)'
+                 : 'var(--text-primary)';
+    return `<div class="stat-card">
+        <div class="stat-header">${Charts.esc(label)}</div>
+        <div class="stat-value" style="color:${colour}">${value}</div>
+    </div>`;
+}
+
+function ovList(title, rows, render, empty) {
+    return `<div class="card" style="margin-bottom:16px">
+        <div class="card-header"><div style="font-weight:600">${Charts.esc(title)}
+            <span class="text-xs text-muted">(${rows.length})</span></div></div>
+        <div class="card-body">${
+            rows.length ? rows.map(render).join('')
+                        : `<div class="empty-state">${Charts.esc(empty)}</div>`}</div>
+    </div>`;
+}
+
+async function ovLoad(day) {
+    const tiles = document.getElementById('ov-tiles');
+    const lists = document.getElementById('ov-lists');
+    const meta = document.getElementById('ov-meta');
+    if (!tiles || !lists) return;
+    try {
+        const o = await api.get('/api/admin/overview' + (day ? `?date_str=${day}` : ''));
+        if (meta) meta.textContent = `for ${o.date}`;
+
+        tiles.innerHTML =
+              ovTile('Registers missing', o.missing_count, o.missing_count ? 'bad' : null)
+            + ovTile('Submitted', o.submitted_count)
+            + ovTile('Still draft', o.draft_count, o.draft_count ? 'warn' : null)
+            + ovTile('Unverified', o.unverified_count, o.unverified_count ? 'bad' : null)
+            + ovTile('Photo-only captures', o.photo_only_count, o.photo_only_count ? 'warn' : null)
+            + ovTile('Pending approvals', o.pending_approvals)
+            // Its own tile, not folded into the one above. These are the
+            // applications no coach can see, so they are the ones that sit
+            // there until somebody comes looking - which is what this page is.
+            + ovTile('No coach assigned', o.orphaned_approvals,
+                     o.orphaned_approvals ? 'bad' : null);
+
+        const row = (main, sub) => `
+            <div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border-subtle)">
+                <span style="font-weight:600">${Charts.esc(main)}</span>
+                <span class="text-xs text-muted">${Charts.esc(sub)}</span>
+            </div>`;
+
+        lists.innerHTML =
+              ovList('Coaches with no register today', o.missing,
+                     x => row(x.coach_name || `Coach ${x.coach_id}`, x.centre_name || ''),
+                     'Every coach with athletes has opened a register.')
+            + ovList('Submitted but NOT verified', o.unverified,
+                     x => row(x.coach_name || 'Centre sweep',
+                              `${x.date} \u00b7 score ${x.submitter_score ?? '-'} \u00b7 ${x.centre_name || ''}`),
+                     'Every submission was verified.')
+            + ovList('Still draft', o.drafts,
+                     x => row(x.coach_name || 'Centre sweep',
+                              `${x.rows || 0} row(s) \u00b7 expires ${(x.expires_at || '').replace('T', ' ')}`),
+                     'Nothing left unsubmitted.')
+            // A register that timed out appeared in none of the other lists -
+            // not submitted, not draft, and its coach is not "missing" because
+            // a session row exists. The attendance inside was deleted with it,
+            // so without this panel nothing on this page ever mentioned it.
+            + ovList('Expired unsubmitted', o.expired || [],
+                     x => row(x.coach_name || 'Centre sweep',
+                              `opened ${(x.created_at || '').replace('T', ' ')} \u00b7 `
+                              + `expired ${(x.expires_at || '').replace('T', ' ')}`),
+                     'No register timed out.')
+            + ovList('Captures that could not be liveness-checked', o.photo_only,
+                     x => row(x.coach_name || 'Centre sweep',
+                              `${x.date} \u00b7 ${x.kind} \u00b7 ${x.liveness_verdict || 'not_checked'}`),
+                     'Every capture was a checked video.')
+            + ovList('Submitted today', o.submitted,
+                     x => row(x.coach_name || 'Centre sweep',
+                              `${(x.submitted_at || '').replace('T', ' ')} \u00b7 `
+                              + `${x.submitter_verified ? 'verified' : 'UNVERIFIED'}`),
+                     'No registers submitted yet today.');
+    } catch (err) {
+        lists.innerHTML = `<div class="empty-state">Could not load the overview.</div>`;
+    }
+}
+
 // --- Toasts ---
 function showToast(title, message, type = 'info') {
     const container = document.getElementById('toast-container');
@@ -1356,14 +2624,22 @@ function showToast(title, message, type = 'info') {
     else if (type === 'error') icon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-red"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>`;
     else icon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-blue"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`;
 
-    toast.innerHTML = `
-        ${icon}
-        <div class="toast-content">
-            <div class="toast-title">${title}</div>
-            <div class="toast-message">${message}</div>
-        </div>
-    `;
-    
+    // The icon is a fixed literal chosen above, so it can be markup. The title
+    // and message are NOT: several callers pass server-controlled strings -
+    // a student's name, an error from the API - and innerHTML on those is a
+    // script-injection route through anything that can set a name.
+    toast.innerHTML = icon;
+    const content = document.createElement('div');
+    content.className = 'toast-content';
+    const t = document.createElement('div');
+    t.className = 'toast-title';
+    t.textContent = title == null ? '' : String(title);
+    const m = document.createElement('div');
+    m.className = 'toast-message';
+    m.textContent = message == null ? '' : String(message);
+    content.append(t, m);
+    toast.appendChild(content);
+
     container.appendChild(toast);
     
     setTimeout(() => {
@@ -1463,550 +2739,854 @@ async function submitAssign(faceUrl, studentId) {
 }
 
 
-/* --------------------------------------------------------------------------
-   Guided enrolment, phone style.
+document.addEventListener('click', (e) => {
+    if (!e.target.closest) return;
 
-   Not a sequence of named poses. The athlete is given one instruction - move
-   your head slowly in a circle - and a ring of segments around the preview
-   lights up as each angle is covered. The capture ends when enough of the ring
-   is lit, which is a statement about pose COVERAGE rather than about how many
-   buttons were pressed.
+    // Downloading is its own thing - it carries a url and a filename, not a
+    // student id - so it is matched before the id-shaped buttons below.
+    const nsrs = e.target.closest('[data-set-nsrs]');
+    if (nsrs) {
+        e.preventDefault();
+        return setNsrsId(nsrs.dataset.studentId, nsrs.dataset.current, nsrs.dataset.name);
+    }
 
-   The ring is a map, not decoration. Each frame's pose is converted to a point
-   (dy, dp) relative to the athlete's own straight-ahead reading; its angle
-   around the circle selects a segment and its radius says whether the head has
-   turned far enough for that segment to count.
-   -------------------------------------------------------------------------- */
+    const dl = e.target.closest('[data-download-photo]');
+    if (dl) {
+        e.preventDefault();
+        return downloadStudentPhoto(dl.dataset.url, dl.dataset.filename);
+    }
 
-const MV_SEGMENTS = 24;          // ring resolution - what the athlete sees
-const MV_CAPTURE_SECTORS = 8;    // how many frames are actually kept
-const MV_REQUIRED = 18;          // segments needed to finish (of MV_SEGMENTS)
-// 18/24 = 75%. Google's Pixel 4 face-unlock patent (US12183117B2) documents
-// this exact figure - enrolment completes at 75% of pose buckets filled, not
-// 100% - because requiring every angle fails people with limited neck
-// mobility or an off-axis camera, for no measurable accuracy gain. Verified
-// independently of this codebase; this file already used 75% before that was
-// known to match a shipped system.
-// Lighting the ring is feedback; the frames are the product. Finishing on ring
-// coverage alone ended the capture with three usable views, because encoding a
-// frame takes about a second and the sweep outran it.
-const MV_MIN_CAPTURES = 5;       // distinct sectors that must be on disk
-const MV_POLL_MS = 250;
+    const btn = e.target.closest(
+        '[data-clip-enrol], [data-add-photo], [data-delete-student], [data-open-student]');
+    if (!btn) return;
+    e.preventDefault();
+    const id = btn.dataset.studentId;
+    const name = btn.dataset.studentName || '';
+    if (btn.hasAttribute('data-add-photo')) openAddPhotoModal(id, name);
+    else if (btn.hasAttribute('data-delete-student')) confirmDeleteStudent(id, name);
+    else if (btn.hasAttribute('data-open-student')) openStudentDetail(id);
+    else openClipEnrol(id, name);
+});
 
-// Frames are stored at this width rather than the full sensor resolution. A
-// selfie face still lands near 200px here, well above the 90px the enrolment
-// endpoint requires, and the upload is smaller over mobile data. Note this did
-// NOT speed up encoding in testing - 960px and 1280px both measured about a
-// second - so the roughly one-second capture is fixed overhead, not pixels,
-// and the sweep is designed to keep running through it.
-const MV_CAPTURE_WIDTH = 960;
+/** Record a short clip with live face tracking, and hand it to a caller.
+ *
+ * Shared by both enrolment paths - registering a new person, and re-registering
+ * an existing one - because the capture is identical and only what happens with
+ * the clip differs. It replaces the 24-segment "move your head in a circle"
+ * ceremony: two seconds of ordinary movement produces the same several views
+ * without asking a child to perform a sequence on cue, and unlike a set of
+ * stills it carries the parallax that proves the subject is a person rather
+ * than a photograph held to the lens.
+ *
+ * Recording blind and reporting a verdict afterwards was the wrong shape: the
+ * person holding the phone could not tell whether the face was being seen at
+ * all until it was too late. So this polls /api/enroll/pose-check while the
+ * modal is open, draws the detected box over the video, and says what to change
+ * - the same live loop the old scan used, so no new model and no build step.
+ *
+ * opts: { title, intro, onClip(file, ui) }
+ *   ui.status(textOrHtml, isHtml)  report progress or a refusal
+ *   ui.resume()                    return to a live camera for another attempt
+ *   ui.close()                     finish and close the modal
+ */
+// Attendance stays a short, fixed capture: it photographs a group across a
+// room, where nobody is going to perform a guided sequence, and the clip is a
+// means to a register rather than a permanent identity record.
+const CLIP_MS_ATTENDANCE = 2000;
 
-// Yaw travels further than pitch on a real head, so the raw angles are scaled
-// before being read as a circle. Without this the "circle" is a flat ellipse
-// and the top and bottom segments are unreachable.
-const MV_YAW_SCALE = 18.0;
-const MV_PITCH_SCALE = 12.0;
-const MV_MIN_RADIUS = 0.55;      // how far the head must turn for a segment to count
+// The unguided clip. Longer than the legacy attendance capture because the
+// parallax check has to find depth in it without any head movement to help -
+// all it gets is the hand holding the phone.
+const CLIP_MS_PLAIN = 3000;
 
-let mvState = null;
+// Registration does NOT record for a fixed duration. A clock was tried first -
+// ten seconds, on the reasoning that more elapsed time gives a person more
+// chance to shift naturally. It was the wrong mechanism: a script tied to a
+// clock plays "turn left" for a slice of time whether or not anyone actually
+// turned, so it does not GUARANTEE the motion the depth check depends on, and
+// a full ten seconds is also longer than most people need once they are
+// actually being told what to do and confirmed to have done it.
+//
+// So each instruction is verified against the person's own measured pose
+// before the next one is shown, reusing /api/enroll/pose-check's existing
+// named steps (left/right/up/down, judged relative to a captured baseline) -
+// the same endpoint and thresholds the old guided-multiview flow used, just
+// without that flow's ring visualisation. Recording stops once every step has
+// been measured complete, however long that actually took.
+//
+// GUIDED_CAPTURE_MAX_MS is a backstop, not a target: if pose measurement never
+// works at all (bad light, an unreliable estimate for this face, a network
+// hiccup) the loop below moves on from each stuck step after its own timeout
+// rather than trapping someone, and this is the outer ceiling in case that
+// safety valve itself fails - normal use should never come close to it. The
+// server's own liveness check on the finished clip remains the real gate
+// either way; this sequence exists to elicit good motion, not to replace it.
+const GUIDED_CAPTURE_MAX_MS = 45000;
 
-// Re-scan an existing person: the frames go straight to their profile.
-async function openMultiViewEnrol(studentId, studentName) {
-    openFaceScan({
-        title: `Register face - ${studentName}`,
-        onComplete: frames => mvSaveToProfile(studentId, frames),
-    });
+// The four directions, named exactly as pose-check expects. Order matters
+// only for how it reads to a person - left/right/up/down, not because the
+// depth measurement needs a particular sequence.
+const GUIDED_DIRECTIONS = [
+    { key: 'left',  text: 'Slowly turn your head to your LEFT',  arrow: 'left'  },
+    { key: 'right', text: 'Slowly turn your head to your RIGHT', arrow: 'right' },
+    { key: 'up',    text: 'Tilt your head UP a little',          arrow: 'up'    },
+    { key: 'down',  text: 'Tilt your head DOWN a little',        arrow: 'down'  },
+];
+
+function _arrowSvg(direction) {
+    // Same stroke-based style as every other icon in this file, so it reads as
+    // part of the app rather than a dropped-in graphic.
+    const rot = { left: 180, right: 0, up: -90, down: 90 }[direction] ?? 0;
+    return `<svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                 style="transform:rotate(${rot}deg)">
+                <path d="M5 12h14M13 6l6 6-6 6"/>
+            </svg>`;
 }
 
-async function mvSaveToProfile(studentId, frames) {
-    const btn = document.getElementById('mv-save');
-    if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
-    const fd = new FormData();
-    frames.forEach((f, i) => fd.append('frames', f.blob, `${f.key}_${i}.jpg`));
-    try {
-        const r = await api.postForm(`/api/students/${studentId}/enroll-multiview`, fd);
-        closeFaceScan();
-        showToast(r.sufficient ? 'Face registered' : 'Only partly captured',
-                  r.message, r.sufficient ? 'success' : 'error');
-        if (state.currentRoute === '/students') renderStudents();
-    } catch {
-        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
-    }
-}
+/* The two states the tracking overlay can be in.
+ *
+ * Read by the canvas AND by the on-screen legend, because the legend's whole
+ * job is to say what these colours mean - a swatch that has drifted from the
+ * dots it describes teaches the wrong thing, and nothing would catch it. */
+const POSE_ACCENT_WAIT = '#f59e0b';   // amber: a face, but not usable yet
+const POSE_ACCENT_GOOD = '#22c55e';   // green: framed, and the shutter is live
 
-async function openFaceScan(opts) {
-    const seg = [];
-    for (let i = 0; i < MV_SEGMENTS; i++) {
-        const a0 = (i / MV_SEGMENTS) * 2 * Math.PI - Math.PI / 2;
-        const a1 = ((i + 0.82) / MV_SEGMENTS) * 2 * Math.PI - Math.PI / 2;
-        const r0 = 44, r1 = 49;
-        const p = (r, a) => `${(50 + r * Math.cos(a)).toFixed(2)},${(50 + r * Math.sin(a)).toFixed(2)}`;
-        seg.push(`<path class="mv-seg" data-i="${i}" d="M${p(r0,a0)} L${p(r1,a0)} A${r1},${r1} 0 0,1 ${p(r1,a1)} L${p(r0,a1)} A${r0},${r0} 0 0,0 ${p(r0,a0)} Z"/>`);
+async function openClipCapture(opts) {
+    /* Every pose-check poll goes through here.
+     *
+     * It carries the signup token when there is one - self-registration has no
+     * session, so without it every poll is a 403 - and it is quiet, because
+     * these run several times a second and each caller already counts failures
+     * and reports a run of them once. Getting either wrong is invisible until
+     * somebody is standing in front of a camera that will not respond. */
+    async function pollPose(fd) {
+        if (opts.signupToken) fd.append('signup_token', opts.signupToken);
+        return api.postForm('/api/enroll/pose-check', fd, 'POST', true);
     }
-    openModal(opts.title || 'Scan face', `
-        <div class="mv-stage">
-            <video id="mv-video" autoplay playsinline muted></video>
-            <div class="mv-mask"></div>
-            <svg class="mv-ringsvg" viewBox="0 0 100 100">${seg.join('')}</svg>
-            <div class="mv-flash" id="mv-flash"></div>
-            <div class="mv-step" id="mv-step">Starting camera...</div>
+
+    openModal(opts.title || 'Record clip', `
+        <div class="camera-container" id="clip-cap-camera">
+            <video id="clip-cap-video" class="camera-video" autoplay playsinline muted></video>
+            <canvas id="clip-cap-overlay" class="camera-overlay"></canvas>
+            <div class="rec-hint" id="clip-cap-hint">Looking for a face...</div>
+            <!-- Shown only while recording. Separate from #clip-cap-hint on
+                 purpose: the pose-check poll used for pre-recording framing
+                 (tick()) keeps overwriting that pill, which would fight the
+                 guided sequence for control of the same element - so the
+                 framing poll is stopped for the duration of the recording and
+                 this element takes over instead. -->
+            <div class="rec-prompt hidden" id="clip-cap-prompt">
+                <div class="rec-prompt-arrow" id="clip-cap-prompt-arrow"></div>
+                <div class="rec-prompt-text" id="clip-cap-prompt-text"></div>
+                <!-- The server's own words for THIS frame ("turn further",
+                     "hold the phone at eye level"). pose-check has always
+                     returned it and the guided sequence threw it away, so the
+                     only feedback was a prompt that changed on a timer. -->
+                <div class="rec-prompt-live" id="clip-cap-prompt-live"></div>
+            </div>
+            <div class="camera-controls" style="justify-content:center">
+                <button type="button" class="camera-shutter" id="clip-cap-shutter"
+                        aria-label="Record - follow the on-screen prompts" disabled>
+                    <svg class="rec-ring" viewBox="0 0 44 44" aria-hidden="true">
+                        <circle class="rec-ring-track" cx="22" cy="22" r="20"></circle>
+                        <circle class="rec-ring-fill" id="clip-cap-ring" cx="22" cy="22" r="20"></circle>
+                    </svg>
+                    <div class="shutter-inner"></div>
+                </button>
+            </div>
         </div>
-        <div class="mv-count"><span id="mv-pct">0</span>% complete</div>
-        <div id="mv-hint" class="text-sm text-muted" style="text-align:center;margin-top:6px"></div>
-        <canvas id="mv-canvas" class="hidden"></canvas>`,
-        `<button class="btn btn-secondary" onclick="closeFaceScan()">Cancel</button>
-         <button class="btn btn-primary hidden" id="mv-save" onclick="mvSubmit()">Save</button>`);
+        <div id="clip-cap-status" class="text-sm text-muted mt-3">
+            ${Charts.esc(opts.intro || "Hold the phone at arm's length. Follow the on-screen prompts - "
+                                      + "recording stops automatically once every step is done.")}
+        </div>
+        <!-- What the dots on the face mean. People saw them change colour and
+             had no way to know that green was the signal they were waiting
+             for, or that the record button stays disabled until it appears -
+             the button looked broken rather than not-yet-ready. -->
+        <div class="clip-legend" id="clip-cap-legend">
+            <span class="clip-legend-item">
+                <i class="clip-dot" id="clip-dot-wait"></i>Keep adjusting
+            </span>
+            <span class="clip-legend-item">
+                <i class="clip-dot" id="clip-dot-good"></i>Green - ready to record
+            </span>
+        </div>`);
 
-    mvState = {
-        onComplete: opts.onComplete, stream: null, timer: null, busy: false,
-        capturing: false, phase: 'centre', baseYaw: null, basePitch: null,
-        centreHold: 0, covered: new Set(), capturedSectors: new Set(), frames: [],
+    const video   = document.getElementById('clip-cap-video');
+    const overlay = document.getElementById('clip-cap-overlay');
+    const hint    = document.getElementById('clip-cap-hint');
+    const shutter = document.getElementById('clip-cap-shutter');
+    const ring    = document.getElementById('clip-cap-ring');
+    const status  = document.getElementById('clip-cap-status');
+
+    // Painted here rather than in the stylesheet so the swatches and the dots
+    // cannot disagree; see POSE_ACCENT_WAIT / POSE_ACCENT_GOOD.
+    const dotWait = document.getElementById('clip-dot-wait');
+    const dotGood = document.getElementById('clip-dot-good');
+    if (dotWait) dotWait.style.background = POSE_ACCENT_WAIT;
+    if (dotGood) dotGood.style.background = POSE_ACCENT_GOOD;
+
+    const cam = new CameraCapture(video, null, null);
+    cam.facingMode = 'user';                 // enrolment photographs the holder
+    if (await cam.start() === false) { closeModal(); return; }
+
+    const state = { busy: false, timer: null, box: null, landmarks: null, good: false,
+                    recording: false, alive: true, fails: 0, closed: false,
+                    mesh: null, raf: 0 };
+    const setRing = p => { if (ring) ring.style.strokeDashoffset = String(126 * (1 - p)); };
+
+    // Stop everything however the modal closes - X, Escape, or a route change.
+    // A stream left running behind a closed dialog keeps the camera light on.
+    const teardown = () => {
+        state.alive = false;
+        state.closed = true;          // one-way: nothing may restart after this
+        if (state.timer) clearInterval(state.timer);
+        if (state.raf) cancelAnimationFrame(state.raf);
+        state.raf = 0;
+        state.mesh = null;
+        try { cam.stop(); } catch { /* already stopped */ }
     };
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        mvSay('Camera unavailable', window.isSecureContext
-            ? 'This browser does not support camera capture.'
-            : 'The camera only works over HTTPS. Open the https:// address instead.');
-        return;
-    }
-    try {
-        mvState.stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } },
-            audio: false,
-        });
-        const v = document.getElementById('mv-video');
-        v.srcObject = mvState.stream;
-        await v.play();
+    const modal = document.getElementById('modal-container');
+    const observer = new MutationObserver(() => {
+        if (modal.classList.contains('hidden')) { teardown(); observer.disconnect(); }
+    });
+    observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
 
-        // See waitForVideoFrame's definition: getUserMedia resolving does not
-        // mean the video is rendering. A stalled stream here left the athlete
-        // staring at "Starting camera..." forever with no error and no picture.
-        const gotFrame = await waitForVideoFrame(v);
-        if (!gotFrame) {
-            mvState.stream.getTracks().forEach(t => t.stop());
-            mvState.stream = null;
-            mvSay('Camera unavailable',
-                  'The camera started but no picture appeared.' + standaloneCameraHint());
+    function draw() {
+        if (!state.alive || !video.videoWidth) return;
+        const r = video.getBoundingClientRect();
+        // A zero rect happens transiently - the modal mid-open, or a
+        // backgrounded tab. Sizing to it would blank the overlay until the next
+        // resize, so keep the last good size instead.
+        if (r.width < 1 || r.height < 1) return;
+        if (overlay.width !== Math.round(r.width) || overlay.height !== Math.round(r.height)) {
+            overlay.width = Math.round(r.width);
+            overlay.height = Math.round(r.height);
+        }
+        const ctx = overlay.getContext('2d');
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+        // Geometry shared by both sources: the video is object-fit: cover, so
+        // part of it is cropped, and the preview is mirrored for the front
+        // camera. Anything drawn on top has to undo both or it drifts.
+        const sw0 = video.videoWidth, sh0 = video.videoHeight;
+        const sc = Math.max(overlay.width / sw0, overlay.height / sh0);
+        const ox = (overlay.width - sw0 * sc) / 2;
+        const oy = (overlay.height - sh0 * sc) / 2;
+        const mirror = cam.facingMode === 'user';
+        const toScreen = (px, py) => [
+            (mirror ? sw0 - px : px) * sc + ox,
+            py * sc + oy,
+        ];
+
+        // Preferred: the on-device mesh. 478 points at video rate.
+        if (state.mesh) {
+            const accentM = state.good ? POSE_ACCENT_GOOD : POSE_ACCENT_WAIT;
+            // Small and semi-transparent: 478 opaque dots read as a blob and
+            // hide the face they are meant to be tracking.
+            const r = Math.max(0.8, Math.min(1.8, overlay.width * 0.0035));
+            ctx.fillStyle = accentM;
+            ctx.globalAlpha = 0.75;
+            for (let i = 0; i < state.mesh.length; i++) {
+                const lm = state.mesh[i];
+                const [X, Y] = toScreen(lm.x * sw0, lm.y * sh0);
+                ctx.beginPath();
+                ctx.arc(X, Y, r, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.globalAlpha = 1;
             return;
         }
 
-        mvSay('Look straight at the camera', 'Fill the circle with your face');
-        mvState.timer = setInterval(mvTick, MV_POLL_MS);
-    } catch (e) {
-        mvSay('Camera unavailable', CameraCapture.explain(e));
-    }
-}
+        if (!state.box) return;
 
-function mvSay(step, hint) {
-    const s = document.getElementById('mv-step');
-    const h = document.getElementById('mv-hint');
-    if (s) s.textContent = step;
-    if (h && hint !== undefined) h.textContent = hint;
-}
+        // pose-check was sent a 480px-wide frame, so the box is in those
+        // coordinates. Scale to the drawn video, allowing for the cover crop.
+        const sw = video.videoWidth, sh = video.videoHeight;
+        const scale = Math.max(overlay.width / sw, overlay.height / sh);
+        const dx = (overlay.width - sw * scale) / 2;
+        const dy = (overlay.height - sh * scale) / 2;
+        const k = sw / 480;
+        let [x1, y1, x2, y2] = state.box.map(v => v * k);
+        // The preview is mirrored for the front camera, so the box must be too,
+        // or it tracks the opposite way as the head moves.
+        if (cam.facingMode === 'user') { const t = x1; x1 = sw - x2; x2 = sw - t; }
 
-function mvGrab(maxW) {
-    const v = document.getElementById('mv-video');
-    const c = document.getElementById('mv-canvas');
-    if (!v || !c || !v.videoWidth) return null;
-    const scale = maxW ? Math.min(1, maxW / v.videoWidth) : 1;
-    c.width = Math.round(v.videoWidth * scale);
-    c.height = Math.round(v.videoHeight * scale);
-    // The preview is mirrored for comfort; the stored frame must not be, or
-    // every template is a mirror image of the person.
-    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
-    return c;
-}
+        const X = x1 * scale + dx, Y = y1 * scale + dy;
+        const W = (x2 - x1) * scale, H = (y2 - y1) * scale;
+        const accent = state.good ? POSE_ACCENT_GOOD : POSE_ACCENT_WAIT;
 
-async function mvTick() {
-    if (!mvState || mvState.busy || mvState.phase === 'done') return;
-    const c = mvGrab(480);
-    if (!c) return;
-    mvState.busy = true;
-    try {
-        const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.8));
-        const fd = new FormData();
-        fd.append('frame', blob, 'f.jpg');
-        fd.append('step', mvState.phase === 'centre' ? 'centre' : 'sweep');
-        if (mvState.baseYaw !== null) {
-            fd.append('base_yaw', mvState.baseYaw);
-            fd.append('base_pitch', mvState.basePitch);
+        // A light frame, kept thin - it says where the face is, and the dots
+        // below say the face is actually being tracked.
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.55;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(X, Y, W, H, 10); else ctx.rect(X, Y, W, H);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        // Landmark dots, drawn the way the KIRTI analyzer draws pose joints:
+        // a dark casing under a coloured joint, so they stay readable over
+        // both a bright face and a dark room. YuNet gives five - right eye,
+        // left eye, nose, right mouth corner, left mouth corner.
+        const pts = (state.landmarks || []).map(([lx, ly]) => {
+            let px = lx * k;
+            // Mirrored for the front camera, exactly as the box is, or the
+            // dots drift the wrong way the moment the head moves.
+            if (cam.facingMode === 'user') px = sw - px;
+            return [px * scale + dx, ly * k * scale + dy];
+        });
+        if (pts.length === 5) {
+            const [rEye, lEye, nose, rMouth, lMouth] = pts;
+            const bones = [[rEye, lEye], [rEye, nose], [lEye, nose],
+                           [nose, rMouth], [nose, lMouth], [rMouth, lMouth]];
+            const r = Math.max(2.5, Math.min(6, W * 0.035));
+            // Casing first, then the bone inside it - the same two-pass trick
+            // that keeps a skeleton legible against any background.
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+            ctx.lineWidth = Math.max(3, r * 1.1);
+            bones.forEach(([a, b]) => {
+                ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+            });
+            ctx.strokeStyle = 'rgba(253,252,248,0.9)';
+            ctx.lineWidth = Math.max(1.5, r * 0.5);
+            bones.forEach(([a, b]) => {
+                ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+            });
+            pts.forEach(([px, py]) => {
+                ctx.beginPath(); ctx.arc(px, py, r + 1.5, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fill();
+                ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2);
+                ctx.fillStyle = accent; ctx.fill();
+            });
         }
-        mvApplyFeedback(await api.postForm('/api/enroll/pose-check', fd));
-    } catch { /* a dropped frame is not worth reporting - the next one follows */ }
-    finally { mvState.busy = false; }
-}
+    }
 
-function mvApplyFeedback(r) {
-    // Deliberately NOT gated on mvState.capturing. Encoding a full-resolution
-    // frame takes around a second, and the athlete keeps turning throughout;
-    // dropping those readings threw away most of the sweep and left the ring
-    // stuck around a third lit. Only the capture itself is serialised.
-    if (!mvState || mvState.phase === 'done') return;
-
-    // Framing and lighting failures are reported whatever the phase - a
-    // correctly-turned head that is too dark to use is still not usable.
-    if (!r.ok && r.reason !== 'pose') { mvSay(r.message || 'Adjust position'); return; }
-
-    if (mvState.phase === 'centre') {
-        if (!r.ok) { mvState.centreHold = 0; mvSay(r.message || 'Look straight at the camera'); return; }
-        mvState.centreHold += 1;
-        if (mvState.centreHold >= 3) {
-            mvState.baseYaw = r.yaw;
-            mvState.basePitch = r.pitch;
-            mvState.phase = 'sweep';
-            mvSay('Slowly move your head in a circle', 'Keep your eyes on the screen');
-            mvCapture('centre');
+    /* How often the framing guide asks the server. Slow is not a penalty: it
+     * is for a server that is already struggling or rate-limiting, which three
+     * requests a second makes worse. A success puts it straight back to fast. */
+    const FAST_POLL_MS = 350;
+    const SLOW_POLL_MS = 1500;
+    let framePollMs = FAST_POLL_MS;
+    const setFramePoll = (ms) => {
+        if (framePollMs === ms) return;
+        framePollMs = ms;
+        // Only re-arm a timer that is already running. Recording clears it on
+        // purpose so the guided sequence owns pose-check, and resurrecting it
+        // here would put two pollers on the same camera.
+        if (state.timer && !state.closed) {
+            clearInterval(state.timer);
+            state.timer = setInterval(tick, ms);
         }
-        return;
-    }
-
-    // Sweep: place this pose on the ring.
-    const x = (r.delta_yaw || 0) / MV_YAW_SCALE;
-    const y = (r.delta_pitch || 0) / MV_PITCH_SCALE;
-    const radius = Math.hypot(x, y);
-    if (radius < MV_MIN_RADIUS) { mvSay('Slowly move your head in a circle'); return; }
-
-    // Screen x is mirrored relative to the athlete, so a leftward turn should
-    // light the segment on the side they see themselves move toward.
-    let ang = Math.atan2(y, -x) + Math.PI / 2;
-    if (ang < 0) ang += 2 * Math.PI;
-    const idx = Math.floor((ang / (2 * Math.PI)) * MV_SEGMENTS) % MV_SEGMENTS;
-
-    if (!mvState.covered.has(idx)) {
-        mvState.covered.add(idx);
-        const el = document.querySelector(`.mv-seg[data-i="${idx}"]`);
-        if (el) el.classList.add('lit');
-        mvSetPct();
-    }
-
-    // Only a handful of frames are kept. One per sector is enough: neighbouring
-    // segments differ by a few degrees and would store near-duplicate templates.
-    // A sector is only marked captured once a frame for it actually started
-    // encoding. Marking it on the attempt would silently lose the sector when
-    // the encoder was busy.
-    const sector = Math.floor((ang / (2 * Math.PI)) * MV_CAPTURE_SECTORS) % MV_CAPTURE_SECTORS;
-    if (!mvState.capturedSectors.has(sector) && mvCapture('s' + sector)) {
-        mvState.capturedSectors.add(sector);
-    }
-
-    if (mvState.covered.size >= MV_REQUIRED && mvState.capturedSectors.size >= MV_MIN_CAPTURES) {
-        mvFinish();
-    } else if (mvState.covered.size >= MV_REQUIRED) {
-        mvSay('Almost there - keep turning', 'Collecting a few more views');
-    }
-}
-
-function mvSetPct() {
-    const pct = Math.round(100 * Math.min(1, mvState.covered.size / MV_REQUIRED));
-    const el = document.getElementById('mv-pct');
-    if (el) el.textContent = pct;
-}
-
-// Returns true when a frame actually began encoding, so the caller knows
-// whether to record that angle as captured.
-function mvCapture(key) {
-    if (!mvState || mvState.capturing) return false;
-    const c = mvGrab(MV_CAPTURE_WIDTH);
-    if (!c) return false;
-    mvState.capturing = true;
-    const flash = document.getElementById('mv-flash');
-    if (flash) { flash.classList.remove('fire'); void flash.offsetWidth; flash.classList.add('fire'); }
-    c.toBlob(b => {
-        if (!mvState) return;                       // cancelled while encoding
-        mvState.frames.push({ key, blob: b });
-        mvState.capturing = false;
-    }, 'image/jpeg', 0.95);
-    return true;
-}
-
-function mvFinish() {
-    mvState.phase = 'done';
-    if (mvState.timer) { clearInterval(mvState.timer); mvState.timer = null; }
-    // A frame may still be encoding; counting now would under-report it.
-    const settle = () => mvSay('Face registered', `${mvState.frames.length} views captured`);
-    mvSay('Face registered', 'Finishing...');
-    if (mvState.capturing) setTimeout(settle, 1200); else settle();
-    const save = document.getElementById('mv-save');
-    if (save) save.classList.remove('hidden');
-    document.querySelectorAll('.mv-seg').forEach(s => s.classList.add('lit'));
-    mvSetPct();
-}
-
-async function mvSubmit() {
-    const frames = mvState.frames;
-    const onComplete = mvState.onComplete;
-    if (onComplete) await onComplete(frames);
-}
-
-function closeFaceScan() {
-    if (mvState) {
-        if (mvState.timer) clearInterval(mvState.timer);
-        if (mvState.stream) mvState.stream.getTracks().forEach(t => t.stop());
-    }
-    mvState = null;
-    closeModal();
-}
-
-/* --------------------------------------------------------------------------
-   Analytics page.
-
-   Form was chosen per chart from the data's job, not from what looks busiest:
-
-     attendance over time   -> area, one series (the headline; it is a trend)
-     geo verification       -> horizontal stacked bar, STATUS colours
-                               (inside/no fix/outside genuinely encode good,
-                               warning and bad - this is the one place those
-                               colours belong)
-     centres                -> columns, magnitude across a handful of items
-     match confidence       -> columns over ordered buckets, sequential ramp
-                               (a distribution, so more-is-darker carries the
-                               axis a second time)
-     attendance by athlete  -> ranked horizontal bars, worst first, because
-                               long names do not fit under a column and the
-                               reader wants "who is missing sessions"
-
-   The four tiles above are a KPI row, not charts: a single current number is
-   a stat tile, never a one-bar bar chart.
-   -------------------------------------------------------------------------- */
-
-// Filters live in ONE row above everything they scope, so every chart, tile
-// and table on the page always describes the same slice of data. A filter
-// inside a single card would let two cards disagree while both looked current.
-const analyticsFilter = { days: 60, centre: '' };
-
-async function renderAnalytics(isRefetch) {
-    const root = document.getElementById('app-root');
-    const body = document.getElementById('analytics-body');
-
-    if (!isRefetch || !body) {
-        root.innerHTML = `
-            <div class="filter-row">
-                <div class="ch-skeleton" style="width:180px;height:52px"></div>
-                <div class="ch-skeleton" style="width:180px;height:52px"></div>
-            </div>
-            <div class="stats-grid" style="margin-bottom:16px">
-                ${'<div class="ch-skeleton" style="height:104px"></div>'.repeat(4)}
-            </div>
-            <div class="analytics-grid">
-                <div class="ch-skeleton col-span-2" style="height:300px"></div>
-                <div class="ch-skeleton" style="height:190px"></div>
-                <div class="ch-skeleton" style="height:190px"></div>
-            </div>`;
-    } else {
-        // Hold the previous render at reduced opacity rather than tearing it
-        // down for a skeleton - no layout jump, and the numbers stay readable
-        // while the new ones are on their way.
-        body.classList.add('is-refetching');
-    }
-
-    const qs = `days=${analyticsFilter.days}` +
-               (analyticsFilter.centre ? `&centre_id=${encodeURIComponent(analyticsFilter.centre)}` : '');
-    let a, centres = [];
-    try {
-        [a, centres] = await Promise.all([
-            api.get(`/api/analytics?${qs}`),
-            api.get('/api/centres').then(r => r.centres).catch(() => []),
-        ]);
-    } catch {
-        root.innerHTML = `<div class="empty-state py-12">Could not load analytics.</div>`;
-        return;
-    }
-
-    const trend = a.trend || [];
-    const present = trend.map(d => d.present);
-    const latest = present.length ? present[present.length - 1] : 0;
-    const prev = present.length > 1 ? present[present.length - 2] : null;
-    const avg = present.length ? present.reduce((x, y) => x + y, 0) / present.length : 0;
-    const rate = a.enrolled ? (avg / a.enrolled) * 100 : 0;
-    const best = present.length ? Math.max(...present) : 0;
-
-    const shortDate = (iso) => {
-        const [, m, d] = (iso || '').split('-');
-        return m && d ? `${d}/${m}` : iso;
     };
 
-    // Delta on the headline tile: signed, against a named period, and coloured
-    // by direction because for attendance up is unambiguously good.
-    let deltaHtml = '';
-    if (prev !== null) {
-        const diff = latest - prev;
-        const cls = diff > 0 ? 'up' : diff < 0 ? 'down' : 'flat';
-        // "0 vs previous session" reads like a missing value; say it in words.
-        const text = diff === 0 ? 'No change from previous session'
-                                : `${diff > 0 ? '+' : ''}${diff} vs previous session`;
-        deltaHtml = `<div class="stat-delta ${cls}">${text}</div>`;
+    /* What a failed poll actually was, in words that match it.
+     *
+     * Returning null means "not worth counting" - one frame the server could
+     * not read is not a fault in the camera or the connection.
+     *
+     * `fatal` means retrying cannot help: the caller is no longer allowed to
+     * use the guide, so the honest thing is to stop and say why. Everything
+     * else keeps polling, because it may well come back - and on a phone,
+     * usually does. */
+    function pollFailure(err) {
+        const code = err && err.status;
+        if (code === 403) {
+            return opts.signupToken
+                // The signup token is the only credential an applicant has and
+                // it expires. Telling them the connection dropped sends them
+                // to look at their wifi instead of starting again.
+                ? { text: 'This registration has timed out - close and start again.',
+                    fatal: true }
+                : { text: 'Your session has expired - sign in again.', fatal: true };
+        }
+        if (code === 400) return null;             // an unreadable frame, not a streak
+        if (code === 429) return { text: 'Too busy - still trying\u2026', fatal: false };
+        if (code >= 500) return { text: 'The server is having trouble - still trying\u2026',
+                                  fatal: false };
+        return { text: 'Connection trouble - still trying\u2026', fatal: false };
     }
 
-    const geo = a.geo || {};
-    const geoSegments = [
-        { label: 'At the centre', value: geo.inside || 0, color: Charts.status.good },
-        { label: 'No location fix', value: geo.no_fix || 0, color: Charts.status.warn },
-        { label: 'Outside the fence', value: geo.outside || 0, color: Charts.status.bad },
-        { label: 'Unverified', value: geo.unverified || 0, color: Charts.status.none },
-    ].filter(s => s.value);
-
-    const centreData = (a.by_centre || []).map(c => ({
-        label: c.name, short: c.code, value: c.present,
-    }));
-
-    // Buckets are an ordered scale, so they take the sequential ramp: the
-    // darker the column the higher the confidence it represents.
-    const conf = a.confidence || [];
-    const confData = conf.map((c, i) => ({
-        label: `${(c.bucket * 100).toFixed(0)}-${(c.bucket * 100 + 5).toFixed(0)}% similarity`,
-        short: (c.bucket * 100).toFixed(0),
-        value: c.count,
-        color: Charts.sequential[Math.min(
-            Charts.sequential.length - 1,
-            Math.floor((i / Math.max(1, conf.length - 1)) * (Charts.sequential.length - 1))
-        )],
-    }));
-
-    // Worst attendance first - that is the list a coach acts on. Capped at 12
-    // so the card stays readable; the table view holds the rest.
-    const perAthlete = a.per_athlete || [];
-    const worst = perAthlete.slice(0, 12).map(p => ({
-        label: p.name, value: p.rate, unit: '%',
-    }));
-
-    const isSuper = (session.user || {}).role === 'super_admin';
-    root.innerHTML = `
-        <div class="filter-row">
-            <label class="filter-field">
-                <span>Period</span>
-                <select id="an-days" class="form-select">
-                    <option value="7">Last 7 sessions</option>
-                    <option value="30">Last 30 sessions</option>
-                    <option value="60">Last 60 sessions</option>
-                    <option value="365">All sessions</option>
-                </select>
-            </label>
-            ${isSuper ? `<label class="filter-field">
-                <span>Centre</span>
-                <select id="an-centre" class="form-select">
-                    <option value="">All centres</option>
-                    ${centres.map(c => `<option value="${c.id}">${Charts.esc(c.name)}</option>`).join('')}
-                </select>
-            </label>` : ''}
-        </div>
-        <div id="analytics-body">
-        <div class="stats-grid" style="margin-bottom:16px">
-            <div class="stat-card">
-                <div class="stat-header"><span>Latest session</span></div>
-                <div class="stat-value">${latest}</div>
-                ${deltaHtml}
-                <div class="stat-spark">${Charts.sparkline(present.slice(-14))}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-header"><span>Average per session</span></div>
-                <div class="stat-value">${avg.toFixed(1)}</div>
-                <div class="stat-delta flat">across ${a.sessions} session${a.sessions === 1 ? '' : 's'}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-header"><span>Best turnout</span></div>
-                <div class="stat-value">${best}</div>
-                <div class="stat-delta flat">of ${a.enrolled} enrolled</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-header"><span>Sessions recorded</span></div>
-                <div class="stat-value">${a.sessions}</div>
-            </div>
-        </div>
-
-        <div class="card" style="margin-bottom:16px">
-            <div class="card-body meter-row">
-                ${Charts.radialMeter(rate, { caption: 'of enrolled athletes', label: 'Average turnout' })}
-                <div class="meter-copy">
-                    <div class="meter-title">Average turnout</div>
-                    <p class="text-sm text-muted" style="margin:6px 0 0">
-                        On a typical session ${avg.toFixed(1)} of ${a.enrolled} enrolled athletes
-                        were recognised. The ring is that share; the sessions below are how it
-                        moved over time.
-                    </p>
-                </div>
-            </div>
-        </div>
-
-        <div class="analytics-grid">
-            <div class="card col-span-2">
-                <div class="card-header">
-                    <h3 class="card-title">Athletes present per session</h3>
-                    <span class="text-xs text-muted">${a.enrolled} enrolled</span>
-                </div>
-                <div class="card-body">
-                    ${Charts.areaChart(
-                        trend.map(d => ({ label: d.date, short: shortDate(d.date), value: d.present })),
-                        { unit: '', height: 250 }
-                    )}
-                    ${Charts.tableView(['Date', 'Present'],
-                        trend.map(d => [d.date, d.present]), 'Athletes present per session')}
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header"><h3 class="card-title">Location verification</h3></div>
-                <div class="card-body">
-                    ${Charts.stackedBar(geoSegments, { height: 30 })}
-                    ${Charts.tableView(['Status', 'Records'],
-                        geoSegments.map(s => [s.label, s.value]), 'Location verification of attendance records')}
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header"><h3 class="card-title">Records by centre</h3></div>
-                <div class="card-body">
-                    ${Charts.barChart(centreData, { height: 220 })}
-                    ${Charts.tableView(['Centre', 'Records', 'Athletes'],
-                        (a.by_centre || []).map(c => [c.name, c.present, c.athletes]), 'Attendance records by centre')}
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header">
-                    <h3 class="card-title">Match confidence</h3>
-                    <span class="text-xs text-muted">similarity %</span>
-                </div>
-                <div class="card-body">
-                    <div class="text-xs text-muted" style="margin-bottom:8px">
-                        Where matches cluster. Bars close to the threshold are the ones
-                        that will start being missed as athletes grow.
-                    </div>
-                    ${Charts.barChart(confData, { height: 220 })}
-                    ${Charts.tableView(['Similarity', 'Matches'],
-                        conf.map(c => [`${(c.bucket * 100).toFixed(0)}%`, c.count]), 'Distribution of match confidence')}
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header">
-                    <h3 class="card-title">Lowest attendance</h3>
-                    <span class="text-xs text-muted">% of sessions</span>
-                </div>
-                <div class="card-body">
-                    ${Charts.rankedBars(worst, { unit: '%' })}
-                    ${Charts.tableView(['Athlete', 'Roll no', 'Sessions', 'Rate %'],
-                        perAthlete.map(p => [p.name, p.roll_no, p.present, p.rate]), 'Attendance rate by athlete')}
-                </div>
-            </div>
-        </div>
-        </div>`;
-
-    const daysSel = document.getElementById('an-days');
-    if (daysSel) {
-        daysSel.value = String(analyticsFilter.days);
-        daysSel.addEventListener('change', () => {
-            analyticsFilter.days = +daysSel.value;
-            renderAnalytics(true);
-        });
-    }
-    const centreSel = document.getElementById('an-centre');
-    if (centreSel) {
-        centreSel.value = analyticsFilter.centre;
-        centreSel.addEventListener('change', () => {
-            analyticsFilter.centre = centreSel.value;
-            renderAnalytics(true);
-        });
+    /* The guided sequence's version: same classification, but it reports
+     * through the live prompt and tells the loop whether to give up.
+     *
+     * Both guided loops used to swallow every failure and retry until they
+     * timed out. With an expired signup token that is six seconds of "hold
+     * still" followed by four seven-second turns - over half a minute of
+     * somebody dutifully turning their head at a camera whose every frame is
+     * being refused - and then a recording that could only ever be rejected.
+     * Nothing on screen said a word about it. */
+    function guidedPollFailed(err) {
+        const f = pollFailure(err);
+        if (!f) return false;                 // one unreadable frame; retry
+        if (!f.fatal) return false;           // transient; retry, as before
+        setPromptLive(f.text);
+        return true;
     }
 
-    Charts.initChartInteraction(root);
-    Charts.countUp(root);
+    function grab(maxW) {
+        if (!video.videoWidth) return null;
+        const c = document.createElement('canvas');
+        const s = Math.min(1, maxW / video.videoWidth);
+        c.width = Math.round(video.videoWidth * s);
+        c.height = Math.round(video.videoHeight * s);
+        c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+        return c;
+    }
+
+    async function tick() {
+        if (!state.alive || state.busy) return;
+        const c = grab(480);
+        if (!c) return;
+        state.busy = true;
+        try {
+            const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.8));
+            // A null blob is a failed ENCODE, not a failed request. Letting it
+            // fall through would throw in FormData.append and be counted as a
+            // network failure, and five of those dead-end the person at "Lost
+            // connection" with the poll cancelled - recoverable only by closing
+            // the modal. Skip the frame and keep the streak intact.
+            if (!blob) return;
+            const fd = new FormData();
+            fd.append('frame', blob, 'f.jpg');
+            fd.append('step', 'centre');
+            const r = await pollPose(fd);
+            if (!state.alive) return;
+
+            state.box = r.box || null;
+            state.landmarks = r.landmarks || null;
+            // "ok" means correctly posed AND framed. Pose does not matter for a
+            // clip - the recording captures several angles by itself - so only
+            // framing and image quality gate the button.
+            state.good = !!r.box && (r.ok || r.reason === 'pose');
+            hint.textContent = state.good
+                ? (state.recording ? 'Recording - keep moving gently' : 'Face found - tap to record')
+                : (r.message || 'No face detected');
+            if (!state.recording) shutter.disabled = !state.good;
+            // Recovered. Anything the last failure put on screen has just been
+            // overwritten by a real answer, so drop back to the fast poll.
+            state.fails = 0;
+            setFramePoll(FAST_POLL_MS);
+            draw();
+        } catch (err) {
+            /* THIS USED TO END THE CAPTURE. Five consecutive failures - at a
+             * 350ms poll, 1.75 seconds - cleared the timer, disabled the
+             * shutter and printed "Lost connection - close and try again".
+             *
+             * Two things were wrong with that. It was usually untrue: a 403
+             * from an expired signup token, a 429, or a 500 is not a lost
+             * connection, and somebody sent to check their wifi cannot fix any
+             * of them. And it was permanent - nothing ever restarted the poll,
+             * so a phone that hiccuped for two seconds on a train had to be
+             * closed and begun again, which for an applicant means the whole
+             * registration.
+             *
+             * Now the reason is named, the loop keeps trying unless trying is
+             * pointless, and one good frame clears it. */
+            const f = pollFailure(err);
+            if (!f) return;
+            state.fails += 1;
+            if (f.fatal) {
+                if (state.timer) { clearInterval(state.timer); state.timer = null; }
+                hint.textContent = f.text;
+                shutter.disabled = true;
+                return;
+            }
+            // Wait for a short run before saying anything: single dropped
+            // frames are normal and a message that flickers on every one of
+            // them is worse than silence.
+            if (state.fails >= 3) {
+                hint.textContent = f.text;
+                shutter.disabled = true;
+                setFramePoll(SLOW_POLL_MS);
+            }
+        } finally {
+            state.busy = false;
+        }
+    }
+
+    const ui = {
+        status(text, isHtml) {
+            if (isHtml) status.innerHTML = text; else status.textContent = text;
+        },
+        async resume() {
+            // Refuse once the modal has been closed. onClip callbacks await a
+            // server round trip and then call this on a refusal, so the close
+            // can land WHILE that request is in flight - and by then teardown
+            // has run and disconnected the observer, so nothing would ever stop
+            // the camera or the 350ms poll again. Without this guard, closing
+            // the dialog mid-upload left the camera light on and pose-check
+            // firing three times a second for the life of the page.
+            if (state.closed || modal.classList.contains('hidden')) return false;
+            if (await cam.start() === false) return false;
+            if (state.closed) { try { cam.stop(); } catch {} return false; }  // closed while starting
+            state.alive = true;
+            state.fails = 0;
+            if (state.timer) clearInterval(state.timer);
+            framePollMs = FAST_POLL_MS;
+            state.timer = setInterval(tick, framePollMs);
+            shutter.disabled = false;
+            return true;
+        },
+        close() { teardown(); closeModal(); },
+    };
+
+    state.timer = setInterval(tick, framePollMs);
+    tick();
+
+    // On-device landmarks, if the runtime was fetched at build time. This is
+    // what makes the dots track rather than step: the server poll above is a
+    // round trip roughly three times a second, while this runs at video rate
+    // and returns 478 points instead of five. Entirely optional - when
+    // frontend/vendor is absent FaceMesh.load() resolves null and the overlay
+    // keeps using the five server points.
+    (async () => {
+        const ok = await FaceMesh.load();
+        if (!ok || state.closed) return;
+        const loop = () => {
+            if (state.closed) return;
+            const pts = FaceMesh.detect(video, performance.now());
+            if (pts) state.mesh = pts;
+            // Only the mesh path redraws here; the server path redraws on its
+            // own poll, so a dropped mesh frame never blanks the overlay.
+            if (state.mesh) draw();
+            state.raf = requestAnimationFrame(loop);
+        };
+        state.raf = requestAnimationFrame(loop);
+    })();
+
+    const promptBox   = document.getElementById('clip-cap-prompt');
+    const promptText  = document.getElementById('clip-cap-prompt-text');
+    const promptArrow = document.getElementById('clip-cap-prompt-arrow');
+    const promptLive  = document.getElementById('clip-cap-prompt-live');
+
+    /* What the server said about the frame just sent. Cleared between steps so
+       advice for the previous turn cannot linger over the next one. */
+    function setPromptLive(text) {
+        if (promptLive) promptLive.textContent = text || '';
+    }
+
+    /* A turn was actually measured. Say so - visibly, and for long enough to
+       be seen at arm's length - before moving on. Without this, doing it right
+       and doing nothing at all looked identical. */
+    async function flashStepDone(text) {
+        promptBox.classList.add('done');
+        promptText.textContent = text || 'Got it';
+        promptArrow.innerHTML = '';
+        promptArrow.classList.add('hidden');
+        setPromptLive('');
+        if (navigator.vibrate) navigator.vibrate([25, 40, 25]);
+        await new Promise(res => setTimeout(res, 450));
+        promptBox.classList.remove('done');
+    }
+
+    function setPromptStep(step) {
+        promptBox.classList.remove('done');
+        setPromptLive('');
+        promptText.textContent = step.text;
+        promptArrow.innerHTML = step.arrow ? _arrowSvg(step.arrow) : '';
+        promptArrow.classList.toggle('hidden', !step.arrow);
+        // A beat of haptic feedback on each new instruction - the phone is
+        // usually held at arm's length during this, where a small on-screen
+        // text change is easy to miss.
+        if (navigator.vibrate) navigator.vibrate(25);
+    }
+
+    /** Wait for one frame captured DURING an active recording to satisfy one
+     *  named pose-check step, polling at its own pace independent of the
+     *  pre-recording framing loop (which is stopped for the duration - see
+     *  the shutter handler). Resolves the measured response on success, or
+     *  null if `timeoutMs` passes first - the caller decides what "gave up"
+     *  means, this function only reports which one happened. */
+    async function waitForStep(stepKey, baseYaw, basePitch, timeoutMs, pollMs) {
+        const start = Date.now();
+        while (!state.closed && Date.now() - start < timeoutMs) {
+            // The WHOLE poll attempt is one try/catch, not just the network
+            // call. canvas.toBlob() is explicitly allowed by spec to resolve
+            // null if encoding fails - rare on an idle desktop browser, far
+            // less rare on a real phone under the load a live camera plus a
+            // 200ms encode loop puts on it - and fd.append('frame', null, ...)
+            // throws a TypeError that a narrower try/catch would not catch,
+            // crashing the whole guided sequence with an unhandled rejection
+            // mid-registration. One bad frame here must cost one retry, never
+            // the capture.
+            try {
+                const c = grab(480);
+                if (c) {
+                    const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.8));
+                    if (blob) {
+                        const fd = new FormData();
+                        fd.append('frame', blob, 'f.jpg');
+                        fd.append('step', stepKey);
+                        if (baseYaw !== null) { fd.append('base_yaw', baseYaw); fd.append('base_pitch', basePitch); }
+                        const r = await pollPose(fd);
+                        if (r) {
+                            if (r.box) { state.box = r.box; draw(); }
+                            // The server's coaching for THIS frame. It knows
+                            // whether the head is turning the wrong way, not
+                            // far enough, or out of frame; the browser was
+                            // showing a fixed instruction regardless.
+                            if (!r.ok) setPromptLive(r.message || '');
+                            if (r.ok) return r;
+                        }
+                    }
+                }
+            } catch (err) { if (guidedPollFailed(err)) return null; }
+            await new Promise(res => setTimeout(res, pollMs));
+        }
+        return null;
+    }
+
+    /** Drive the person through hold-still, then four verified turns, setting
+     *  control.done = true only once that is genuinely complete (or a step's
+     *  own timeout gives up on it - see the constant's comment for why that
+     *  is the right trade-off rather than trapping someone indefinitely). */
+    async function runGuidedSequence(control) {
+        const CENTRE_TIMEOUT_MS = 6000;
+        const STEP_TIMEOUT_MS = 7000;
+        const POLL_MS = 200;
+        // A floor under the fast-completion case, not a target: someone who
+        // turns quickly could otherwise finish in a couple of seconds, and the
+        // backend's frame sampler wants a reasonably sized clip to spread
+        // across regardless of how briskly the steps were satisfied.
+        const MIN_TOTAL_MS = 3000;
+        const t0 = Date.now();
+
+        setPromptStep({ text: 'Hold still, looking at the camera', arrow: null });
+        setRing(0);
+        let baseYaw = null, basePitch = null, hold = 0;
+        const centreStart = Date.now();
+        while (!state.closed && baseYaw === null && Date.now() - centreStart < CENTRE_TIMEOUT_MS) {
+            // Same reasoning as waitForStep: the whole attempt is one
+            // try/catch, because canvas.toBlob() resolving null under real
+            // device load is a real failure mode a narrower catch would miss,
+            // and that must cost one retry rather than crash the sequence.
+            try {
+                const c = grab(480);
+                if (c) {
+                    const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.8));
+                    if (blob) {
+                        const fd = new FormData();
+                        fd.append('frame', blob, 'f.jpg');
+                        fd.append('step', 'centre');
+                        const r = await pollPose(fd);
+                        if (r) {
+                            if (r.box) { state.box = r.box; draw(); }
+                            if (r.ok) {
+                                hold++;
+                                setPromptLive(hold >= 3 ? '' : 'Hold it\u2026');
+                                if (hold >= 3) { baseYaw = r.yaw; basePitch = r.pitch; }
+                            } else {
+                                hold = 0;
+                                setPromptLive(r.message || '');
+                            }
+                        }
+                    }
+                }
+            } catch (err) { if (guidedPollFailed(err)) break; }
+            if (baseYaw === null) await new Promise(res => setTimeout(res, POLL_MS));
+        }
+        // Framing never stabilised - fall through on an absolute baseline
+        // rather than trap someone here. The turns below are still measured
+        // and still shown, just against 0 instead of their own straight-ahead
+        // reading; the server's liveness check on the finished clip is the
+        // actual authority regardless of how this phase went.
+        if (baseYaw === null) { baseYaw = 0; basePitch = 0; }
+        setRing(0.2);
+
+        const measured = [];
+        for (let i = 0; i < GUIDED_DIRECTIONS.length && !state.closed; i++) {
+            const step = GUIDED_DIRECTIONS[i];
+            setPromptStep(step);
+            const got = await waitForStep(step.key, baseYaw, basePitch,
+                                          STEP_TIMEOUT_MS, POLL_MS);
+            // Still advances either way - see GUIDED_CAPTURE_MAX_MS's comment,
+            // a stuck step must not become a stuck recording - but the two
+            // outcomes no longer look the same to the person doing it.
+            if (got) {
+                measured.push(step.key);
+                await flashStepDone('Got it');
+            } else if (!state.closed) {
+                setPromptLive('Did not see that turn - carrying on');
+                await new Promise(res => setTimeout(res, 350));
+            }
+            setRing(0.2 + 0.2 * (i + 1));
+        }
+        control.measured = measured;
+
+        const elapsed = Date.now() - t0;
+        if (!state.closed && elapsed < MIN_TOTAL_MS) {
+            await new Promise(res => setTimeout(res, MIN_TOTAL_MS - elapsed));
+        }
+        control.done = true;
+    }
+
+    shutter.addEventListener('click', async () => {
+        if (state.recording) return;
+        state.recording = true;
+        shutter.disabled = true;
+        shutter.classList.add('recording');
+        ui.status(opts.guided === false
+            ? 'Recording - move the phone slowly side to side.'
+            : 'Recording - follow the on-screen prompts.');
+
+        // The pre-recording framing poll and the guided sequence's own poll
+        // would otherwise both be hitting pose-check for the same video at
+        // once. One voice at a time.
+        if (state.timer) { clearInterval(state.timer); state.timer = null; }
+        hint.classList.add('hidden');
+        promptBox.classList.remove('hidden');
+
+        // Both recordClip and runGuidedSequence already catch every failure
+        // mode I could identify (a dropped poll, a null blob, a recorder that
+        // refuses to start) and degrade to a retry rather than throwing. This
+        // outer catch is the backstop for whatever that reasoning missed -
+        // without it, an unanticipated exception here left the shutter
+        // disabled, the prompt panel stuck visible, and no way back to the
+        // camera except closing and reopening the whole modal.
+        let file = null;
+        try {
+            if (opts.guided === false) {
+                // A group across a room, or one face being verified against one
+                // record. Neither wants "turn left": nobody in a hall is
+                // following prompts, and a 1:1 check needs one view. Parallax
+                // comes from moving the phone, which the copy asks for.
+                promptBox.classList.add('hidden');
+                ui.status('Recording - move the phone slowly side to side.');
+                file = await cam.recordClip(opts.clipMs || CLIP_MS_PLAIN, setRing);
+            } else {
+                const control = { done: false, measured: [] };
+                [file] = await Promise.all([
+                    cam.recordClip(GUIDED_CAPTURE_MAX_MS, null, control),
+                    runGuidedSequence(control),
+                ]);
+                // Honest about what the clip actually contains. A recording
+                // where one turn was never seen is not the same as one where
+                // all four were, and the person is the only one who can decide
+                // whether to redo it.
+                const seen = (control.measured || []).length;
+                if (seen < GUIDED_DIRECTIONS.length) {
+                    showToast(
+                        seen ? 'Some turns were not seen' : 'No turns were seen',
+                        `${seen} of ${GUIDED_DIRECTIONS.length} measured. `
+                        + 'The clip was still recorded - if it is refused, try '
+                        + 'again in better light and turn a little further.',
+                        seen ? 'info' : 'error');
+                }
+            }
+        } catch (err) {
+            console.error('Guided capture failed:', err);
+            file = null;
+        }
+
+        promptBox.classList.add('hidden');
+        hint.classList.remove('hidden');
+        shutter.classList.remove('recording');
+        setRing(0);
+        state.recording = false;
+        if (!file) {
+            // Covers two different situations with one message, since neither
+            // is distinguishable from here without extra signalling: a
+            // legitimate empty capture (recordClip already toasts the specific
+            // reason, e.g. no MediaRecorder support) and the outer catch above
+            // firing on something unexpected.
+            shutter.disabled = false;
+            ui.status('Recording did not complete. Try again.');
+            // The framing loop was stopped to give the guided sequence sole
+            // use of pose-check; restore it so the shutter re-enables/
+            // disables correctly for the retry instead of staying stuck at
+            // whatever state.good last was.
+            if (!state.closed && !state.timer) {
+                framePollMs = FAST_POLL_MS;
+                state.timer = setInterval(tick, framePollMs);
+            }
+            return;
+        }
+
+        try { cam.stop(); } catch { /* already stopped */ }
+        // CANCEL HAS TO MEAN CANCEL. Closing the dialog mid-recording set
+        // state.closed and stopped the camera, but the recording promise then
+        // resolved anyway and this line ran regardless - so dismissing the
+        // capture went on to submit the register or mark attendance, which is
+        // the opposite of what the person just asked for. state.closed is
+        // one-way, so testing it here is the whole fix.
+        if (state.closed) return;
+        await opts.onClip(file, ui);
+    });
 }
+
+/** Attach one more photograph to an existing person.
+ *
+ * The "Add photo" button on every card in the directory called this by name and
+ * nothing defined it, so every click threw a ReferenceError and the button did
+ * nothing at all - silently, because the delegated handler swallows it. The
+ * endpoint it needs has existed and been centre-guarded the whole time.
+ *
+ * A file picker rather than the camera: the button's own tooltip offers "recent
+ * selfie or ID", which is a photograph the person already has. Liveness is not
+ * asked for here because this adds a gallery template for RECOGNITION, and the
+ * clip capture next to it remains the way to prove a real person is present.
+ */
+function openAddPhotoModal(studentId, studentName) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.addEventListener('change', async () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        showToast('Uploading', `Adding a photo for ${studentName || 'this athlete'}…`, 'info');
+        try {
+            const fd = new FormData();
+            fd.append('photo', file);
+            fd.append('source', 'upload');
+            const r = await api.postForm(`/api/students/${studentId}/photos`, fd);
+            if (r && r.ok === false) {
+                showToast('Not accepted', r.message || 'That photo was refused', 'error');
+                return;
+            }
+            showToast('Photo added',
+                      `${(r && r.templates_added) || 1} template(s) for ${studentName}`,
+                      'success');
+            renderStudents();
+        } catch (err) {
+            showToast('Upload failed', (err && err.message) || 'Could not reach the server',
+                      'error');
+        }
+    });
+    input.click();
+}
+
+/** Re-register an existing person from a clip. */
+async function openClipEnrol(studentId, studentName) {
+    await openClipCapture({
+        title: `Record clip - ${studentName}`,
+        intro: "Look at the camera and keep turning your head slowly - left, right, "
+             + "up and down - for the whole recording. The movement is what proves "
+             + "a real person is present.",
+        onClip: async (file, ui) => {
+            ui.status('Checking the clip and building templates...');
+            const fd = new FormData();
+            fd.append('video', file);
+            try {
+                const r = await api.postForm(`/api/students/${studentId}/enroll-video`, fd);
+                if (r.ok === false) {
+                    ui.status(livenessBanner(r.liveness, r.message), true);
+                    showToast('Not accepted', r.message || 'The clip was refused', 'error');
+                    await ui.resume();
+                    return;
+                }
+                const poses = (r.poses_captured || []).join(', ') || 'one view';
+                showToast('Face registered', `${r.templates_added} template(s) from ${poses}`, 'success');
+                ui.close();
+                renderStudents();
+            } catch {
+                ui.status('Could not reach the server. Try again.');
+                await ui.resume();
+            }
+        },
+    });
+}
+

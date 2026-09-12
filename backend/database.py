@@ -8,44 +8,50 @@ Learning ADDS templates rather than overwriting, so nothing is lost.
 """
 from __future__ import annotations
 
-import sqlite3
+import logging
+import secrets
+
 from datetime import date, datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from . import config
+from .db import Conn, IntegrityError, Row, connect  # noqa: F401 - re-exported
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS students (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         SERIAL PRIMARY KEY,
     name       TEXT NOT NULL,
     roll_no    TEXT NOT NULL UNIQUE,
     photo_path TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS templates (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         SERIAL PRIMARY KEY,
     student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
     model      TEXT NOT NULL,
-    vector     BLOB NOT NULL,
+    vector     BYTEA NOT NULL,
     source     TEXT NOT NULL DEFAULT 'enrollment',
-    quality    REAL NOT NULL DEFAULT 0.0,
+    quality    DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_templates_student ON templates(student_id);
 CREATE INDEX IF NOT EXISTS idx_templates_model ON templates(model, student_id);
 CREATE TABLE IF NOT EXISTS attendance (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         SERIAL PRIMARY KEY,
     student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
     date       TEXT NOT NULL,
-    confidence REAL NOT NULL,
+    confidence DOUBLE PRECISION NOT NULL,
     image_path TEXT,
     marked_at  TEXT NOT NULL,
     UNIQUE(student_id, date)
 );
 CREATE TABLE IF NOT EXISTS photos (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id           SERIAL PRIMARY KEY,
     student_id   INTEGER REFERENCES students(id) ON DELETE SET NULL,
     photo_type   TEXT NOT NULL,
     file_path    TEXT NOT NULL,
@@ -62,7 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_photos_type ON photos(photo_type);
 -- Khelo India centres. `is_demo` marks placeholder rows seeded for evaluation so
 -- they can never be mistaken for real government records (and can be bulk-deleted).
 CREATE TABLE IF NOT EXISTS centres (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id            SERIAL PRIMARY KEY,
     code          TEXT NOT NULL UNIQUE,
     name          TEXT NOT NULL,
     centre_type   TEXT NOT NULL DEFAULT 'KIC',
@@ -72,8 +78,8 @@ CREATE TABLE IF NOT EXISTS centres (
     pincode       TEXT,
     sports        TEXT,                       -- JSON array of disciplines
     capacity      INTEGER DEFAULT 0,
-    latitude      REAL,
-    longitude     REAL,
+    latitude      DOUBLE PRECISION,
+    longitude     DOUBLE PRECISION,
     geofence_m    INTEGER DEFAULT 300,        -- attendance radius in metres
     incharge_name TEXT,
     contact_phone TEXT,
@@ -86,10 +92,10 @@ CREATE INDEX IF NOT EXISTS idx_centres_state ON centres(state, district);
 
 -- Coaches and super admins. Passwords are PBKDF2-HMAC-SHA256, never plaintext.
 CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id            SERIAL PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    role          TEXT NOT NULL CHECK (role IN ('super_admin','coach')),
+    role          TEXT NOT NULL CHECK (role IN ('super_admin','coach','athlete')),
     full_name     TEXT NOT NULL,
     email         TEXT,
     phone         TEXT,
@@ -100,6 +106,87 @@ CREATE TABLE IF NOT EXISTS users (
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_users_centre ON users(centre_id);
+
+-- ---------------------------------------------------------------- v1: links
+-- An athlete may train under more than one coach - a strength coach at 6am and
+-- a sport coach at 4pm are two real sessions - so this is a join table rather
+-- than a column on students.
+CREATE TABLE IF NOT EXISTS coach_athletes (
+    id         SERIAL PRIMARY KEY,
+    coach_id   INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    athlete_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    is_primary INTEGER NOT NULL DEFAULT 0,   -- the coach who approved them
+    created_at TEXT NOT NULL,
+    UNIQUE (coach_id, athlete_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ca_coach   ON coach_athletes(coach_id);
+CREATE INDEX IF NOT EXISTS idx_ca_athlete ON coach_athletes(athlete_id);
+
+-- ------------------------------------------------------------ v1: registers
+-- A register the coach builds from one or more captures and then submits under
+-- their own face. Attendance is no longer written by the recogniser directly.
+CREATE TABLE IF NOT EXISTS attendance_sessions (
+    id                 SERIAL PRIMARY KEY,
+    centre_id          INTEGER NOT NULL REFERENCES centres(id),
+    coach_id           INTEGER REFERENCES students(id),  -- NULL = super-admin sweep
+    -- Nullable, ON DELETE SET NULL, deliberately against the plan's DDL.
+    -- With NOT NULL and no delete action, removing a coach account that
+    -- had ever opened a register raised ForeignKeyViolation - so either
+    -- accounts became undeletable or the register had to be destroyed
+    -- with them. A register losing its author is recoverable; losing
+    -- the attendance is not.
+    opened_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    date               TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'draft',    -- draft | submitted | expired
+    created_at         TEXT NOT NULL,
+    expires_at         TEXT NOT NULL,
+    submitted_at       TEXT,
+    submitter_verified INTEGER,
+    submitter_score    DOUBLE PRECISION,
+    submitter_liveness TEXT
+);
+-- Partial, not a table constraint: a NULL coach_id (super-admin sweep) must not
+-- collide with itself, and Postgres treats NULLs in a UNIQUE constraint as
+-- distinct - which would silently allow two coach registers for the same day
+-- if the column were ever NULL for a coach. Two indexes state the rule exactly.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_coach_day
+    ON attendance_sessions(centre_id, coach_id, date) WHERE coach_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sweep_day
+    ON attendance_sessions(centre_id, date) WHERE coach_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_date ON attendance_sessions(date, status);
+
+CREATE TABLE IF NOT EXISTS session_captures (
+    id               SERIAL PRIMARY KEY,
+    session_id       INTEGER NOT NULL REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+    media_key        TEXT NOT NULL,
+    kind             TEXT NOT NULL,            -- video | photo
+    liveness_verdict TEXT,   -- live | screen | inconclusive | too_far | not_checked
+    liveness_depth   DOUBLE PRECISION,
+    faces_detected   INTEGER,
+    recognised       INTEGER,
+    latitude         DOUBLE PRECISION,
+    longitude        DOUBLE PRECISION,
+    geo_status       TEXT,
+    distance_m       DOUBLE PRECISION,
+    created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_captures_session ON session_captures(session_id);
+
+-- ------------------------------------------------- v1: signup in progress
+-- A half-finished signup, carried between requests. In a dict this worked only
+-- while there was one worker; the Dockerfile runs two, so half of all signups
+-- were told they had expired. Same shape as auth_sessions deliberately - it is
+-- the same kind of thing, an opaque bearer token with a deadline - but a
+-- SEPARATE table, because current_user resolves auth_sessions and a signup
+-- token must never become a way to be signed in as a pending account.
+CREATE TABLE IF NOT EXISTS signup_tokens (
+    token      TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    decided    INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_signup_tokens_user ON signup_tokens(user_id);
 
 CREATE TABLE IF NOT EXISTS auth_sessions (
     token      TEXT PRIMARY KEY,
@@ -116,15 +203,28 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON auth_sessions(user_id);
 TEMPLATE_SOURCES = ("id", "restored", "live", "adapted", "legacy")
 
 
-def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(config.DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+# Arbitrary but fixed application-wide key for the schema-setup advisory lock.
+# Any constant works; it only has to be the same in every process.
+_SCHEMA_LOCK_KEY = 2749170101
 
 
 def init_db() -> None:
     with connect() as conn:
+        # Serialise schema setup across processes.
+        #
+        # CREATE TABLE IF NOT EXISTS is NOT concurrency-safe in PostgreSQL: two
+        # sessions can both observe a table as absent, both attempt to create
+        # it, and the loser fails with UniqueViolation on pg_type's unique index
+        # rather than quietly becoming a no-op. `uvicorn --workers N` starts N
+        # processes that all reach this line within milliseconds of each other,
+        # so against an empty database the container used to die on boot -
+        # uvicorn kills the parent when any child fails to start.
+        #
+        # pg_advisory_xact_lock blocks rather than erroring, and releases when
+        # this transaction commits, so the losing worker simply waits and then
+        # finds every table already present. The same applies to the ALTER and
+        # DROP statements below, which have the same race.
+        conn.execute("SELECT pg_advisory_xact_lock(?)", (_SCHEMA_LOCK_KEY,))
         conn.executescript(SCHEMA)
         _migrate_legacy_embeddings(conn)
         _ensure_columns(conn, "students", {
@@ -133,60 +233,366 @@ def init_db() -> None:
             "gender": "TEXT",
             "sport": "TEXT",
             "phone": "TEXT",
+            # Whether this PERSON may be matched. Deliberately duplicated from
+            # users.status rather than derived from it: an account can be
+            # deleted, and when it was, the gallery exclusion that depended on
+            # reading it silently stopped applying. Existing people take
+            # 'active', which is what they are - they were enrolled by an admin
+            # and never went through approval.
+            "status": "TEXT NOT NULL DEFAULT 'active'",  # active|pending|rejected
+        })
+        _ensure_columns(conn, "attendance_sessions", {
+            # Whether this register was OPENED as a centre-wide sweep, as
+            # opposed to having merely lost its coach later. coach_id IS NULL
+            # meant both, and the uniqueness below has to distinguish them -
+            # see _fix_sweep_uniqueness.
+            "is_sweep": "INTEGER NOT NULL DEFAULT 0",
+        })
+        _fix_sweep_uniqueness(conn)
+        _ensure_columns(conn, "users", {
+            # Account lifecycle. The column arrives with the admin dashboard so
+            # it has a pending count to show; the gate that makes it MEAN
+            # anything (login refusal, gallery exclusion, approvals) is phase 5.
+            # Existing accounts take 'active', which is what they are.
+            "status": "TEXT NOT NULL DEFAULT 'active'",   # pending|active|suspended|rejected
+            "approved_by": "INTEGER REFERENCES users(id) ON DELETE SET NULL",
+            "approved_at": "TEXT",
+            # Kept, unused. Phone verification was removed; dropping a column
+            # that already holds timestamps for people who did verify would
+            # destroy a record of something that really happened.
+            "phone_verified_at": "TEXT",
+            "guardian_name": "TEXT",
+            "guardian_consent_at": "TEXT",
+            # Who this person asked to be approved by. The plan creates the
+            # coach_athletes link on approval, so until then the choice has
+            # nowhere else to live - and without it there is no way to build
+            # "the chosen coach's queue".
+            "chosen_coach_id": "INTEGER REFERENCES students(id) ON DELETE SET NULL",
+            # Login throttling state. On the users row rather than in a new
+            # table because it is one-to-one with an account and needs to be
+            # read on the same query that fetches the password hash.
+            "failed_attempts": "INTEGER NOT NULL DEFAULT 0",
+            "locked_until": "TEXT",
+            # Somebody already enrolled whose face this applicant's face
+            # matched at signup. A QUESTION for the approver, never an action:
+            # the merge only happens if a human says so.
+            "duplicate_of": "INTEGER REFERENCES students(id) ON DELETE SET NULL",
+            "duplicate_score": "DOUBLE PRECISION",
         })
         _drop_removed_tables(conn)
         _ensure_columns(conn, "attendance", {
+            "session_id": "INTEGER REFERENCES attendance_sessions(id) ON DELETE CASCADE",
+            "capture_id": "INTEGER REFERENCES session_captures(id) ON DELETE SET NULL",
+            # Existing rows take the default and are therefore 'confirmed',
+            # which is what they are - they predate the review step.
+            "status": "TEXT NOT NULL DEFAULT 'confirmed'",   # draft | confirmed
+            "origin": "TEXT",                 # recognised | self_marked | coach_added
             "centre_id": "INTEGER REFERENCES centres(id) ON DELETE SET NULL",
-            "latitude": "REAL",
-            "longitude": "REAL",
-            "accuracy_m": "REAL",
+            "latitude": "DOUBLE PRECISION",
+            "longitude": "DOUBLE PRECISION",
+            "accuracy_m": "DOUBLE PRECISION",
             "geo_status": "TEXT",              # inside | outside | unknown | no_fix
-            "distance_m": "REAL",
+            "distance_m": "DOUBLE PRECISION",
             "marked_by": "INTEGER REFERENCES users(id) ON DELETE SET NULL",
         })
         # Runs last: dropping before _ensure_columns would let it re-add them.
         _drop_age_columns(conn)
+        # After the columns exist - the swap references session_id.
+        _swap_attendance_uniqueness(conn)
+        _relax_session_author_fk(conn)
+        _drop_signup_token_phone(conn)
+        _widen_role_check(conn)
+        _promote_legacy_accounts(conn)
+        _sync_person_status(conn)
+        _ensure_columns(conn, "centres", {
+            # Handed to a coach out of band so their self-registration can be
+            # tied to the centre they claim. Not a secret worth much on its
+            # own - a super admin still approves - but it turns "a stranger
+            # picked your centre from a list" into "somebody the centre gave a
+            # code to".
+            "coach_join_code": "TEXT",
+        })
+        _ensure_join_codes(conn)
 
 
-def _drop_removed_tables(conn: sqlite3.Connection) -> None:
+def _fix_sweep_uniqueness(conn: Conn) -> None:
+    """Make the sweep index mean "opened as a sweep", not "has no coach now".
+
+    idx_sessions_sweep_day is UNIQUE (centre_id, date) WHERE coach_id IS NULL.
+    Deleting a coach sets coach_id NULL on the registers they opened - so other
+    athletes' attendance is not destroyed with the account - and those detached
+    registers then fell under an index built for super-admin sweeps. The second
+    such deletion at a centre on a day already holding one raised a unique
+    violation, and the entire delete_student transaction rolled back: the coach
+    could not be removed at all, with an error naming an index nobody would
+    connect to the act of deleting a person.
+
+    THIS TOOK PRODUCTION DOWN ONCE ALREADY. The backfill below used to say
+    "coach_id IS NULL means sweep, unconditionally" and ran on EVERY startup,
+    not once. The first time it ran it was correct - before the narrower index
+    existed, detaching genuinely could not happen. But the moment the narrower
+    index made detaching possible, the NEXT coach deletion produced a second
+    coach_id IS NULL row for the same (centre_id, date) as a real sweep, and
+    the very next restart's backfill flagged BOTH as is_sweep=1, violating the
+    unique index it was about to (re)create and crashing startup - a container
+    that builds, starts, and then exits before ever binding the port, which is
+    indistinguishable from an infrastructure failure until you read this log.
+
+    So the backfill can no longer assume "no coach" means "sweep". Per
+    (centre_id, date), at most one row may become is_sweep=1: whichever
+    candidate is already flagged, or failing that, the oldest by id - a real
+    sweep predates any detachment that could collide with it. Every other
+    NULL-coach row for that slot stays an ordinary orphaned register. This is
+    idempotent and safe on every startup indefinitely, including after a coach
+    deletion nobody has restarted since.
+    """
+    conn.execute(
+        "WITH candidates AS ("
+        "  SELECT id, centre_id, date,"
+        "         ROW_NUMBER() OVER (PARTITION BY centre_id, date ORDER BY id) AS rn"
+        "  FROM attendance_sessions"
+        "  WHERE coach_id IS NULL AND COALESCE(is_sweep, 0) = 0"
+        ") "
+        "UPDATE attendance_sessions a SET is_sweep = 1 "
+        "FROM candidates c "
+        "WHERE a.id = c.id AND c.rn = 1 "
+        "  AND NOT EXISTS ("
+        "    SELECT 1 FROM attendance_sessions b "
+        "    WHERE b.centre_id = a.centre_id AND b.date = a.date "
+        "      AND b.is_sweep = 1 AND b.id <> a.id"
+        "  )"
+    )
+    # Recreate rather than IF NOT EXISTS alone: this index changed definition.
+    # It began as UNIQUE (centre_id, date) WHERE coach_id IS NULL, and a
+    # database still holding that older, broader version would keep it - IF NOT
+    # EXISTS matches on the NAME, not the predicate, so the CREATE below would
+    # silently no-op and the bug this function exists to fix would survive.
+    conn.execute("DROP INDEX IF EXISTS idx_sessions_sweep_day")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sweep_day "
+        "ON attendance_sessions(centre_id, date) "
+        " WHERE coach_id IS NULL AND is_sweep = 1"
+    )
+
+
+def _swap_attendance_uniqueness(conn: Conn) -> None:
+    """Move attendance uniqueness from (student, day) to (student, session).
+
+    An athlete under two coaches attends two sessions in one day and both are
+    real attendance, so the day-scoped constraint rejects the second - which
+    looks like a silent failure to mark someone present.
+
+    The legacy path is preserved deliberately. Rows written before sessions (and
+    by the pre-session /api/attendance/process route, which stays alive during
+    migration) carry session_id IS NULL, and Postgres treats NULLs in a UNIQUE
+    constraint as distinct - so (student_id, session_id) would place no
+    restriction on them at all and the same person could be marked ten times in
+    a day. The partial index below keeps exactly the old rule for exactly those
+    rows, and mark_attendance's ON CONFLICT infers it via the same predicate.
+    """
+    have = {
+        r["conname"]
+        for r in conn.execute(
+            "SELECT conname FROM pg_constraint WHERE conrelid = 'attendance'::regclass"
+        ).fetchall()
+    }
+    if "attendance_student_id_date_key" in have:
+        conn.execute("ALTER TABLE attendance DROP CONSTRAINT attendance_student_id_date_key")
+    if "attendance_student_session_key" not in have:
+        conn.execute(
+            "ALTER TABLE attendance ADD CONSTRAINT attendance_student_session_key "
+            "UNIQUE (student_id, session_id)"
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_att_legacy_day "
+        "ON attendance(student_id, date) WHERE session_id IS NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_att_status_date ON attendance(status, date)"
+    )
+
+
+def _drop_signup_token_phone(conn: Conn) -> None:
+    """Remove signup_tokens.phone from a database created before it went.
+
+    Self-registration stopped asking for a phone number, so nothing fills this
+    and it was NOT NULL - the first signup against an old database would fail
+    on it. Safe to run repeatedly; IF EXISTS makes it a no-op once done.
+    """
+    conn.execute("ALTER TABLE signup_tokens DROP COLUMN IF EXISTS phone")
+
+
+def _relax_session_author_fk(conn: Conn) -> None:
+    """Let a user be deleted without taking their registers with them.
+
+    The table was first created with `opened_by INTEGER NOT NULL REFERENCES
+    users(id)` and no delete action, which made any coach who had opened a
+    register undeletable. Repairs a database created before that was fixed.
+    """
+    row = conn.execute(
+        "SELECT confdeltype FROM pg_constraint "
+        "WHERE conrelid = 'attendance_sessions'::regclass "
+        "  AND conname = 'attendance_sessions_opened_by_fkey'"
+    ).fetchone()
+    if not row or row[0] == "n":          # 'n' = SET NULL, already done
+        return
+    conn.execute("ALTER TABLE attendance_sessions "
+                 "DROP CONSTRAINT attendance_sessions_opened_by_fkey")
+    conn.execute("ALTER TABLE attendance_sessions "
+                 "ALTER COLUMN opened_by DROP NOT NULL")
+    conn.execute("ALTER TABLE attendance_sessions "
+                 "ADD CONSTRAINT attendance_sessions_opened_by_fkey "
+                 "FOREIGN KEY (opened_by) REFERENCES users(id) ON DELETE SET NULL")
+    log.info("Relaxed attendance_sessions.opened_by so accounts stay deletable.")
+
+
+def _widen_role_check(conn: Conn) -> None:
+    """Allow role='athlete'.
+
+    A fresh database gets the widened CHECK from SCHEMA, but an existing one
+    keeps the two-role constraint it was created with, and inserting an athlete
+    fails there with a CheckViolation. Re-created rather than edited because
+    Postgres has no ALTER CONSTRAINT for a CHECK.
+    """
+    row = conn.execute(
+        "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint "
+        "WHERE conrelid = 'users'::regclass AND contype = 'c' "
+        "  AND pg_get_constraintdef(oid) LIKE '%role%'"
+    ).fetchone()
+    if row is None or "athlete" in row["def"]:
+        return
+    name = conn.execute(
+        "SELECT conname FROM pg_constraint WHERE conrelid = 'users'::regclass "
+        "  AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%role%'"
+    ).fetchone()["conname"]
+    conn.execute(f"ALTER TABLE users DROP CONSTRAINT {name}")
+    conn.execute(
+        "ALTER TABLE users ADD CONSTRAINT users_role_check "
+        "CHECK (role IN ('super_admin','coach','athlete'))"
+    )
+    log.info("Widened users.role to allow athlete accounts.")
+
+
+def _promote_legacy_accounts(conn: Conn) -> None:
+    """Existing accounts become super admins, per the v1 brief.
+
+    Guarded on there being no super admin yet, so it fires once on the upgrade
+    and never re-promotes a coach who was deliberately created later.
+    """
+    already = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE role = 'super_admin'"
+    ).fetchone()[0]
+    if already:
+        return
+    n = conn.execute("UPDATE users SET role = 'super_admin' WHERE role = 'coach'").rowcount
+    if n:
+        log.warning("Promoted %d existing account(s) to super_admin for v1.", n)
+
+
+def _sync_person_status(conn: Conn) -> None:
+    """Carry an account's approval state onto the person it belongs to.
+
+    Runs on every startup rather than once. It is derived data, so re-deriving
+    it is both idempotent and self-healing: if any path ever creates a pending
+    account without marking the person, the next start corrects it instead of
+    leaving a face quietly matchable. It only ever moves a person AWAY from
+    'active', so it cannot un-approve somebody a coach has approved - that
+    transition is decide()'s alone.
+    """
+    n = conn.execute(
+        "UPDATE students SET status = u.status FROM users u "
+        "WHERE u.student_id = students.id AND students.status = 'active' "
+        "  AND u.status IN ('pending', 'rejected')"
+    ).rowcount
+    if n:
+        log.warning("Marked %d person record(s) not matchable, from their "
+                    "account status.", n)
+
+
+# No I/O/0/1: these are read off a screen and typed in by somebody else, and
+# the pairs that get confused are the ones worth not having.
+_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def new_join_code(length: int = 8) -> str:
+    """A centre's coach join code. secrets, not random - it is a credential."""
+    return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(length))
+
+
+def _ensure_join_codes(conn: Conn) -> None:
+    """Give every centre a code. Idempotent - only fills the blanks."""
+    rows = conn.execute(
+        "SELECT id FROM centres WHERE coach_join_code IS NULL OR coach_join_code = ''"
+    ).fetchall()
+    for r in rows:
+        conn.execute("UPDATE centres SET coach_join_code = ? WHERE id = ?",
+                     (new_join_code(), int(r["id"])))
+    if rows:
+        log.info("Issued coach join codes to %d centre(s).", len(rows))
+
+
+def _drop_removed_tables(conn: Conn) -> None:
     """Drop tables left behind by the removed performance-tracking feature."""
-    for t in ("performance", "metrics"):
+    # otp_challenges joins them: phone verification was removed with the SMS
+    # provider it depended on. Dropping rather than leaving an empty table
+    # behind, which is the sort of thing that gets rediscovered and reconnected.
+    for t in ("performance", "metrics", "otp_challenges"):
         conn.execute(f"DROP TABLE IF EXISTS {t}")
 
 
-def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
+def _table_columns(conn: Conn, table: str) -> set:
+    """Column names of `table` - Postgres's answer to PRAGMA table_info."""
+    return {
+        r["column_name"]
+        for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = ?",
+            (table,),
+        ).fetchall()
+    }
+
+
+def _ensure_columns(conn: Conn, table: str, columns: Dict[str, str]) -> None:
     """Add any missing columns to `table` (idempotent, runs on every startup)."""
-    have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    have = _table_columns(conn, table)
     for name, decl in columns.items():
         if name not in have:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
-def _migrate_legacy_embeddings(conn: sqlite3.Connection) -> None:
-    """One-time migration: old `embeddings` rows become source='legacy' templates."""
+def _migrate_legacy_embeddings(conn: Conn) -> None:
+    """One-time migration: old `embeddings` rows become source='legacy' templates.
+
+    This can only fire on a database carried over from the SQLite era by
+    scripts/migrate_to_postgres.py - a freshly created one has no such table.
+    """
     exists = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='embeddings'"
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = current_schema() AND table_name = 'embeddings'"
     ).fetchone()
     if not exists:
         return
+    # The timestamp comes from Python rather than now() so it matches the ISO
+    # strings every other row carries; the columns are TEXT, and a Postgres
+    # timestamp would render differently and break date comparisons.
     n = conn.execute(
         "INSERT INTO templates (student_id, model, vector, source, quality, created_at) "
-        "SELECT student_id, model, vector, 'legacy', 0.0, datetime('now') "
-        "FROM embeddings"
+        "SELECT student_id, model, vector, 'legacy', 0.0, ? FROM embeddings",
+        (config.now_stamp(),),
     ).rowcount
     conn.execute("DROP TABLE embeddings")
     if n:
         print(f"[db] migrated {n} legacy embedding(s) to multi-template schema")
 
 
-def _drop_age_columns(conn: sqlite3.Connection) -> None:
+def _drop_age_columns(conn: Conn) -> None:
     """Remove the age columns left by the withdrawn age feature.
 
     `est_age` held the genderage model's guess, which proved unreliable on the
     school-age athletes this system serves; `dob` was only read by that same
     feature. Both are dropped so nothing downstream can resurface a wrong age.
     """
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(students)").fetchall()}
+    cols = _table_columns(conn, "students")
     for col in ("est_age", "dob"):
         if col in cols:
             conn.execute(f"ALTER TABLE students DROP COLUMN {col}")
@@ -210,26 +616,25 @@ def add_student(
     templates: [{"model": str, "vector": np.ndarray, "source": str,
                  "quality": float}, ...] - one row per (model, source image).
     """
-    now = datetime.now().isoformat(timespec="seconds")
+    now = config.now_stamp()
     with connect() as conn:
-        cur = conn.execute(
+        student_id = conn.insert(
             "INSERT INTO students (name, roll_no, photo_path, created_at, "
             "role, centre_id, gender, sport, phone) VALUES (?,?,?,?,?,?,?,?,?)",
             (name, roll_no, photo_path, now, role, centre_id, gender, sport, phone),
         )
-        student_id = int(cur.lastrowid)
         _insert_templates(conn, student_id, templates, now)
         return student_id
 
 
 def add_templates(student_id: int, templates: List[dict]) -> int:
     """Attach more templates (extra photo, another ID) to an existing student."""
-    now = datetime.now().isoformat(timespec="seconds")
+    now = config.now_stamp()
     with connect() as conn:
         return _insert_templates(conn, student_id, templates, now)
 
 
-def _insert_templates(conn: sqlite3.Connection, student_id: int, templates: List[dict], now: str) -> int:
+def _insert_templates(conn: Conn, student_id: int, templates: List[dict], now: str) -> int:
     rows = 0
     for t in templates:
         source = t.get("source", "enrollment")
@@ -251,23 +656,64 @@ def _insert_templates(conn: sqlite3.Connection, student_id: int, templates: List
     return rows
 
 
-def delete_student(student_id: int) -> None:
+def delete_student(student_id: int) -> dict:
+    """Remove a person and everything that points at them.
+
+    A person is no longer just a students row. Since v1 they may also have an
+    ACCOUNT, coach links in both directions, and registers they opened as a
+    coach. Templates and attendance cascade from the foreign keys; the rest
+    does not, and two of them would have blocked the delete outright with a
+    ForeignKeyViolation rather than failing quietly.
+
+    Returns what was removed, so a caller can report it rather than guess.
+    """
+    removed = {}
     with connect() as conn:
-        conn.execute("DELETE FROM students WHERE id = ?", (student_id,))
+        # Registers this person opened AS A COACH. The rows inside them are
+        # real attendance for OTHER people, so the session is detached rather
+        # than deleted - coach_id goes NULL and the register survives, the same
+        # reasoning as opened_by. Losing other athletes' attendance because
+        # their coach left would be a far worse outcome than an unattributed
+        # register.
+        removed["sessions_detached"] = conn.execute(
+            "UPDATE attendance_sessions SET coach_id = NULL WHERE coach_id = ?",
+            (student_id,),
+        ).rowcount
+        # Links in both directions: they may be somebody's coach and somebody
+        # else's athlete.
+        removed["coach_links"] = conn.execute(
+            "DELETE FROM coach_athletes WHERE coach_id = ? OR athlete_id = ?",
+            (student_id, student_id),
+        ).rowcount
+        # Their account. users.student_id is ON DELETE SET NULL, so without
+        # this the login would survive the person - an account that can sign in
+        # and has no identity behind it.
+        removed["accounts"] = conn.execute(
+            "DELETE FROM users WHERE student_id = ?", (student_id,)
+        ).rowcount
+        removed["student"] = conn.execute(
+            "DELETE FROM students WHERE id = ?", (student_id,)
+        ).rowcount
+    return removed
 
 
-def list_students(centre_id: Optional[int] = None, role: Optional[str] = None) -> List[dict]:
+def list_students(centre_id: Optional[int] = None, role: Optional[str] = None,
+                  include_inactive: bool = False) -> List[dict]:
     with connect() as conn:
         # Correlated subqueries, NOT parallel LEFT JOINs: joining attendance and
         # templates in one query multiplies the two row sets together, so a student
         # with 2 attendance rows and 12 templates reports 24 of each.
         rows = conn.execute(
             "SELECT s.id, s.name, s.roll_no, s.photo_path, s.created_at, "
-            "(SELECT COUNT(*) FROM attendance a WHERE a.student_id = s.id) AS total_present, "
+            "(SELECT COUNT(*) FROM attendance a WHERE a.student_id = s.id "
+            " AND a.status = 'confirmed') AS total_present, "
             "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id) AS templates, "
             "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id AND t.source = 'adapted') AS adapted, "
-            "s.role, s.centre_id, s.gender, s.sport, s.phone "
+            "s.role, s.centre_id, s.gender, s.sport, s.phone, s.status "
             "FROM students s WHERE 1=1"
+            # An unapproved applicant is not in the directory. They are in the
+            # approval queue, which is a different screen for a different job.
+            + ("" if include_inactive else ACTIVE_ONLY)
             + (" AND s.centre_id = ?" if centre_id is not None else "")
             + (" AND s.role = ?" if role else "")
             + " ORDER BY s.created_at DESC",
@@ -288,6 +734,28 @@ def get_student(student_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def get_students(student_ids) -> Dict[int, dict]:
+    """Several students in ONE query, keyed by id.
+
+    Recognition resolves every matched face to a person, and doing that with
+    get_student() per face is a query per face - 13 of them for a class group
+    photo. Measured on the local database: 0.93 ms each, 12.1 ms for 13, versus
+    about 1 ms for this. Same LEFT JOIN as get_student() so callers get the
+    centre name too, and missing ids are simply absent from the result rather
+    than raising - a template can outlive the person it belongs to.
+    """
+    ids = [int(i) for i in dict.fromkeys(student_ids)]   # de-duplicated, ordered
+    if not ids:
+        return {}
+    marks = ",".join("?" for _ in ids)
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT s.*, c.name AS centre_name, c.code AS centre_code "
+            "FROM students s LEFT JOIN centres c ON c.id = s.centre_id "
+            f"WHERE s.id IN ({marks})", ids).fetchall()
+    return {int(r["id"]): dict(r) for r in rows}
+
+
 def get_student_by_roll(roll_no: str) -> Optional[dict]:
     with connect() as conn:
         row = conn.execute("SELECT * FROM students WHERE roll_no = ?", (roll_no.strip(),)).fetchone()
@@ -306,6 +774,35 @@ def template_stats(student_id: int) -> Dict[str, int]:
 
 # --- gallery ----------------------------------------------------------------
 
+# Who may be matched at all. This is the clause that separates "signup is open"
+# from "anyone can enrol themselves into the register", so it is written once
+# and shared rather than repeated per query.
+#
+# Two conditions, because there are two ways to stop being matchable and they
+# live in different places:
+#
+#   the PERSON      is not active - never approved, or rejected. Held on
+#                   students so it survives the account being deleted; keying
+#                   this on users alone meant deleting an abandoned signup
+#                   re-armed its face.
+#   their ACCOUNT   is not active - pending, rejected, suspended, or switched
+#                   off by an admin. Deactivating an account is a decision
+#                   about a person who is standing in front of a camera, so it
+#                   has to reach the matcher too.
+#
+# NOT EXISTS for the account half, because most enrolled people have no account
+# at all and an inner join would silently drop every one of them. EXISTS for
+# the person half, so a template whose person is gone is excluded rather than
+# matched against a name nobody can look up.
+MATCHABLE = (
+    " AND EXISTS (SELECT 1 FROM students ms"
+    "             WHERE ms.id = t.student_id AND ms.status = 'active')"
+    " AND NOT EXISTS (SELECT 1 FROM users mu"
+    "                 WHERE mu.student_id = t.student_id"
+    "                   AND (mu.status <> 'active' OR mu.is_active = 0))"
+)
+
+
 def load_gallery(centre_id: Optional[int] = None) -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Templates grouped by model for matching.
 
@@ -319,8 +816,10 @@ def load_gallery(centre_id: Optional[int] = None) -> Dict[str, Tuple[np.ndarray,
     q = "SELECT t.id, t.student_id, t.model, t.vector FROM templates t"
     p: list = []
     if centre_id is not None:
-        q += " JOIN students s ON s.id = t.student_id WHERE s.centre_id = ?"
+        q += " JOIN students s ON s.id = t.student_id WHERE s.centre_id = ?" + MATCHABLE
         p.append(centre_id)
+    else:
+        q += " WHERE 1=1" + MATCHABLE
     with connect() as conn:
         rows = conn.execute(q, p).fetchall()
     gallery: Dict[str, list] = {}
@@ -339,10 +838,17 @@ def load_gallery(centre_id: Optional[int] = None) -> Dict[str, Tuple[np.ndarray,
 
 
 def load_gallery_with_quality() -> Tuple[Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]], Dict[str, np.ndarray]]:
-    """Like load_gallery() but also returns {model: quality_scores_array}."""
+    """Like load_gallery() but also returns {model: quality_scores_array}.
+
+    Shares MATCHABLE with load_gallery. It had no exclusion of its own, which
+    was invisible only because nothing calls it - a gallery loader that quietly
+    includes unapproved faces is not something to leave lying about for whoever
+    reaches for it next.
+    """
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, student_id, model, vector, quality FROM templates"
+            "SELECT t.id, t.student_id, t.model, t.vector, t.quality "
+            "FROM templates t WHERE 1=1" + MATCHABLE
         ).fetchall()
     gallery: Dict[str, list] = {}
     for r in rows:
@@ -377,7 +883,7 @@ def add_adapted_template(
     per-(student, model) cap is reached.
     """
     stored = False
-    now = datetime.now().isoformat(timespec="seconds")
+    now = config.now_stamp()
     with connect() as conn:
         for model_name, new_vec in new_embeddings.items():
             new_vec = np.asarray(new_vec, dtype=np.float32).flatten()
@@ -423,13 +929,29 @@ def mark_attendance(
     that attendance was taken at the centre rather than anywhere convenient.
     """
     with connect() as conn:
+        # The same rule sessions.draft() enforces, at the other write. A person
+        # who is pending, rejected or gone must not acquire attendance by any
+        # route - and "every route remembered to check" is not a property you
+        # can keep true, so the write itself checks.
+        row = conn.execute("SELECT status FROM students WHERE id = ?",
+                           (int(student_id),)).fetchone()
+        if row is None or row["status"] != "active":
+            log.warning("Refused attendance for person %s (status=%s)",
+                        student_id, row["status"] if row else "no such person")
+            return False
         cur = conn.execute(
-            "INSERT OR IGNORE INTO attendance (student_id, date, confidence, image_path, "
+            "INSERT INTO attendance (student_id, date, confidence, image_path, "
             "marked_at, centre_id, latitude, longitude, accuracy_m, geo_status, distance_m, marked_by) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+            # The predicate is required, not decoration: uniqueness on
+            # (student_id, date) is now a PARTIAL index covering only legacy
+            # rows, and Postgres will not infer a partial index unless the
+            # ON CONFLICT clause repeats its WHERE. Without it this raises
+            # InvalidColumnReference on every insert.
+            "ON CONFLICT (student_id, date) WHERE session_id IS NULL DO NOTHING",
             (
                 student_id, day, confidence, image_path,
-                datetime.now().isoformat(timespec="seconds"),
+                config.now_stamp(),
                 centre_id, latitude, longitude, accuracy_m, geo_status, distance_m, marked_by,
             ),
         )
@@ -437,18 +959,40 @@ def mark_attendance(
 
 
 def attendance_for_day(day: str, centre_id: Optional[int] = None) -> List[dict]:
+    """Who was present on this day - ONE row per person.
+
+    An athlete coached by two people attends two sessions in a day and both
+    rows are real attendance: that is why _swap_attendance_uniqueness
+    deliberately moved uniqueness from (student, day) to (student, session).
+    Correct in the table, wrong on this screen - the day's register and the CSV
+    drawn from it listed the same child twice, which reads as a duplicate and
+    inflates any count taken from it.
+
+    So the constraint stays off and the READ collapses instead. DISTINCT ON
+    keeps the earliest record of the day, which is the one that answers "were
+    they here"; the extra sessions are still in the table for anyone auditing
+    a single register.
+    """
     with connect() as conn:
         rows = conn.execute(
-            "SELECT a.id, a.student_id, a.date, a.confidence, a.image_path, a.marked_at, "
+            "SELECT DISTINCT ON (a.student_id) "
+            "a.id, a.student_id, a.date, a.confidence, a.image_path, a.marked_at, "
             "a.latitude, a.longitude, a.accuracy_m, a.geo_status, a.distance_m, a.centre_id, "
             "s.name, s.roll_no, s.photo_path, s.role, s.sport, c.name AS centre_name "
             "FROM attendance a JOIN students s ON s.id = a.student_id "
             "LEFT JOIN centres c ON c.id = a.centre_id "
-            "WHERE a.date = ?" + (" AND a.centre_id = ?" if centre_id is not None else "") +
-            " ORDER BY a.marked_at DESC",
+            # Drafts belong to a register nobody has submitted yet, so they
+            # are not attendance and must not appear in one.
+            "WHERE a.status = 'confirmed' AND a.date = ?"
+            + (" AND a.centre_id = ?" if centre_id is not None else "") +
+            # DISTINCT ON needs the deduplicated column to lead the ordering;
+            # marked_at then decides which of the day's rows survives.
+            " ORDER BY a.student_id, a.marked_at ASC",
             (day,) if centre_id is None else (day, centre_id),
         ).fetchall()
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        out.sort(key=lambda r: r.get("marked_at") or "", reverse=True)
+        return out
 
 
 def student_attendance_history(student_id: int) -> List[dict]:
@@ -456,7 +1000,8 @@ def student_attendance_history(student_id: int) -> List[dict]:
     with connect() as conn:
         rows = conn.execute(
             "SELECT a.id, a.date, a.confidence, a.marked_at "
-            "FROM attendance a WHERE a.student_id = ? ORDER BY a.date DESC",
+            "FROM attendance a WHERE a.student_id = ? AND a.status = 'confirmed' "
+            "ORDER BY a.date DESC",
             (student_id,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -470,42 +1015,60 @@ def clear_attendance() -> int:
 
 
 def stats(centre_id: Optional[int] = None) -> dict:
-    today = date.today().strftime(config.ATTENDANCE_DATE_FORMAT)
+    today = config.today_str()
     cs = " AND centre_id = ?" if centre_id is not None else ""
     cp = [centre_id] if centre_id is not None else []
     with connect() as conn:
+        # Active only, like n_enrolled below. A tile that counts applications
+        # as athletes disagrees with every other number on the same screen.
         n_students = conn.execute(
-            "SELECT COUNT(*) FROM students WHERE role = 'athlete'" + cs, cp
+            "SELECT COUNT(*) FROM students WHERE role = 'athlete'"
+            + ACTIVE_ONLY_BARE + cs, cp
         ).fetchone()[0]
         n_coaches = conn.execute(
-            "SELECT COUNT(*) FROM students WHERE role = 'coach'" + cs, cp
+            "SELECT COUNT(*) FROM students WHERE role = 'coach'"
+            + ACTIVE_ONLY_BARE + cs, cp
         ).fetchone()[0]
         # A student with no templates can never be matched, so counting them in the
         # denominator makes a fully-present class look half-absent forever.
         # Every count here is athlete-only so the four dashboard tiles agree with
         # each other. Mixing coaches into one tile and not the others produced
         # "11 enrolled, 13 absent".
+        # ...and ACTIVE. A pending or rejected applicant is excluded from the
+        # gallery and cannot be marked present by any path, so counting them in
+        # the denominator meant a centre with three people waiting on approval
+        # could never reach 100% attendance however many people turned up - and
+        # the number it did show was not a fact about anybody's attendance.
         n_enrolled = conn.execute(
             "SELECT COUNT(*) FROM students s WHERE s.role = 'athlete' "
+            "AND s.status = 'active' "
             "AND EXISTS (SELECT 1 FROM templates t WHERE t.student_id = s.id)"
             + (" AND s.centre_id = ?" if centre_id is not None else ""), cp
         ).fetchone()[0]
         acs = " AND a.centre_id = ?" if centre_id is not None else ""
+        # COUNT(DISTINCT student_id), not COUNT(*): an athlete under two
+        # coaches legitimately appears in two sessions on the same day, and a
+        # plain count would report them as two people present.
         present_today = conn.execute(
-            "SELECT COUNT(*) FROM attendance a JOIN students s ON s.id = a.student_id "
-            "WHERE a.date = ? AND s.role = 'athlete'" + acs, [today] + cp
+            "SELECT COUNT(DISTINCT a.student_id) FROM attendance a "
+            "JOIN students s ON s.id = a.student_id "
+            "WHERE a.status = 'confirmed' AND a.date = ? AND s.role = 'athlete'"
+            + acs, [today] + cp
         ).fetchone()[0]
         coaches_present_today = conn.execute(
-            "SELECT COUNT(*) FROM attendance a JOIN students s ON s.id = a.student_id "
-            "WHERE a.date = ? AND s.role = 'coach'" + acs, [today] + cp
+            "SELECT COUNT(DISTINCT a.student_id) FROM attendance a "
+            "JOIN students s ON s.id = a.student_id "
+            "WHERE a.status = 'confirmed' AND a.date = ? AND s.role = 'coach'"
+            + acs, [today] + cp
         ).fetchone()[0]
         total_rows = conn.execute(
-            "SELECT COUNT(*) FROM attendance a WHERE 1=1" + acs, cp
+            "SELECT COUNT(*) FROM attendance a WHERE a.status = 'confirmed'" + acs, cp
         ).fetchone()[0]
         recent = conn.execute(
             "SELECT a.date, a.marked_at, a.confidence, s.name, s.roll_no "
             "FROM attendance a JOIN students s ON s.id = a.student_id "
-            "WHERE 1=1" + (" AND a.centre_id = ?" if centre_id is not None else "") +
+            "WHERE a.status = 'confirmed'"
+            + (" AND a.centre_id = ?" if centre_id is not None else "") +
             " ORDER BY a.marked_at DESC LIMIT 8", cp
         ).fetchall()
     return {
@@ -523,7 +1086,7 @@ def stats(centre_id: Optional[int] = None) -> dict:
     }
 
 
-def _recent_row(row: sqlite3.Row) -> dict:
+def _recent_row(row: Row) -> dict:
     """One Recent Activity entry, with the HH:MM the dashboard renders."""
     d = dict(row)
     marked = d.get("marked_at") or ""
@@ -544,36 +1107,169 @@ def save_photo_record(
     faces_detected: int = 0,
 ) -> int:
     """Log a photo upload/capture with metadata. Returns photo record id."""
-    now = datetime.now().isoformat(timespec="seconds")
+    now = config.now_stamp()
     with connect() as conn:
-        cur = conn.execute(
+        return conn.insert(
             "INSERT INTO photos (student_id, photo_type, file_path, file_size, resolution, source, device_info, faces_detected, created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
             (student_id, photo_type, file_path, file_size, resolution, source, device_info, faces_detected, now),
         )
-        return int(cur.lastrowid)
 
 
 def get_photos(
     student_id: Optional[int] = None,
     photo_type: Optional[str] = None,
     limit: int = 50,
+    centre_id: Optional[int] = None,
+    include_unowned: bool = False,
 ) -> List[dict]:
-    """Query photo history with optional filters."""
-    query = "SELECT * FROM photos WHERE 1=1"
-    params = []
+    """Query photo history, scoped to one centre unless told otherwise.
+
+    THIS QUERY USED TO BE `SELECT * FROM photos WHERE 1=1` with no centre
+    predicate at all, behind a guard that only asked for *any* signed-in
+    account. Every row carries file_path, and file_path is the key the two
+    media routes take, so one ordinary account - an athlete's included - could
+    list every photograph in every centre and then fetch each one. The subjects
+    are children. DATA-HANDLING.md promises "every query is narrowed to their
+    centre_id"; this is that narrowing.
+
+    centre_id=None means all centres and is for a super admin only - callers
+    must pass auth.scope_centre's answer, never the client's.
+
+    Photos whose student was deleted (`ON DELETE SET NULL`) belong to nobody, so
+    no centre can claim them; they stay hidden unless include_unowned is set.
+
+    file_path is stored as an ABSOLUTE path on the server. That is a detail of
+    where this instance keeps its data, not something a caller needs, so only
+    the basename is returned - which is also all the media routes accept.
+    """
+    query = ("SELECT p.* FROM photos p "
+             "LEFT JOIN students s ON s.id = p.student_id WHERE 1=1")
+    params: List = []
+    if centre_id is not None:
+        query += " AND s.centre_id = ?"
+        params.append(centre_id)
+    elif not include_unowned:
+        query += " AND p.student_id IS NOT NULL"
     if student_id is not None:
-        query += " AND student_id = ?"
+        query += " AND p.student_id = ?"
         params.append(student_id)
     if photo_type is not None:
-        query += " AND photo_type = ?"
+        query += " AND p.photo_type = ?"
         params.append(photo_type)
-    query += " ORDER BY created_at DESC LIMIT ?"
-    params.append(limit)
-    
+    query += " ORDER BY p.created_at DESC LIMIT ?"
+    params.append(max(1, min(int(limit), 500)))
+
     with connect() as conn:
         rows = conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("file_path"):
+            d["file_path"] = Path(d["file_path"]).name
+        out.append(d)
+    return out
+
+
+# Somebody who has actually been enrolled, as opposed to somebody who began
+# a registration. Self-signup writes a students row immediately - the applicant
+# needs somewhere to put their face - with status='pending' and a PEND-xxxxxxxx
+# placeholder roll number, and approval is what makes them real.
+#
+# Named once and reused, because seven different lists each decided this for
+# themselves and every one of them decided wrong: the centre page counted three
+# unapproved applications as its coaching staff.
+#
+# Use ACTIVE_ONLY where the table is aliased `s`, ACTIVE_ONLY_BARE where it is
+# not aliased.
+ACTIVE_ONLY = " AND s.status = 'active'"
+ACTIVE_ONLY_BARE = " AND status = 'active'"
+
+
+def count_students() -> int:
+    """How many people are enrolled. A count, not a list.
+
+    The health probe used len(list_students()), which loads every row on every
+    check - and the container checks every thirty seconds.
+    """
+    with connect() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM students").fetchone()[0])
+
+
+def photo_files_for(student_id: int) -> List[str]:
+    """Every stored image filename belonging to this person.
+
+    Both places it can be recorded: the portrait on the students row, and every
+    row in `photos`. Callers delete the files; this only says which they are, so
+    the answer is gathered BEFORE the rows go and cannot be lost with them.
+    """
+    names: List[str] = []
+    with connect() as conn:
+        row = conn.execute("SELECT photo_path FROM students WHERE id = ?",
+                           (int(student_id),)).fetchone()
+        if row and row["photo_path"]:
+            names.append(Path(row["photo_path"]).name)
+        for r in conn.execute("SELECT file_path FROM photos WHERE student_id = ?",
+                              (int(student_id),)).fetchall():
+            if r["file_path"]:
+                names.append(Path(r["file_path"]).name)
+    # de-duplicated, order kept
+    return list(dict.fromkeys(n for n in names if n))
+
+
+def forget_photo_rows(student_id: int) -> int:
+    """Drop this person's photos rows. Returns how many.
+
+    photos.student_id is ON DELETE SET NULL, so deleting the person left the
+    rows behind pointing at files with no owner - unattributable, unscopeable,
+    and still listed to a super admin.
+    """
+    with connect() as conn:
+        return conn.execute("DELETE FROM photos WHERE student_id = ?",
+                            (int(student_id),)).rowcount
+
+
+def media_centre(name: str) -> tuple:
+    """(found, centre_id) for a stored media filename.
+
+    The media routes take a bare filename, so scoping them means answering
+    "whose picture is this?" from the name alone. Two tables can say: a
+    student's own portrait is in students.photo_path, and everything else that
+    was recorded - group captures, crops - is in photos.file_path, which is an
+    absolute path, hence the basename comparison.
+
+    found=False means no row claims the file. The caller must treat that as
+    "not for you" rather than "no restriction applies": an unclaimed file is
+    exactly the case that used to leak.
+    """
+    base = Path(name).name
+    if not base:
+        return False, None
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT centre_id FROM students WHERE photo_path = ? "
+            "   OR photo_path LIKE ? LIMIT 1",
+            (base, "%" + base),
+        ).fetchone()
+        if row:
+            return True, row["centre_id"]
+        row = conn.execute(
+            "SELECT s.centre_id AS centre_id FROM photos p "
+            "JOIN students s ON s.id = p.student_id "
+            "WHERE p.file_path = ? OR p.file_path LIKE ? LIMIT 1",
+            (base, "%" + base),
+        ).fetchone()
+        if row:
+            return True, row["centre_id"]
+        row = conn.execute(
+            "SELECT ses.centre_id AS centre_id FROM session_captures c "
+            "JOIN attendance_sessions ses ON ses.id = c.session_id "
+            "WHERE c.media_key = ? LIMIT 1",
+            (base,),
+        ).fetchone()
+        if row:
+            return True, row["centre_id"]
+    return False, None
 
 
 def photo_stats() -> dict:
@@ -604,8 +1300,12 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
         # The denominator: athletes who could actually be matched. Someone with
         # no template can never be recognised, so counting them makes a full
         # session look half-empty.
+        # ...and active, for the same reason stats() is: a pending or rejected
+        # applicant cannot be matched or marked, so counting them puts a ceiling
+        # under 100% that no amount of attendance can reach.
         enrolled = conn.execute(
             "SELECT COUNT(*) FROM students s WHERE s.role = 'athlete' "
+            "AND s.status = 'active' "
             "AND EXISTS (SELECT 1 FROM templates t WHERE t.student_id = s.id)" + cs, cp
         ).fetchone()[0]
 
@@ -614,7 +1314,7 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
             for r in conn.execute(
                 "SELECT a.date, COUNT(DISTINCT a.student_id) "
                 "FROM attendance a JOIN students s ON s.id = a.student_id "
-                "WHERE s.role = 'athlete'" + acs +
+                "WHERE a.status = 'confirmed' AND s.role = 'athlete'" + acs +
                 " GROUP BY a.date ORDER BY a.date DESC LIMIT ?", cp + [days]
             )
         ][::-1]                      # oldest first for the chart's x-axis
@@ -622,7 +1322,8 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
         geo_rows = conn.execute(
             "SELECT COALESCE(a.geo_status, 'unverified'), COUNT(*) "
             "FROM attendance a JOIN students s ON s.id = a.student_id "
-            "WHERE s.role = 'athlete'" + acs + " GROUP BY 1", cp
+            "WHERE a.status = 'confirmed' AND s.role = 'athlete'" + acs
+            + " GROUP BY 1", cp
         ).fetchall()
         geo = {r[0]: r[1] for r in geo_rows}
 
@@ -631,8 +1332,10 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
             for r in conn.execute(
                 "SELECT c.code, c.name, "
                 "  (SELECT COUNT(*) FROM attendance a JOIN students s2 ON s2.id = a.student_id "
-                "     WHERE a.centre_id = c.id AND s2.role = 'athlete'), "
-                "  (SELECT COUNT(*) FROM students s3 WHERE s3.centre_id = c.id AND s3.role = 'athlete') "
+                "     WHERE a.status = 'confirmed' AND a.centre_id = c.id "
+                "       AND s2.role = 'athlete'), "
+                "  (SELECT COUNT(*) FROM students s3 WHERE s3.centre_id = c.id "
+                "     AND s3.role = 'athlete' AND s3.status = 'active') "
                 "FROM centres c ORDER BY 3 DESC"
             ) if r[2] or r[3]
         ]
@@ -644,16 +1347,25 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
         conf = [
             {"bucket": r[0], "count": r[1]}
             for r in conn.execute(
-                "SELECT CAST(a.confidence * 20 AS INT) / 20.0, COUNT(*) "
+                # 20.0 alone is a numeric literal in Postgres, so the quotient
+                # comes back as Decimal where SQLite gave a float. Casting to
+                # float8 keeps the bucket a JSON number, as the chart expects.
+                # FLOOR, not CAST(... AS INT). Postgres ROUNDS on that cast
+                # where SQLite truncated, so every confidence landed half a
+                # bucket high and the histogram shifted right - a chart that
+                # says matching is more confident than it is.
+                "SELECT FLOOR(a.confidence * 20) / 20.0::double precision, COUNT(*) "
                 "FROM attendance a JOIN students s ON s.id = a.student_id "
-                "WHERE s.role = 'athlete' AND a.confidence IS NOT NULL" + acs +
+                "WHERE a.status = 'confirmed' AND s.role = 'athlete' "
+                "  AND a.confidence IS NOT NULL" + acs +
                 " GROUP BY 1 ORDER BY 1", cp
             )
         ]
 
         sessions = conn.execute(
             "SELECT COUNT(DISTINCT a.date) FROM attendance a "
-            "JOIN students s ON s.id = a.student_id WHERE s.role = 'athlete'" + acs, cp
+            "JOIN students s ON s.id = a.student_id "
+            "WHERE a.status = 'confirmed' AND s.role = 'athlete'" + acs, cp
         ).fetchone()[0]
 
         # Per-athlete reliability, worst first: this is the list a coach acts on.
@@ -662,7 +1374,14 @@ def analytics(centre_id: Optional[int] = None, days: int = 30) -> dict:
              "rate": round(100.0 * r[2] / sessions, 1) if sessions else 0.0}
             for r in conn.execute(
                 "SELECT s.name, s.roll_no, COUNT(DISTINCT a.date) "
-                "FROM students s LEFT JOIN attendance a ON a.student_id = s.id "
+                # The status filter belongs in the JOIN, not the WHERE. This is
+                # a LEFT JOIN so that an athlete with no attendance still
+                # appears with a count of zero - and this list is ordered worst
+                # first, so those are precisely the rows a coach needs. Moving
+                # the condition to WHERE would turn it into an inner join and
+                # silently drop them.
+                "FROM students s LEFT JOIN attendance a "
+                "  ON a.student_id = s.id AND a.status = 'confirmed' "
                 "WHERE s.role = 'athlete' "
                 "AND EXISTS (SELECT 1 FROM templates t WHERE t.student_id = s.id)" + cs +
                 " GROUP BY s.id ORDER BY 3 ASC", cp

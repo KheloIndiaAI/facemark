@@ -11,6 +11,35 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
+
+def _load_dotenv() -> None:
+    """Read ROOT_DIR/.env into the environment, if it exists.
+
+    Hand-rolled rather than adding python-dotenv: it is fifteen lines, and this
+    project keeps its dependency list short and its licences auditable.
+
+    A real environment variable always wins. That ordering matters because
+    production sets DATABASE_URL and the S3 credentials through the platform,
+    and a stray .env copied into an image must not silently override them.
+    """
+    path = ROOT_DIR / ".env"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
 # FACEMARK_DATA_DIR lets a deployment point every writable path at a mounted
 # disk. On Render the container filesystem is replaced on each deploy, so the
 # SQLite database, enrolment photos and uploads must live on the persistent
@@ -24,9 +53,50 @@ DATA_DIR = Path(os.environ.get("FACEMARK_DATA_DIR") or (ROOT_DIR / "data"))
 MODELS_DIR = Path(os.environ.get("FACEMARK_MODELS_DIR") or (DATA_DIR / "models"))
 UPLOADS_DIR = DATA_DIR / "uploads"
 STUDENTS_DIR = DATA_DIR / "students"
-DB_PATH = DATA_DIR / "attendance.db"
 FRONTEND_DIR = ROOT_DIR / "frontend"
 SAMPLES_DIR = ROOT_DIR / "samples"
+
+# The SQLite file this project used before the move to PostgreSQL. Nothing
+# reads it at runtime any more; it is kept so scripts/migrate_to_postgres.py can
+# find the old data, and so an existing install is not silently orphaned.
+LEGACY_SQLITE_PATH = DATA_DIR / "attendance.db"
+DB_PATH = LEGACY_SQLITE_PATH          # retained for older scripts
+
+# --- Database ---------------------------------------------------------------
+# PostgreSQL, required. There is deliberately no SQLite fallback: a fallback
+# that silently engages when DATABASE_URL is missing would let a deployment
+# come up writing to a container-local file that vanishes on the next deploy,
+# which is exactly the failure this migration exists to remove.
+#
+#   postgresql://user:password@host:5432/facemark
+#
+# Managed providers hand out URLs starting `postgres://`; libpq accepts both
+# spellings, so no rewriting is needed.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
+# FastAPI runs sync endpoints in a thread pool, so several requests hold a
+# connection at once. The dashboard alone issues eight small counts per load.
+DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
+DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "10"))
+
+# --- Photo storage ----------------------------------------------------------
+# "local" keeps photos under DATA_DIR, where they have always lived; "s3" puts
+# them in an S3-compatible bucket (AWS S3, Cloudflare R2, MinIO). The switch is
+# read once at startup by backend/storage.py.
+#
+# S3 matters for the same reason DATABASE_URL does: on a platform that replaces
+# the container each deploy, a photo written to local disk is gone next push.
+STORAGE_BACKEND = os.environ.get("FACEMARK_STORAGE", "local").strip().lower()
+
+S3_BUCKET = os.environ.get("S3_BUCKET", "").strip()
+# Set for Cloudflare R2 / MinIO; leave empty to talk to AWS S3.
+#   R2: https://<account-id>.r2.cloudflarestorage.com
+S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "").strip()
+S3_REGION = os.environ.get("S3_REGION", "auto").strip()
+S3_ACCESS_KEY_ID = os.environ.get("S3_ACCESS_KEY_ID", "").strip()
+S3_SECRET_ACCESS_KEY = os.environ.get("S3_SECRET_ACCESS_KEY", "").strip()
+# Optional key prefix, so one bucket can hold several environments.
+S3_PREFIX = os.environ.get("S3_PREFIX", "").strip()
 
 for _d in (DATA_DIR, UPLOADS_DIR, STUDENTS_DIR):
     _d.mkdir(parents=True, exist_ok=True)
@@ -55,6 +125,18 @@ YUNET_MODEL = "face_detection_yunet_2023mar.onnx"
 YUNET_SCORE = 0.80             # detection confidence for the default mode
 YUNET_SCORE_FAST = 0.85        # fewer, surer boxes
 YUNET_SCORE_ACCURATE = 0.70    # more recall on hard photos
+
+# The mode used to judge a recorded CLIP, and therefore the mode the framing
+# guide must use as well.
+#
+# They disagreed. The guide detected at "accurate" (0.70) while liveness judged
+# the finished clip at "fused" (0.80), so a face scoring between the two was
+# told "Face found - tap to record", recorded for up to thirty-four seconds,
+# and was then answered "No face was found in the clip". The guide promised
+# something the judge refused, and the person had no way to know which to
+# believe. A framing guide may be STRICTER than what follows it - that only
+# costs a retry before recording - but never more permissive.
+CLIP_DETECTION_MODE = "fused"
 YUNET_NMS = 0.30
 DETECTION_MODE = os.environ.get("DETECTION_MODE", "fused")
 MIN_FACE_SIZE = 20             # px; below this a face carries no identity signal
@@ -93,6 +175,14 @@ EMBED_SIZE = 112               # SFace's own aligner produces 112x112
 # check. Wrong-centre matches are zero at every threshold tested, so the wider
 # gallery is not what the threshold is defending against - strangers are.
 MATCH_THRESHOLD = 0.570
+# The range a caller-supplied threshold is allowed to sit in. The routes that
+# write attendance took this as a form field and passed it to the matcher
+# unchecked: 0.0 makes every face in frame match its nearest gallery entry and
+# records those as machine recognitions, 2.0 matches nobody. The bounds are
+# deliberately wide enough for real tuning and narrow enough that neither of
+# those is reachable from a request.
+MATCH_THRESHOLD_MIN = 0.30
+MATCH_THRESHOLD_MAX = 0.95
 SMALL_FACE_PX = 32             # faces narrower than this clear a higher bar
 SMALL_FACE_THRESHOLD_BUMP = 0.05
 
@@ -157,6 +247,141 @@ PRINT_MAX_SATURATION = 70.0    # real faces here measured 95-147
 PRINT_MIN_BRIGHTNESS = 170.0   # real faces here measured 74-167
 PRINT_MAX_SAT_STDDEV = 35.0    # real faces here measured 39-57
 
+# --- Screen / replay rejection ----------------------------------------------
+# A face displayed on a phone or laptop screen is detected exactly as a real
+# one, so holding up a photograph of an absent athlete marks them present. That
+# is attendance fraud that leaves no trace anywhere in the record - the row
+# looks identical to an honest one.
+#
+# Re-photographing a screen leaves two traces a live face does not:
+#
+#   moire    the camera's sensor grid beats against the screen's pixel grid,
+#            adding a near-periodic interference pattern. Real skin and fabric
+#            are broadband - their spectrum falls off smoothly - so periodic
+#            energy shows up as isolated spikes that natural texture lacks.
+#   framing  the lit screen sits inside a dark bezel, so the ring around the
+#            face is markedly darker than the face. A real room rarely frames
+#            someone that way.
+#
+# BOTH must hold, following looks_printed()'s rule: each alone describes plenty
+# of real faces - a striped shirt carries periodic energy, a spotlit face
+# outshines its surroundings - so requiring agreement is what keeps a genuine
+# athlete from being refused attendance.
+#
+# Measured over 267 real faces from this deployment's own photographs (192
+# group photos and enrolment portraits, faces >= 60px):
+#
+#             median    p99     max
+#   moire      22.74   30.50   30.50
+#   bezel       0.83    1.13    1.47
+#
+# 38.0 sits 24% above the highest moire peak any real face produced, and only
+# ONE of the 267 cleared the bezel condition at all - that face scored 19.45 on
+# moire, less than half the threshold. So no face in the existing corpus is
+# rejected by this test, which is the property that matters: a genuine athlete
+# refused attendance is a worse failure than a spoof that gets through.
+#
+# The false-reject side was calibrated; the true-CATCH side never was, because
+# no stored photograph is a picture of a screen. That gap is what the disabling
+# note below records - the check was measured on the half that could not fail.
+#
+# DISABLED. It was demonstrated failing on a phone held up in a bright office:
+# the bezel condition assumes a lit screen inside a DARK surround, and a lit
+# room defeats it, after which the moire half cannot fire on its own. A check
+# that has never caught anything is worse than no check, because it reads as
+# protection that is not there. Liveness now comes from video parallax instead -
+# see backend/liveness.py. Kept rather than deleted because the measurements in
+# the comment above are real and worth not repeating.
+REJECT_SCREEN_FACES = False
+SCREEN_MAX_MOIRE_PEAK = 38.0     # real faces here measured 5.06 - 30.50
+SCREEN_MIN_BEZEL_RATIO = 1.35    # real faces here measured 0.43 - 1.47
+SCREEN_MIN_FACE_PX = 60          # below this the spectrum is too coarse to judge
+
+# --- Liveness from video -----------------------------------------------------
+# A photograph is a plane, and under camera motion every point on a plane maps
+# through ONE homography. A real face does not: the nose is nearer the lens than
+# the ears, so the best-fitting homography leaves a residual, and that residual
+# is depth measured from parallax rather than guessed from appearance.
+#
+# LIVENESS_MIN_DEPTH is the residual, in face-widths, below which the subject is
+# treated as flat. LIVENESS_MIN_MOTION is the guard that makes the test honest:
+# with no viewpoint change there is no parallax and therefore no evidence either
+# way, so the clip is called inconclusive rather than live. Without that guard a
+# photograph held perfectly still would sail through.
+#
+# CALIBRATION STATUS, 2026-09-09. The previous note defended 0.006 with numbers
+# taken from clips whose motion ranges barely overlapped: real faces measured
+# where they happened to move a lot, photographs where they happened to move a
+# little. Comparing two classes over different parts of the motion range is not
+# a measurement of anything, and the 2.1x "separation" it produced did not
+# survive a wider sweep.
+#
+# Re-measured against a MATCHED corpus - 150 real clips (real people, a real
+# camera, frames ~200ms apart) and 150 photograph clips built to the same frame
+# count and the same measured motion, everything through real VP8:
+#
+#   frame 0 vs every frame, no tracking check   (what the code used to do)
+#       real faces   0.0036 - 0.956
+#       photographs  0.0006 - 1.153      <- a waved photograph outscores a face
+#
+# The classes did not separate ANYWHERE. A threshold admitting no photograph
+# would have refused 142 of the 150 real clips. The cause is mechanical: the
+# residual was compared between frame 0 and each later frame directly, and
+# across a three-second clip that displacement is more than Lucas-Kanade can
+# follow. Points landed on whatever texture was nearby, the homography could not
+# explain the wreckage, and the residual rose - and rising means "live". So the
+# harder a spoofer waved the phone, the better their odds.
+#
+# Tracking each point on to the NEXT frame and back again, and keeping only the
+# points that come home (LIVENESS_FB_MAX_PX), separates the classes completely:
+#
+#   chained, round-trip validated
+#       real faces   0.0031 - 0.256   (median 0.0111)
+#       photographs  0.0006 - 0.00197
+#       -> 0 photographs accepted, 0 real people refused, on 270 judged clips
+#
+# 0.0025 is the geometric mean of that gap. The margin is 1.27x to the highest
+# photograph and 1.25x to the lowest real clip, with the median real clip 5.6x
+# clear. Thin at the extremes, so it is still worth re-measuring on real
+# devices - scripts/calibrate_liveness.py - but it is a gap, which is more than
+# the previous threshold had.
+#
+# 30 of the 180 real clips could not be judged at all: too little viewpoint
+# change to carry parallax. Those get "record again", never "screen". A clip
+# that cannot be measured is not evidence of a photograph.
+LIVENESS_ENABLED = True
+LIVENESS_SAMPLE_FRAMES = 18      # was 12; more samples for the longer clip below
+LIVENESS_MIN_POINTS = 25         # fewer trackable corners than this cannot judge
+LIVENESS_MIN_MOTION = 0.010      # max displacement in face-widths, across the clip
+LIVENESS_MIN_DEPTH = 0.0025      # measured - see calibration note above
+# How far a point may drift on a there-and-back track before it is discarded.
+# This is the whole difference between measuring depth and measuring tracking
+# failure. Swept at 1, 2 and 4 px: all three separate the classes, 4 judges the
+# most clips (120 vs 48 at 1px) with the widest margin, because a real face
+# legitimately changes appearance as it turns and a tight tolerance throws that
+# evidence away along with the errors.
+LIVENESS_FB_MAX_PX = 4.0
+# Below this the test has nothing to say. Parallax across a face falls with the
+# square of distance, while the tracker's own error stays fixed in pixels, so
+# the noise floor expressed in face-widths grows as the face shrinks. The
+# thresholds above were measured on faces 165-313px wide, where the flat side's
+# noise is 0.33-0.62px; by ~130px that noise crosses LIVENESS_MIN_DEPTH and the
+# test starts calling photographs live. Real group photographs from this centre
+# have faces of 20-74px - a whole order below where any of this was measured.
+#
+# So a distant face is reported as UNMEASURABLE, not as a photograph. Accusing
+# a coach of holding up a phone on the strength of a measurement that cannot
+# see that far is the one answer certainly not supported by the evidence.
+LIVENESS_MIN_FACE_PX = 150
+LIVENESS_MAX_BYTES = 25 * 1024 * 1024
+# Registration records for 10s (config below); attendance stays at 2s. The
+# ceiling needs headroom above the longer of the two, not to equal it exactly -
+# encoding jitter can make an intended 10s recording land a little over.
+LIVENESS_MAX_SECONDS = 14
+# Frames kept per clip. They are the evidence behind a refusal, so a coach
+# can see WHY a capture was rejected rather than being told only that it was.
+LIVENESS_STORE_FRAMES = 6
+
 # --- Stage-2 cascade verification -------------------------------------------
 # Disabled: it re-scored a GFPGAN-restored crop, and GFPGAN is gone. Measured
 # separately, restoring query faces made accuracy worse anyway (12/13 against
@@ -184,8 +409,94 @@ ORT_THREADS = max(1, (os.cpu_count() or 4) // 2)
 ORT_GRAPH_OPT = True
 WARMUP_ON_START = True         # pre-run models once to avoid first-request JIT lag
 
+# --- 1:1 verification -------------------------------------------------------
+# NOT MATCH_THRESHOLD, deliberately. That number (0.570) is tuned for open-set
+# identification: one face against a whole roster, where the job is to keep out
+# a stranger who resembles somebody. These two are 1:1 checks - the person has
+# already said who they are and the question is only whether the face agrees -
+# so the same figure would be far stricter than necessary, and the cost of that
+# strictness lands on somebody trying to do their job.
+#
+# SFace publishes 0.363 as its cosine threshold for verification, which is what
+# these start from. Re-measure before trusting them in the field; they have not
+# been calibrated on this population.
+COACH_VERIFY_THRESHOLD = float(os.environ.get("COACH_VERIFY_THRESHOLD") or 0.363)
+SELF_VERIFY_THRESHOLD  = float(os.environ.get("SELF_VERIFY_THRESHOLD") or 0.363)
+
+# How many times somebody may retry a failed verification before the register
+# is submitted anyway and flagged. A genuine person refused is worse than a
+# spoof let through: an unverified register that exists and is visible to an
+# admin beats a verified register that was never taken.
+VERIFY_MAX_RETRIES = int(os.environ.get("VERIFY_MAX_RETRIES") or 3)
+
+
 # --- Attendance ------------------------------------------------------------
 ATTENDANCE_DATE_FORMAT = "%Y-%m-%d"
+
+# The timezone the CENTRE is in, which is what decides "what day is it".
+#
+# This is not cosmetic. Every attendance date came from a naive date.today(),
+# i.e. the server's own clock. That is correct on a laptop in India and wrong
+# on EC2, which is UTC by default: IST is UTC+5:30, so a 5:00 AM session is
+# 23:30 UTC the PREVIOUS day. Morning training - athletics, swimming - is
+# exactly when that window falls, so those registers would file under
+# yesterday and "today's attendance" would come back empty.
+#
+# Override with FACEMARK_TIMEZONE for a deployment outside India.
+APP_TIMEZONE = os.environ.get("FACEMARK_TIMEZONE") or "Asia/Kolkata"
+
+
+def _resolve_tz():
+    """The configured zone, or a safe stand-in if the tz database is missing.
+
+    python:3.11-slim has no tzdata unless it is installed, and ZoneInfo raises
+    rather than guessing. Falling back to UTC there would silently reintroduce
+    the very bug this exists to fix, so India - which has no DST, making a
+    fixed offset exactly right - falls back to +5:30 instead.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(APP_TIMEZONE)
+    except Exception:
+        import logging
+        from datetime import timedelta, timezone as _tz
+        if APP_TIMEZONE == "Asia/Kolkata":
+            logging.getLogger(__name__).warning(
+                "tzdata is unavailable, using a fixed UTC+5:30 for %s. "
+                "Correct for India (no DST). Install tzdata to be safe elsewhere.",
+                APP_TIMEZONE,
+            )
+            return _tz(timedelta(hours=5, minutes=30))
+        logging.getLogger(__name__).error(
+            "tzdata is unavailable and %s needs it - falling back to UTC, so "
+            "attendance dates will be wrong wherever local time is not UTC. "
+            "Install tzdata.", APP_TIMEZONE,
+        )
+        return _tz(timedelta(0))
+
+
+TZ = _resolve_tz()
+
+
+def local_now():
+    """Now, as an AWARE datetime in the centre's timezone."""
+    from datetime import datetime
+    return datetime.now(TZ)
+
+
+def now_stamp() -> str:
+    """Now, as the naive 'YYYY-MM-DDTHH:MM:SS' string this database stores.
+
+    Naive on purpose: every timestamp already written is naive, and mixing the
+    two would make comparisons raise. This keeps the format identical while
+    fixing which clock it comes from - so no migration is needed.
+    """
+    return local_now().replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def today_str() -> str:
+    """Today's date at the centre, formatted the way attendance stores it."""
+    return local_now().strftime(ATTENDANCE_DATE_FORMAT)
 
 # --- Advanced tuning (expert) ----------------------------------------------
 # TTA (test-time augmentation) for detection - enables horizontal flip
@@ -215,15 +526,70 @@ TILED_DETECTION = False            # Disabled to prevent tile-boundary cuts and 
 TILE_SIZE = 1280                   # tile dimension in pixels
 TILE_OVERLAP = 0.15                # fractional overlap between tiles
 
-# --- v3.0: Ratio test (ambiguous match rejection) --------------------------
+# How far from level the camera may be before the framing guide asks the person
+# to raise it. A phone at chest height puts the lens under the chin: every frame
+# of the clip is an up-nose shot, and the enrolment photo can only ever be the
+# least bad of them. 18 degrees is generous - it passes a normal hand-held angle
+# and catches the waist-height hold that produces those pictures.
+MAX_PORTRAIT_PITCH = float(os.environ.get("FACEMARK_MAX_PORTRAIT_PITCH", "18"))
+
+# --- retention ---------------------------------------------------------------
+# How long an undecided or refused registration is kept before it is forgotten,
+# face templates included. These are mostly minors, and a face held for somebody
+# you decided not to enrol is the hardest kind of data to justify keeping.
+#
+# 30 days is chosen to be longer than any plausible "the coach was away" gap and
+# shorter than a term. Nothing here touches a person an admin enrolled, or
+# anybody with attendance against their name.
+PENDING_SIGNUP_TTL_DAYS = int(os.environ.get("FACEMARK_PENDING_TTL_DAYS", "30"))
+REJECTED_SIGNUP_TTL_DAYS = int(os.environ.get("FACEMARK_REJECTED_TTL_DAYS", "30"))
+
+# --- ratio test: MEASURED, and deliberately absent -------------------------
 RATIO_TEST = True
-RATIO_TEST_THRESHOLD = 0.88        # best/2nd-best similarity ratio; above = ambiguous match (rejected as unknown)
+# There is no ratio test. There was a constant here that read like one, and
+# an optimize_assignments_v2 that used it, which nothing in backend/ or
+# scripts/ ever called - so it had never run on real data and the config
+# described a safeguard the matcher did not have.
+#
+# Measured before removing it, on 988 assignments over 120 real capture images
+# from this corpus:
+#
+#   as written   sim / second_best, flagged when BELOW 0.88.
+#                Observed range 1.163 - 2.539. The assigned face is nearly
+#                always the row maximum, so this quantity is >= 1 and the test
+#                could never fire. It was also the reciprocal of the intended
+#                one, so had it ever fired it would have flagged the most
+#                confident matches.
+#   as intended  second_best / sim, flagged when ABOVE 0.88 (Lowe).
+#                Observed range 0.394 - 0.860. Nothing reaches 0.88 either,
+#                though the worst case is close enough that it is not absurd.
+#
+# So neither polarity does anything on the data we have, and `ambiguous` was
+# returned to callers that discarded it - there was no defined consequence to
+# being flagged. Wiring an uncalibrated gate into the matcher on the strength
+# of zero observations, weeks before a pilot, buys nothing and can only cost.
+#
+# If this comes back it needs: a corpus that actually contains look-alikes, a
+# threshold fitted to it, and a decision about what a flagged face DOES -
+# rejected as unknown, or shown to the coach as a question.
 
 # --- v3.0: Platt calibration (raw similarity -> probability) ---------------
 PLATT_CALIBRATION = False          # keep pure cosine similarity for matching decisions
 
 # --- v3.0: Illumination normalization -------------------------------------
-CLAHE_ENABLED = True               # CLAHE on abnormally lit faces before embedding
+# NOT IN THE PIPELINE. backend/enhancer.py implements this and nothing calls it:
+# grep for `enhancer.` across backend/ returns the module itself and no callers,
+# so no crop is normalised before embedding however these are set. The flag said
+# True, which is how a setting comes to be believed - somebody reads it, assumes
+# hard faces are already being helped, and looks elsewhere for the accuracy.
+#
+# Left wired-up-able rather than deleted, because the code is sound and the idea
+# is reasonable. It is NOT switched on here, because turning an untested
+# transform on for every embedding would change recognition for all 35 enrolled
+# people with no measurement behind it, and every threshold in this file was
+# calibrated without it. Measure first - scripts/live_test.py and
+# scripts/benchmark_detection.py are the harnesses - then decide.
+CLAHE_ENABLED = False              # see above: no caller, so this is descriptive
 CLAHE_CLIP_LIMIT = 2.0
 CLAHE_TILE_SIZE = 8
 
@@ -233,10 +599,21 @@ CAMERA_MAX_RESOLUTION = 1920      # max dimension for camera photos
 
 
 # --- Deployment -------------------------------------------------------------
-# Browser origins allowed to call the API directly. The Vercel frontend proxies
-# /api through its own domain, so requests arrive same-origin and never need
-# this; it exists for local development and any direct API consumer.
-# Comma-separated, or "*" to allow any origin.
+# Browser origins allowed to call the API directly, comma-separated.
+#
+# This backend serves its own frontend, so requests normally arrive same-origin
+# and never consult this list; it exists for local development and for a
+# frontend hosted on a different domain.
+#
+# "*" is NOT valid, whatever convenience suggests. Session auth rides a
+# credentialed cookie, and browsers reject a wildcard origin alongside
+# credentials - the request fails with no useful error, so following the old
+# advice here produced a CORS setup that looked configured and was broken.
+# List the origins explicitly.
+#
+# And if you do set this for genuine cross-site use, set COOKIE_SECURE=1 and
+# COOKIE_SAMESITE=none too. Without them the cookie is refused on a cross-site
+# request, so the login appears to succeed and every call after it returns 401.
 CORS_ORIGINS = [
     o.strip() for o in os.environ.get(
         "CORS_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000"
@@ -245,5 +622,62 @@ CORS_ORIGINS = [
 
 # Cookies must be Secure + SameSite=None to survive a cross-site request. Behind
 # the Vercel proxy the request is same-origin, so the stricter Lax default holds.
+# --- Login throttling --------------------------------------------------------
+# Two separate problems, one guard.
+#
+# --- Which day a register may be opened for ----------------------------------
+# `date_str` was an unvalidated form field on the routes that WRITE attendance,
+# so it decided the day a person was recorded present on and was never checked:
+# a future date, a date years past, or a string that is not a date at all were
+# all accepted and stored verbatim. The past is the direction that matters -
+# writing attendance for a day that has already been reviewed is what
+# falsifying a record looks like.
+#
+# A coach may still catch up on a day or two; anything older is an
+# administrator's job. A super admin has no limit, because the bulk import
+# loads real historic registers.
+SESSION_BACKDATE_DAYS = 2
+
+# The signup face step is unauthenticated, decodes a video and runs the whole
+# liveness pipeline per call, and writes an image that is kept. It had no limit
+# at all, and a signup token stays usable for its full 45 minutes - so one
+# token was an unbounded decode-and-write primitive. A real applicant needs a
+# handful of attempts; these are generous for that and useless for anything
+# else.
+SIGNUP_FACE_PER_TOKEN = 12
+SIGNUP_FACE_PER_IP_HOUR = 40
+
+# How many reverse proxies sit in front of this application.
+#
+# X-Forwarded-For is written by the client and APPENDED to by each proxy, so
+# only the last N entries were added by infrastructure - everything to their
+# left is whatever the caller typed. Both throttles used to key on the LEFTMOST
+# value with no trusted-proxy configuration at all, which let an anonymous
+# caller mint a fresh bucket per request and walk past the login lockout and
+# the signup limit alike.
+#
+# 0 means "no proxy": ignore the header and use the socket address, which is
+# always true and never forgeable. A deployment behind Caddy or a single ALB
+# sets 1. Setting this HIGHER than reality is what re-opens the hole, so the
+# default is the safe end.
+TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "0") or 0)
+
+# Brute force: nothing limited attempts, so a weak password fell to a script.
+#
+# CPU exhaustion: verifying a password is 600,000 PBKDF2 rounds, which is
+# correct for storage and is also, with unlimited attempts, a way to saturate
+# every worker from one laptop. Both checks below run BEFORE any hashing, which
+# is the point - a guard that hashes first would still burn the CPU it exists to
+# protect.
+#
+# The per-account lock lives in the database so it is shared by every worker and
+# survives a restart. The per-address window is in-process, so N workers allow
+# N times the burst; that is a deliberate trade against giving an unauthenticated
+# caller a way to write rows.
+LOGIN_MAX_FAILURES = 8           # per account before it locks
+LOGIN_LOCKOUT_SECONDS = 900      # 15 minutes, then the count resets on success
+LOGIN_IP_MAX_ATTEMPTS = 30       # per address within the window below
+LOGIN_IP_WINDOW_SECONDS = 300
+
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") in ("1", "true", "True")
 COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax")

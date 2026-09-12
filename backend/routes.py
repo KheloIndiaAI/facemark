@@ -27,8 +27,26 @@ router = APIRouter(prefix="/api")
 # =============================================================================
 
 @router.post("/auth/login")
-def login(response: Response, username: str = Form(...), password: str = Form(...)):
-    result = auth.login(username, password)
+def login(request: Request, response: Response,
+          username: str = Form(...), password: str = Form(...)):
+    # Behind a proxy every request appears to come from the proxy, so the
+    # forwarded chain has to be read - but only as far as the number of hops
+    # actually in front of us. See auth.client_ip: taking the leftmost value
+    # let the caller choose their own throttle bucket.
+    ip = auth.client_ip(request)
+
+    try:
+        result = auth.login(username, password, ip=ip)
+    except auth.AccountNotActive as inactive:
+        # 403, not 429: waiting changes nothing, so no Retry-After.
+        raise HTTPException(403, inactive.message)
+    except auth.LoginBlocked as blocked:
+        # 429, not 401. A throttled caller is not being told their password is
+        # wrong - and an operator reading the logs needs the two distinguished.
+        raise HTTPException(
+            429, blocked.message,
+            headers={"Retry-After": str(max(1, blocked.retry_after))},
+        )
     if not result:
         # Deliberately identical for unknown user, wrong password and disabled
         # account: distinguishing them tells an attacker which usernames exist.
@@ -94,8 +112,16 @@ def add_user(
         uid = auth.create_user(username, password, role, full_name, centre_id, email, phone)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    except Exception as e:  # UNIQUE violation on username
+    except database.IntegrityError as e:
+        # ONLY a constraint violation is a duplicate. This used to catch every
+        # Exception and report all of them as "username already taken", so a
+        # database that was down, a bad centre_id, or a bug in create_user all
+        # came back as a name clash - and an administrator retried with a
+        # different username, forever, against a problem that was never that.
         raise HTTPException(409, f"Username '{username}' is already taken") from e
+    except Exception as e:  # noqa: BLE001
+        log.exception("Creating user %s failed", username)
+        raise HTTPException(500, "Could not create that account") from e
     return {"ok": True, "user_id": uid}
 
 
@@ -146,7 +172,7 @@ def get_centres(
 
 
 @router.get("/centres/{centre_id}")
-def get_centre_detail(centre_id: int, user: dict = Depends(auth.current_user)):
+def get_centre_detail(centre_id: int, user: dict = Depends(auth.require_staff)):
     auth.scope_centre(user, centre_id)      # raises 403 for a coach from elsewhere
     detail = centres_mod.centre_detail(centre_id)
     if not detail:
@@ -155,7 +181,22 @@ def get_centre_detail(centre_id: int, user: dict = Depends(auth.current_user)):
         for p in detail[group]:
             if p.get("photo_path"):
                 p["photo_url"] = f"/api/photos/{Path(p['photo_path']).name}"
+    # Added back for a super admin only. A coach at the centre does not need it
+    # - they are already in - and the fewer people holding it, the more it is
+    # worth when a stranger produces it.
+    if user["role"] == "super_admin":
+        detail["coach_join_code"] = centres_mod.join_code(centre_id)
     return detail
+
+
+@router.post("/centres/{centre_id}/join-code")
+def rotate_centre_join_code(centre_id: int,
+                            user: dict = Depends(auth.require_super_admin)):
+    """Issue a new coach join code, retiring the old one at once."""
+    try:
+        return {"ok": True, "coach_join_code": centres_mod.rotate_join_code(centre_id)}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 @router.post("/centres")
@@ -187,8 +228,13 @@ def add_centre(
             incharge_name=incharge_name, contact_phone=contact_phone,
             contact_email=contact_email, established=established, is_demo=False,
         )
-    except Exception as e:
+    except database.IntegrityError as e:
+        # Same correction as add_user: only a constraint violation is a
+        # duplicate. Everything else was being reported as one.
         raise HTTPException(409, f"Centre code '{code}' already exists") from e
+    except Exception as e:  # noqa: BLE001
+        log.exception("Creating centre %s failed", code)
+        raise HTTPException(500, "Could not create that centre") from e
     return {"ok": True, "centre_id": cid}
 
 
@@ -229,8 +275,11 @@ async def import_centres(file: UploadFile = File(...), user: dict = Depends(auth
         raise HTTPException(400, f"Could not parse {file.filename}: {e}")
     if not isinstance(rows, list) or not rows:
         raise HTTPException(400, "File contained no rows")
-    added = centres_mod.import_centres(rows)
-    return {"ok": True, "imported": added, "skipped": len(rows) - added}
+    out = centres_mod.import_centres(rows)
+    # The rows that failed are NAMED, not just counted. "197 imported, 3
+    # skipped" leaves an operator to find the three by eye in a spreadsheet.
+    return {"ok": True, "imported": out["imported"],
+            "skipped": len(out["skipped"]), "skipped_rows": out["skipped"][:50]}
 
 
 # =============================================================================
@@ -241,15 +290,19 @@ async def import_centres(file: UploadFile = File(...), user: dict = Depends(auth
 def list_people(
     role: Optional[str] = None,
     centre_id: Optional[int] = None,
-    user: dict = Depends(auth.current_user),
+    user: dict = Depends(auth.require_staff),
 ):
     scope = auth.scope_centre(user, centre_id)
     q = (
         "SELECT s.id, s.name, s.roll_no, s.photo_path, s.role, s.gender, s.sport, "
         "s.phone, s.centre_id, c.name AS centre_name, "
-        "(SELECT COUNT(*) FROM attendance a WHERE a.student_id = s.id) AS total_present, "
+        "(SELECT COUNT(*) FROM attendance a WHERE a.student_id = s.id "
+        "        AND a.status = 'confirmed') AS total_present, "
         "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id) AS templates "
-        "FROM students s LEFT JOIN centres c ON c.id = s.centre_id WHERE 1=1"
+        "FROM students s LEFT JOIN centres c ON c.id = s.centre_id "
+        # Enrolled people. An unapproved application is not one of them - it
+        # belongs in the approval queue, not on a roster.
+        "WHERE s.status = 'active'"
     )
     p: list = []
     if role in ("athlete", "coach"):
@@ -267,13 +320,18 @@ def list_people(
 
 
 @router.patch("/people/{student_id}")
-async def update_person(student_id: int, request: Request, user: dict = Depends(auth.current_user)):
-    """Edit profile fields. A coach may only edit people at their own centre."""
+async def update_person(student_id: int, request: Request,
+                        user: dict = Depends(auth.require_staff)):
+    """Edit profile fields. A coach may only edit people at their own centre.
+
+    Staff only. The centre check below narrows WHICH people a coach may edit; it
+    was never the thing deciding whether the caller should be editing anybody.
+    """
     with database.connect() as conn:
         row = conn.execute("SELECT centre_id FROM students WHERE id = ?", (student_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Person not found")
-    auth.scope_centre(user, row["centre_id"])
+    auth.owns_centre(user, row["centre_id"])
 
     form = dict(await request.form())
     allowed = {"name", "role", "centre_id", "gender", "sport", "phone", "roll_no"}
@@ -291,6 +349,13 @@ async def update_person(student_id: int, request: Request, user: dict = Depends(
     if not sets:
         return {"ok": True, "updated": 0}
     params.append(student_id)
-    with database.connect() as conn:
-        conn.execute(f"UPDATE students SET {', '.join(sets)} WHERE id = ?", params)
+    try:
+        with database.connect() as conn:
+            conn.execute(f"UPDATE students SET {', '.join(sets)} WHERE id = ?", params)
+    except database.IntegrityError:
+        # roll_no is unique, and setting a real NSRS ID on a self-registered
+        # athlete is now a thing somebody does by hand - so typing one that
+        # already belongs to another person is a normal mistake, not a 500.
+        raise HTTPException(
+            409, "That NSRS ID already belongs to somebody else at this centre.")
     return {"ok": True, "updated": len(sets)}

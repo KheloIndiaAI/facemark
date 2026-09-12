@@ -53,7 +53,13 @@ def load_gallery():
             "FROM templates t JOIN students s ON s.id = t.student_id "
             "LEFT JOIN centres cn ON cn.id = s.centre_id"))
     out = []
-    for sid, name, code, blob in rows:
+    # Index the Row, never unpack it. Iterating a Row yields its column NAMES,
+    # not its values, so `for sid, name, code, blob in rows` bound the strings
+    # "student_id", "name", "code", "vector" and then tried to read a buffer
+    # out of the word "vector". That is why this harness crashed - and with it
+    # every threshold measurement that depends on it.
+    for r in rows:
+        sid, name, code, blob = r[0], r[1], r[2], r[3]
         v = np.frombuffer(blob, dtype=np.float32).astype(np.float32)
         v = v / (np.linalg.norm(v) + 1e-9)
         out.append({"sid": sid, "name": name, "centre": code, "vec": v})

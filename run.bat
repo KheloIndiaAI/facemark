@@ -5,7 +5,7 @@ REM Windows startup script
 echo.
 echo ============================================================
 echo   FaceMark - AI Attendance System
-echo   YOLO11s-face detection + ArcFace ensemble recognition
+echo   YuNet detection (MIT) + SFace recognition (Apache-2.0)
 echo   Opening: http://127.0.0.1:8000
 echo ============================================================
 echo.

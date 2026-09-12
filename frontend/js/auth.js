@@ -9,6 +9,20 @@ const session = { user: null };
 
 function isSuperAdmin() { return session.user && session.user.role === 'super_admin'; }
 function isCoach() { return session.user && session.user.role === 'coach'; }
+function isAthlete() { return session.user && session.user.role === 'athlete'; }
+
+// Three roles now, so "not super admin" no longer means coach. Every
+// label below went through that assumption and would have called an
+// athlete a Coach.
+function roleLabel(role, centreName) {
+    if (role === 'super_admin') return 'Super Admin';
+    if (role === 'athlete') return 'Athlete';
+    return 'Coach - ' + (centreName || 'unassigned');
+}
+function roleShort(role) {
+    return role === 'super_admin' ? 'Super Admin'
+         : role === 'athlete' ? 'Athlete' : 'Coach';
+}
 
 async function checkSession() {
     try {
@@ -59,7 +73,14 @@ async function doLogin(ev) {
         hideLogin();
         applyRoleChrome();
         await initApp();
-        window.location.hash = '#/dashboard';
+        // Signing in lands on the job that role opens the app to do: Mark
+        // Attendance for a coach or admin, their own page for an athlete.
+        // Set here as well as in the router - this assignment overrides
+        // whatever default handleRoute() would have picked, so changing one
+        // without the other silently keeps the old landing page. That is
+        // exactly what happened when the router learned about athletes and
+        // this line did not.
+        window.location.hash = isAthlete() ? '#/me' : '#/mark';
         handleRoute();
         showToast('Welcome', `Signed in as ${data.user.full_name}`, 'success');
     } catch {
@@ -73,6 +94,7 @@ async function doLogin(ev) {
 async function doLogout() {
     try { await fetch('/api/auth/logout', { method: 'POST' }); } catch { /* sign out locally anyway */ }
     session.user = null;
+    if (typeof resetSessionState === 'function') resetSessionState();
     showLogin();
 }
 
@@ -92,20 +114,18 @@ function applyRoleChrome() {
             <div class="user-chip-avatar">${Charts.esc(u.full_name.charAt(0).toUpperCase())}</div>
             <div class="user-chip-text">
                 <div class="user-chip-name">${Charts.esc(u.full_name)}</div>
-                <div class="user-chip-role">${u.role === 'super_admin' ? 'Super Admin'
-                    : 'Coach - ' + Charts.esc(u.centre_name || 'unassigned')}</div>
+                <div class="user-chip-role">${Charts.esc(
+                    roleLabel(u.role, u.centre_name))}</div>
             </div>`;
-    }
-    const badge = document.getElementById('role-badge');
-    if (badge) {
-        badge.textContent = u.role === 'super_admin' ? 'Super Admin' : 'Coach';
-        badge.className = 'badge ' + (u.role === 'super_admin' ? 'badge-blue' : 'badge-green');
     }
 }
 
 /* Any 401 from anywhere drops straight back to the login gate. */
 function handleUnauthorized() {
     session.user = null;
+    // An expired session is a session end too: the same in-memory roster would
+    // otherwise still be on screen behind the login gate.
+    if (typeof resetSessionState === 'function') resetSessionState();
     showLogin('Your session expired. Sign in again.');
 }
 
@@ -143,3 +163,278 @@ async function submitPasswordChange() {
         setTimeout(doLogout, 1200);
     } catch { /* api layer already surfaced the error */ }
 }
+
+
+/* ---------------------------------------------------------------------------
+   Self-signup
+
+   Four steps, each gated by the token the first returns. The account that
+   comes out cannot sign in and its face is not recognised until a coach
+   approves it - the copy says so at every step, because someone who thinks
+   they are already enrolled will turn up and be marked absent.
+--------------------------------------------------------------------------- */
+
+const suState = { token: null, centre: null, role: 'athlete' };
+
+// One panel, two applications. The steps are the same except for the coach
+// picker, which only an athlete has - a coach is approved by a super admin, so
+// there is nobody for them to choose.
+const SU_COPY = {
+    athlete: {
+        title: 'Create your account',
+        sub: 'Your coach approves it before it works.',
+        doneTitle: 'Sent to your coach.',
+        doneBody: 'You can sign in once they approve you. Until then you will not '
+            + 'be recognised in a capture, so keep signing the register the usual way.',
+    },
+    coach: {
+        title: 'Register as a coach',
+        sub: 'A super admin approves coach accounts.',
+        doneTitle: 'Sent to a super admin.',
+        doneBody: 'Coach access is approved centrally, so this is not instant. '
+            + 'You will be able to sign in once it is approved.',
+    },
+};
+
+function suMsg(text, bad = true) {
+    const el = document.getElementById('su-msg');
+    if (el) { el.textContent = text || ''; el.style.color = bad ? 'var(--red)' : 'var(--text-secondary)'; }
+}
+
+function suShow(step) {
+    ['su-step-1', 'su-step-2', 'su-step-4', 'su-done']
+        .forEach((id, i) => {
+            const el = document.getElementById(id);
+            if (el) el.classList.toggle('hidden', i !== step);
+        });
+}
+
+async function openSignup(role = 'athlete') {
+    suState.role = (role === 'coach') ? 'coach' : 'athlete';
+    suState.token = null;
+    const copy = SU_COPY[suState.role];
+    const set = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
+    set('su-title', copy.title);
+    set('su-sub', copy.sub);
+    set('su-done-title', copy.doneTitle);
+    set('su-done-body', copy.doneBody);
+    document.getElementById('login-gate')?.classList.add('hidden');
+    document.getElementById('signup-gate')?.classList.remove('hidden');
+    suShow(0); suMsg('');
+    // Centres are needed before an account exists, so this one list is public.
+    // It carries no personal data - names and codes of government centres.
+    try {
+        const r = await fetch('/api/signup/centres');
+        const j = await r.json();
+        const sel = document.getElementById('su-centre');
+        if (!sel) return;
+        const list = (r.ok && j.centres) ? j.centres : [];
+        sel.innerHTML = list
+            .map(c => `<option value="${c.id}">${Charts.esc(c.name)}</option>`).join('');
+        // AN EMPTY DROPDOWN USED TO SAY NOTHING. Neither a failed request nor a
+        // genuinely empty list was reported, so the centre picker simply had no
+        // options; pressing Continue then posted an empty centre_id and the
+        // only thing anyone saw was "Could not create the account" - a message
+        // about the account, for a problem with the list above it.
+        if (!list.length) {
+            suMsg(r.ok
+                ? 'No centres are available to register at yet.'
+                : ((r.status < 500 && j && j.detail)
+                    || 'Could not load the centres. Try again later.'));
+        }
+    } catch { suMsg('Could not load centres. Try again later.'); }
+}
+
+function closeSignup() {
+    document.getElementById('signup-gate')?.classList.add('hidden');
+    document.getElementById('login-gate')?.classList.remove('hidden');
+}
+
+async function suStart() {
+    const fd = new FormData();
+    fd.append('full_name', document.getElementById('su-name').value.trim());
+    fd.append('username', document.getElementById('su-user').value.trim());
+    fd.append('password', document.getElementById('su-pw').value);
+    suState.centre = document.getElementById('su-centre').value;
+    fd.append('centre_id', suState.centre);
+    fd.append('role', suState.role);
+    suMsg('');
+    try {
+        const res = await fetch('/api/signup', { method: 'POST', body: fd });
+        const j = await res.json();
+        if (!res.ok) return suMsg(j.detail || 'Could not create the account');
+        suState.token = j.token;
+        // The SERVER says which steps there are - whether a coach has to be
+        // chosen, and whether the phone gets verified. The browser inferring
+        // either would be a second copy of the answer, and the two would
+        // disagree the first time one changed.
+        if (j.needs_coach === false) return suAfterCoach();
+        await suLoadCoaches();
+        suShow(1);
+    } catch { suMsg('Could not reach the server'); }
+}
+
+/* Something went wrong FETCHING the coaches, which is not the same as there
+   being none. Shown with a way to try again, because a reload would lose the
+   half-finished signup this page is holding. */
+function suCoachError(host, text, retry) {
+    host.innerHTML = '';
+    const p = document.createElement('div');
+    p.className = 'empty-state';
+    p.textContent = text;
+    host.appendChild(p);
+    if (retry) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn btn-secondary';
+        b.style.width = '100%';
+        b.textContent = 'Try again';
+        b.addEventListener('click', () => suLoadCoaches());
+        host.appendChild(b);
+    }
+}
+
+async function suLoadCoaches() {
+    const host = document.getElementById('su-coaches');
+    if (!host) return;
+    let r, j;
+    try {
+        r = await fetch(`/api/signup/coaches?token=${encodeURIComponent(suState.token)}`
+                        + `&centre_id=${encodeURIComponent(suState.centre)}`);
+        j = await r.json();
+    } catch {
+        // Nothing was thrown here before, so a dropped request left this step
+        // blank with an unhandled rejection in the console and no way forward.
+        return suCoachError(host, 'Could not reach the server.', true);
+    }
+    // A FAILED REQUEST IS NOT AN EMPTY CENTRE. `j.coaches` is undefined on any
+    // error body, so a 401 from an expired token used to fall straight through
+    // to the empty-list branch below - which now offers to continue without a
+    // coach, and would have sent somebody whose registration had already
+    // lapsed on to a camera that could only refuse them, having first told
+    // them something untrue about their centre.
+    if (!r.ok) {
+        // A 4xx detail here is written for the person reading it ("This signup
+        // has expired. Start again."). A 5xx detail is "Internal Server Error",
+        // which explains nothing and reads as though they broke something.
+        const human = (r.status < 500 && j && j.detail)
+            ? j.detail
+            : 'Could not load the coaches at that centre.';
+        // 401 means the signup itself has lapsed; retrying cannot mend it.
+        return suCoachError(host, human, r.status !== 401);
+    }
+    const list = j.coaches || [];
+    if (!list.length) {
+        // A DEAD END UNTIL NOW. The account is created by the step before this
+        // one, so "No coaches at that centre yet." stranded somebody who had
+        // already taken a username, could not record a face, and could not
+        // start again under the same name. Every centre without an enrolled
+        // coach - which is most of them before a centre is set up - turned
+        // athlete registration into a trap.
+        //
+        // Going on without one is already supported by the side that matters:
+        // an application with no chosen coach is flagged `orphaned` in
+        // pending_for_coach and appears in the super admin's queue, for a
+        // person to attach to the right coach later. So offer that instead of
+        // a full stop.
+        host.innerHTML = '<div class="empty-state">No coaches have been enrolled at '
+            + 'that centre yet. You can still finish - a centre administrator will '
+            + 'approve you and put you with a coach.</div>';
+        const go = document.createElement('button');
+        go.type = 'button';
+        go.className = 'btn btn-primary';
+        go.style.width = '100%';
+        go.textContent = 'Continue without choosing a coach';
+        go.addEventListener('click', () => suAfterCoach());
+        host.appendChild(go);
+        return;
+    }
+    host.innerHTML = list.map(c => `
+        <button type="button" class="btn btn-secondary" data-su-coach="${c.id}"
+                style="display:flex;align-items:center;gap:10px;width:100%;height:auto;padding:8px;margin-bottom:8px;justify-content:flex-start">
+            ${c.photo ? `<img src="${c.photo}" alt="" style="width:36px;height:36px;border-radius:8px;object-fit:cover">`
+                      : '<div style="width:36px;height:36px;border-radius:8px;background:var(--bg-subtle)"></div>'}
+            <span>${Charts.esc(c.name)}</span>
+        </button>`).join('');
+    host.querySelectorAll('[data-su-coach]').forEach(b => {
+        b.addEventListener('click', () => suPickCoach(b.dataset.suCoach));
+    });
+}
+
+async function suPickCoach(coachId) {
+    const fd = new FormData();
+    fd.append('token', suState.token);
+    fd.append('coach_id', coachId);
+    let r, j = null;
+    try {
+        r = await fetch('/api/signup/coach', { method: 'POST', body: fd });
+        j = await r.json();
+    } catch {
+        return suMsg('Could not reach the server. Try again.');
+    }
+    // The server's reason, not a replacement for it. "Could not select that
+    // coach" was shown even when the actual answer was that the registration
+    // had expired - so somebody kept pressing coach after coach, each one
+    // failing for a reason they were never told.
+    if (!r.ok) {
+        return suMsg((r.status < 500 && j && j.detail) || 'Could not select that coach');
+    }
+    await suAfterCoach();
+}
+
+/* One place decides what follows the coach step. Phone verification is off
+   while there is no way to deliver a code, and when it comes back this is the
+   only line that changes. */
+async function suAfterCoach() {
+    suShow(2);          // the face capture; there is no code step any more
+    suMsg('');
+}
+
+function suFace() {
+    openClipCapture({
+        title: 'Record your face',
+        // Says what green MEANS as well as that it happens. This is the first
+        // camera an applicant ever sees - there is no coach standing beside
+        // them to explain that the shutter is waiting for the dots, so a
+        // disabled button reads as a broken one.
+        intro: 'Follow the prompts and turn your head as asked. Dots appear on '
+             + 'your face as the camera finds it: they turn green once you are '
+             + 'framed properly, and the record button switches on at the same '
+             + 'moment.',
+        // The framing guide polls a route that needs to know this caller was
+        // invited. An applicant has no session - the account is what they are
+        // applying for - so the signup token stands in for one.
+        signupToken: suState.token,
+        onClip: async (file, ui) => {
+            ui.status('Checking\u2026');
+            try {
+                const fd = new FormData();
+                fd.append('token', suState.token);
+                fd.append('video', file);
+                const res = await fetch('/api/signup/face', { method: 'POST', body: fd });
+                const j = await res.json();
+                if (!res.ok || j.ok === false) {
+                    ui.status(j.message || j.detail || 'Could not use that clip');
+                    await ui.resume();
+                    return;
+                }
+                ui.close();
+                suShow(3);
+            } catch {
+                ui.status('Could not reach the server');
+                await ui.resume();
+            }
+        },
+    });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const on = (id, fn) => document.getElementById(id)?.addEventListener('click', (e) => {
+        e.preventDefault(); fn();
+    });
+    on('signup-open', () => openSignup('athlete'));
+    on('signup-open-coach', () => openSignup('coach'));
+    on('signup-cancel', closeSignup);
+    on('su-next-1', suStart);
+    on('su-face', suFace);
+});

@@ -45,11 +45,58 @@
           <div id="login-error" class="login-error hidden"></div>
           <button type="submit" id="login-submit" class="btn btn-primary w-full">Sign in</button>
         </form>
-        <div class="login-foot">
-          Coaches see only their own centre. Super admins see every centre,
-          all accounts and centre management.
+        <div class="login-foot" style="margin-top:10px;font-size:15px">
+          New here? <a href="#" id="signup-open">Register as an athlete</a>
+          &middot; <a href="#" id="signup-open-coach">Register as a coach</a>
+        </div>
+        <div class="login-foot" style="margin-top:6px">
+          Forgotten your password? Ask your coach or an administrator to reset it.
         </div>
       </div>
+    </div>
+
+    <div id="signup-gate" class="login-gate hidden">
+        <div class="login-card" style="max-width:460px">
+            <div class="login-head">
+                <div class="login-logo"></div>
+                <div>
+                    <h1 class="login-title" id="su-title">Create your account</h1>
+                    <p class="login-sub" id="su-sub">Your coach approves it before it works.</p>
+                </div>
+            </div>
+
+            <div id="su-step-1">
+                <div class="form-group"><label class="form-label" for="su-name">Full name</label>
+                    <input type="text" id="su-name" class="form-input" required></div>
+                <div class="form-group"><label class="form-label" for="su-centre">Centre</label>
+                    <select id="su-centre" class="form-input form-select"></select></div>
+                <div class="form-group"><label class="form-label" for="su-user">Username</label>
+                    <input type="text" id="su-user" class="form-input" required></div>
+                <div class="form-group"><label class="form-label" for="su-pw">Password</label>
+                    <input type="password" id="su-pw" class="form-input" required></div>
+                <button type="button" class="btn btn-primary" style="width:100%" id="su-next-1">Continue</button>
+            </div>
+
+            <div id="su-step-2" class="hidden">
+                <div class="form-group"><label class="form-label">Choose your coach</label>
+                    <div id="su-coaches"></div></div>
+            </div>
+
+            <div id="su-step-4" class="hidden">
+                <p class="login-foot">Last step: record your face so you can be recognised
+                   at the centre.</p>
+                <button type="button" class="btn btn-primary" style="width:100%" id="su-face">Record my face</button>
+            </div>
+
+            <div id="su-done" class="hidden">
+                <div class="notice notice-blue"><strong id="su-done-title">Sent to your coach.</strong>
+                    <span id="su-done-body">You can sign in once they approve you.</span></div>
+            </div>
+
+            <div id="su-msg" class="login-foot" style="color:var(--red);min-height:18px"></div>
+            <p class="login-foot" style="margin-top:8px">
+                <a href="#" id="signup-cancel">Back to sign in</a></p>
+        </div>
     </div>
 
     <div class="app-layout hidden" id="app-shell">
@@ -60,33 +107,37 @@
                 <span class="logo-text">FaceMark</span>
             </div>
             <nav class="sidebar-nav">
-                <a href="#/dashboard" class="nav-item" data-route="/dashboard">
+                <a href="#/dashboard" class="nav-item" data-route="/dashboard" data-role-only="super_admin,coach">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"></rect><rect x="14" y="3" width="7" height="5" rx="1"></rect><rect x="14" y="12" width="7" height="9" rx="1"></rect><rect x="3" y="16" width="7" height="5" rx="1"></rect></svg>
                     Dashboard
                 </a>
-                <a href="#/mark" class="nav-item" data-route="/mark">
+                <a href="#/mark" class="nav-item" data-route="/mark" data-role-only="super_admin,coach">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
                     Mark Attendance
                 </a>
-                <a href="#/students" class="nav-item" data-route="/students">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
-                    Students
+                <a href="#/me" class="nav-item" data-route="/me" data-role-only="athlete">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                    My attendance
                 </a>
-                <a href="#/centres" class="nav-item" data-route="/centres">
+                <a href="#/register" class="nav-item" data-route="/register" data-role-only="super_admin,coach">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+                    Register
+                </a>
+                <a href="#/students" class="nav-item" data-route="/students" data-role-only="super_admin,coach">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+                    Directory
+                </a>
+                <a href="#/centres" class="nav-item" data-route="/centres" data-role-only="super_admin,coach">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
                     Centres
+                </a>
+                <a href="#/oversight" class="nav-item" data-route="/oversight" data-role-only="super_admin">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+                    Oversight
                 </a>
                 <a href="#/users" class="nav-item" data-route="/users" data-role-only="super_admin">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 11h-6"></path></svg>
                     Accounts
-                </a>
-                <a href="#/analytics" class="nav-item" data-route="/analytics">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
-                    Analytics
-                </a>
-                <a href="#/records" class="nav-item" data-route="/records">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                    Records
                 </a>
             </nav>
             <div class="sidebar-footer">
@@ -127,21 +178,21 @@
             </div>
         </main>
         <nav class="bottom-nav" id="bottom-nav">
-            <a href="#/dashboard" class="bottom-nav-item" data-route="/dashboard">
+            <a href="#/dashboard" class="bottom-nav-item" data-route="/dashboard" data-role-only="super_admin,coach">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"></rect><rect x="14" y="3" width="7" height="5" rx="1"></rect><rect x="14" y="12" width="7" height="9" rx="1"></rect><rect x="3" y="16" width="7" height="5" rx="1"></rect></svg>
                 <span>Dashboard</span>
             </a>
-            <a href="#/mark" class="bottom-nav-item" data-route="/mark">
+            <a href="#/mark" class="bottom-nav-item" data-route="/mark" data-role-only="super_admin,coach">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
                 <span>Capture</span>
             </a>
-            <a href="#/students" class="bottom-nav-item" data-route="/students">
+            <a href="#/students" class="bottom-nav-item" data-route="/students" data-role-only="super_admin,coach">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
-                <span>Students</span>
+                <span>Directory</span>
             </a>
-            <a href="#/records" class="bottom-nav-item" data-route="/records">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                <span>Records</span>
+            <a href="#/centres" class="bottom-nav-item" data-route="/centres" data-role-only="super_admin,coach">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+                <span>Centres</span>
             </a>
         </nav>
     </div>
@@ -173,7 +224,6 @@
             <div class="card" style="margin-bottom:16px">
                 <div class="card-header">
                     <h3 class="card-title">Athletes present per session</h3>
-                    <a href="#/analytics" class="text-xs" style="color:var(--accent);font-weight:600">All analytics</a>
                 </div>
                 <div class="card-body" id="dashboard-trend">
                     <div class="text-sm text-muted">Loading...</div>
@@ -184,6 +234,13 @@
                     <div class="card">
                         <div class="card-header">
                             <h3 class="card-title">Recent Activity</h3>
+                        </div>
+                        <!-- Last 7 days sits above the list because the list
+                             answers "who just now" and the chart answers "is
+                             that normal" - the second question is the one a
+                             single day's names cannot settle. -->
+                        <div class="card-body" id="dashboard-week">
+                            <div class="text-sm text-muted">Loading...</div>
                         </div>
                         <div class="card-body p-0">
                             <div class="activity-list" id="dashboard-recent">
@@ -222,55 +279,51 @@
                 <div class="mark-controls">
                     <div class="card">
                         <div class="card-header">
-                            <h3 class="card-title">Upload Group Photo</h3>
+                            <h3 class="card-title">Record attendance clip</h3>
                         </div>
                         <div class="card-body">
                             <form id="mark-form">
-                                <div class="capture-tabs">
-                                    <button type="button" class="tab-btn active" data-target="upload"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Upload</button>
-                                    <button type="button" class="tab-btn" data-target="camera"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>Camera</button>
-                                </div>
-                                
-                                <div class="tab-panel active" data-tab="upload">
-                                    <div class="dropzone" id="mark-dropzone">
-                                        <input type="file" id="mark-file" accept="image/*" class="hidden-input">
-                                        <div class="dropzone-content" id="mark-dropzone-content">
-                                            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-muted"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-                                            <div class="mt-2 text-sm" style="font-weight: 500; color: var(--text-primary);">Click to upload or drag & drop</div>
-                                            <div class="text-xs text-muted mt-1">Supports JPG, PNG group photos</div>
-                                        </div>
-                                        <div class="image-preview-container hidden" id="mark-preview-container">
-                                            <img id="mark-preview" src="" alt="Preview" class="image-preview">
-                                            <button type="button" class="btn-clear-image" id="mark-clear-btn" aria-label="Clear image" title="Remove photo">
-                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                                            </button>
-                                        </div>
+                                <!-- Live capture only. A still photograph can be a
+                                     photograph OF a photograph, and nothing in a single
+                                     frame reliably tells the two apart. A short clip can:
+                                     a picture on a screen is flat, so everything in it
+                                     moves as one plane, which the server measures.
+                                     The gallery upload is gone for that reason. -->
+                                <div class="camera-container" id="camera-container">
+                                    <video id="camera-video" class="camera-video" autoplay playsinline muted></video>
+                                    <canvas id="camera-overlay" class="camera-overlay"></canvas>
+                                    <div class="camera-guides">
+                                        <div class="guide-circle"></div>
+                                    </div>
+                                    <div class="camera-quality-badge" id="camera-quality">Ready</div>
+                                    <div class="rec-hint" id="rec-hint">Move the phone slowly from side to side while recording</div>
+                                    <div class="camera-controls">
+                                        <button type="button" class="camera-flash-btn" id="camera-flash" aria-label="Flash">
+                                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                                        </button>
+                                        <button type="button" class="camera-shutter" id="camera-shutter" aria-label="Record a 2 second clip">
+                                            <svg class="rec-ring" viewBox="0 0 44 44" aria-hidden="true">
+                                                <circle class="rec-ring-track" cx="22" cy="22" r="20"></circle>
+                                                <circle class="rec-ring-fill" id="rec-ring-fill" cx="22" cy="22" r="20"></circle>
+                                            </svg>
+                                            <div class="shutter-inner"></div>
+                                        </button>
+                                        <button type="button" class="camera-switch-btn" id="camera-switch" aria-label="Switch camera">
+                                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"></polyline><polyline points="23 20 23 14 17 14"></polyline><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"></path></svg>
+                                        </button>
                                     </div>
                                 </div>
 
-                                <div class="tab-panel" data-tab="camera">
-                                    <div class="camera-container" id="camera-container">
-                                        <video id="camera-video" class="camera-video" autoplay playsinline muted></video>
-                                        <canvas id="camera-overlay" class="camera-overlay"></canvas>
-                                        <div class="camera-guides">
-                                            <div class="guide-circle"></div>
-                                        </div>
-                                        <div class="camera-quality-badge" id="camera-quality">Ready</div>
-                                        <div class="camera-controls">
-                                            <button type="button" class="camera-flash-btn" id="camera-flash" aria-label="Flash">
-                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-                                            </button>
-                                            <button type="button" class="camera-shutter" id="camera-shutter" aria-label="Take photo">
-                                                <div class="shutter-inner"></div>
-                                            </button>
-                                            <button type="button" class="camera-switch-btn" id="camera-switch" aria-label="Switch camera">
-                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"></polyline><polyline points="23 20 23 14 17 14"></polyline><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"></path></svg>
-                                            </button>
-                                        </div>
-                                    </div>
+                                <!-- The recorded clip, for review before it is submitted. -->
+                                <div class="clip-review hidden" id="clip-review">
+                                    <video id="clip-preview" class="camera-video" playsinline muted loop autoplay></video>
+                                    <button type="button" class="btn-retake" id="mark-retake-btn">
+                                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-3px;margin-right:5px"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
+                                        Record again
+                                    </button>
                                 </div>
-                                
-                                <input type="hidden" id="mark-source" name="source" value="upload">
+
+                                <input type="hidden" id="mark-source" name="source" value="camera">
                                 <button type="submit" class="btn btn-primary w-full mt-6" id="btn-process" disabled style="height: 42px; font-size: 14px; font-weight: 600;">
                                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
                                     Take Attendance
@@ -296,15 +349,124 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Records live here rather than behind their own nav item. The
+                 person who has just taken attendance is the person who wants to
+                 check the register, so it belongs at the end of that task
+                 instead of a page away. Collapsed by default: the register is
+                 a follow-up, not the reason the page was opened. -->
+            <div class="card mt-6">
+                <div class="card-header flex-between">
+                    <h3 class="card-title">Records</h3>
+                    <button type="button" class="btn btn-secondary" id="btn-toggle-records"
+                            aria-expanded="false" aria-controls="mark-records-body">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-3px;margin-right:6px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+                        View records
+                    </button>
+                </div>
+                <div class="card-body hidden" id="mark-records-body"></div>
+            </div>
         </div>
     </template>
 
-    <template id="tpl-students">
+    <template id="tpl-oversight">
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+        <input type="date" id="ov-date" class="form-input" style="max-width:190px">
+        <span class="text-xs text-muted" id="ov-meta"></span>
+    </div>
+    <div id="ov-tiles" class="stats-grid" style="margin-bottom:16px"></div>
+    <div id="ov-lists"></div>
+</template>
+
+<template id="tpl-me">
+    <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><div style="font-weight:600">Mark yourself present</div></div>
+        <div class="card-body">
+            <div class="text-xs text-muted" style="margin-bottom:10px">
+                Record a few seconds of your face. Your coach confirms it afterwards.
+            </div>
+            <div id="me-coaches"><div class="empty-state">Loading&hellip;</div></div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-header"><div style="font-weight:600">My attendance</div></div>
+        <div class="card-body"><div id="me-history"><div class="empty-state">Loading&hellip;</div></div></div>
+    </div>
+</template>
+
+<template id="tpl-register">
+    <!-- Shown only when somebody is waiting. A permanently-empty card trains
+         people to ignore the space it occupies. -->
+    <div class="card" id="reg-approvals-card" style="display:none;margin-bottom:16px">
+        <div class="card-header"><div style="font-weight:600">Waiting for your approval
+            <span class="text-xs text-muted" id="reg-approvals-count"></span></div></div>
+        <div class="card-body">
+            <div class="text-xs text-muted" style="margin-bottom:8px">
+                Until you approve them they cannot sign in, and their face will not
+                be recognised in any capture.
+            </div>
+            <div id="reg-approvals"></div>
+        </div>
+    </div>
+    <!-- Shown only when the roster is empty. That is the state every coach
+         starts in, and without this the register is a blank list with no
+         explanation and nothing to press. -->
+    <div class="card" id="reg-empty-roster" style="display:none;margin-bottom:16px">
+        <div class="card-body">
+            <div class="notice notice-blue" style="margin:0">
+                <strong>Nobody is on your register yet.</strong>
+                Choose which athletes at your centre you take attendance for.
+                You can change this at any time.
+            </div>
+            <button type="button" class="btn btn-primary" style="margin-top:12px"
+                    id="reg-roster-btn-empty">Choose my athletes</button>
+        </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+            <div>
+                <div style="font-weight:600">Today&rsquo;s register</div>
+                <div class="text-xs text-muted" id="reg-session-meta">Opening&hellip;</div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button type="button" class="btn btn-secondary" id="reg-roster-btn">My athletes</button>
+                <button type="button" class="btn btn-secondary" id="reg-capture-btn">Capture group</button>
+                <button type="button" class="btn btn-primary" id="reg-submit-btn">Submit register</button>
+            </div>
+        </div>
+        <div class="card-body">
+            <div id="reg-capture-summary"></div>
+            <div id="reg-roster"><div class="empty-state">Loading&hellip;</div></div>
+        </div>
+    </div>
+    <div class="card" id="reg-named-card" style="display:none">
+        <div class="card-header"><div style="font-weight:600">Recognised, not on your roster</div></div>
+        <div class="card-body">
+            <div class="text-xs text-muted" style="margin-bottom:8px">
+                These people were recognised in your capture but belong to another coach,
+                so they are not added to your register.
+            </div>
+            <div id="reg-named"></div>
+        </div>
+    </div>
+</template>
+
+<template id="tpl-students">
         <div class="students-page">
             <div class="toolbar flex-between mb-6">
                 <div class="search-box">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                    <input type="text" id="student-search" placeholder="Search students..." class="form-input search-input">
+                    <input type="text" id="student-search" placeholder="Search by name or NSRS ID..." class="form-input search-input">
+                </div>
+                <!-- A coach is an enrolled person with a face and has to be
+                     reachable from somewhere; this is the only screen that can
+                     enrol one. So they are behind a filter rather than gone. -->
+                <div class="seg" id="student-role-filter" style="display:flex;gap:6px">
+                    <button type="button" class="btn btn-primary" data-role-filter="athlete"
+                            style="min-height:34px;padding:0 14px;font-size:13px">Athletes</button>
+                    <button type="button" class="btn btn-secondary" data-role-filter="coach"
+                            style="min-height:34px;padding:0 14px;font-size:13px">Coaches</button>
                 </div>
             </div>
             <div class="students-grid" id="students-grid">
@@ -328,7 +490,7 @@
                         <thead>
                             <tr>
                                 <th>Person</th>
-                                <th>Roll No</th>
+                                <th>NSRS ID</th>
                                 <th>Role</th>
                                 <th>Confidence</th>
                                 <th>Location</th>
@@ -368,10 +530,6 @@
       <div id="centres-root"></div>
     </template>
 
-    <!-- ===== Analytics ===== -->
-
-    <!-- ===== Performance ===== -->
-
     <!-- ===== Users ===== -->
     <template id="tpl-users">
       <div id="users-root"></div>
@@ -379,6 +537,9 @@
 
     <script src="/static/js/icons.js"></script>
     <script src="/static/js/charts.js"></script>
+    <!-- Optional: on-device face landmarks for the enrolment overlay.
+         Degrades to server-side detection when frontend/vendor is absent. -->
+    <script src="/static/js/facemesh.js"></script>
     <script src="/static/js/auth.js"></script>
     <script src="/static/js/pages.js"></script>
     <script src="/static/js/app.js"></script>
@@ -402,9 +563,16 @@
         // already-open page keeps running the OLD app.js from memory even after
         // the new worker takes over, because JS that has already executed does
         // not re-run itself. This reloads once when that handover happens.
+        // Only when a worker is being REPLACED. On a first visit there is no
+        // controller yet, so the very first registration fires controllerchange
+        // too - and reloading there reloads a page whose code is already the
+        // newest there is, for every first-time visitor and every user who has
+        // just cleared their site data.
         let reloaded = false;
+        const hadController = !!navigator.serviceWorker.controller;
         navigator.serviceWorker.addEventListener('controllerchange', () => {
-            if (reloaded) return;      // controllerchange can fire more than once
+            if (!hadController) return;   // first install, nothing to replace
+            if (reloaded) return;         // controllerchange can fire more than once
             reloaded = true;
             location.reload();
         });

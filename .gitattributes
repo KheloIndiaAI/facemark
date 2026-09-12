@@ -1,0 +1,26 @@
+# Line endings.
+#
+# The repo is developed on Windows and runs on Linux. Without this, a clone
+# with core.autocrlf=true checks these out with CRLF, and a shell script whose
+# shebang ends "#!/bin/bash\r" fails on Linux with a bad-interpreter error that
+# names an invisible character. The same applies to anything Docker or a CI
+# runner executes.
+#
+# Normalise text in general, then pin the files that must be LF on disk.
+* text=auto
+
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+Dockerfile  text eol=lf
+*.py        text eol=lf
+
+# Binary: never touched, never diffed as text.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.ico       binary
+*.onnx      binary
+*.task      binary
+*.mp4       binary
+*.webm      binary

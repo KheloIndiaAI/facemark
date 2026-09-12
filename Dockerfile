@@ -24,6 +24,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY scripts/download_models.py scripts/
 RUN python -m scripts.download_models && ls -lh /app/data/models
 
+# The browser-side face model and MediaPipe runtime, same reasoning: 27 MB that
+# would otherwise be committed. Its own layer so it is not re-fetched on a code
+# change. It does NOT fail the build if the CDN is unreachable - the enrolment
+# overlay falls back to server-side detection, which is how it worked before.
+COPY scripts/fetch_frontend_models.py scripts/
+RUN python -m scripts.fetch_frontend_models && ls -lh /app/frontend/vendor/mediapipe || true
+
 # Application code last: the layer that actually changes between deploys.
 COPY backend/ backend/
 COPY frontend/ frontend/
@@ -39,6 +46,18 @@ EXPOSE 8000
 # Startup is seconds now rather than the 20-40s the old model loading took.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
     CMD curl -fsS http://localhost:${PORT}/api/health || exit 1
+
+# NOT ROOT. deploy/aws/user-data.sh already does `chown -R 1000:1000 /data`,
+# which only makes sense for a container running as uid 1000 - it has been
+# expecting this the whole time, while the image ran everything as root. A
+# process that decodes uploaded video and images from the public internet is
+# the last one that should own the filesystem it runs on.
+#
+# uid 1000 exactly, not "some non-root user": the mounted volume's ownership is
+# set by the host, and a mismatch means the app cannot write photographs at all.
+RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin facemark \
+    && chown -R 1000:1000 /app
+USER 1000:1000
 
 # Two workers are affordable now that the models total 37 MB rather than 1 GB.
 CMD uvicorn backend.main:app --host 0.0.0.0 --port ${PORT} --workers 2 --timeout-keep-alive 75

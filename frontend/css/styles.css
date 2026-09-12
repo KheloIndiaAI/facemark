@@ -241,6 +241,24 @@ a:hover { color: var(--accent-hover); }
     border-radius: var(--radius-md); color: var(--text-primary); font-family: inherit; font-size: 16px; /* prevent iOS zoom */
     transition: border-color var(--transition-fast);
 }
+/* .form-select was referenced by the register and account forms and never
+   defined, so every dropdown rendered as an unstyled native control beside
+   styled inputs. Matches .form-input, with room for the arrow. */
+.form-select {
+    width: 100%; max-width: 100%; height: 44px;
+    padding: 0 32px 0 12px;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    color: var(--text-primary); font-family: inherit; font-size: 16px;
+    transition: border-color var(--transition-fast);
+    appearance: none; -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none' stroke='%236b7280' stroke-width='2'%3E%3Cpath d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    text-overflow: ellipsis;
+}
+.form-select:focus { outline: none; border-color: var(--border-focus); }
 .form-input:focus { outline: none; border-color: var(--border-focus); }
 .form-input::placeholder { color: var(--text-muted); }
 .search-box { position: relative; width: 100%; }
@@ -311,6 +329,8 @@ a:hover { color: var(--accent-hover); }
 .image-preview-container { position: relative; width: 100%; padding-top: 75%; }
 .image-preview { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
 .btn-clear-image { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); color: white; border: none; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 10; }
+.btn-retake { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.68); color: #fff; border: none; border-radius: 999px; padding: 9px 18px; font-size: 13px; font-weight: 600; cursor: pointer; z-index: 10; backdrop-filter: blur(4px); min-height: 38px; }
+.btn-retake:hover { background: rgba(0,0,0,0.82); }
 
 .capture-tabs { display: flex; border-bottom: 1px solid var(--border-subtle); margin-bottom: 16px; }
 .tab-btn { flex: 1; background: transparent; border: none; color: var(--text-secondary); padding: 12px; font-size: 14px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; min-height: 44px; }
@@ -320,7 +340,24 @@ a:hover { color: var(--accent-hover); }
 
 /* Camera Viewfinder */
 .camera-container { position: relative; width: 100%; aspect-ratio: 3/4; background: #000; border-radius: var(--radius-md); overflow: hidden; }
+
+/* The capture column spans the whole content width on a desktop, so a 3:4 video
+   at width:100% grew taller than the viewport and the shutter fell below the
+   fold. Cap and centre it above the mobile breakpoint; on a phone the column is
+   already narrow, so the cap never engages and the camera stays full-bleed. */
+@media (min-width: 769px) {
+    .camera-container,
+    .image-preview-container { max-width: 400px; margin-left: auto; margin-right: auto; }
+}
 .camera-video { width: 100%; height: 100%; object-fit: cover; }
+/* A selfie preview is mirrored - that is the convention, and what makes moving
+   your head feel right. The rule that did this lived on .mv-stage video and went
+   with the deleted head-circle scan, so the clip preview was showing an
+   UNMIRRORED stream while the overlay was still flipping the box and dots to
+   match a mirror that was no longer there. The overlay tracked the wrong way.
+   Applied by class, because attendance uses the rear camera and must NOT be
+   mirrored. The capture itself is never mirrored - only the preview. */
+.camera-video.mirrored { transform: scaleX(-1); }
 .camera-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
 .camera-guides { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; pointer-events: none; }
 .guide-circle { width: 60%; aspect-ratio: 1; border: 2px dashed rgba(255,255,255,0.5); border-radius: 50%; }
@@ -331,6 +368,67 @@ a:hover { color: var(--accent-hover); }
 .shutter-inner { width: 100%; height: 100%; background: #fff; border-radius: 50%; transition: background var(--transition-fast); }
 .camera-shutter:active .shutter-inner { background: #e5e7eb; }
 .camera-switch-btn, .camera-flash-btn { width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,0.2); border: none; color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; backdrop-filter: blur(4px); }
+
+/* Recording: a ring that fills over the two seconds, so the wait is legible
+   rather than a button that simply stops responding. */
+.camera-shutter { position: relative; }
+.rec-ring { position: absolute; inset: -6px; width: calc(100% + 12px); height: calc(100% + 12px); transform: rotate(-90deg); pointer-events: none; }
+.rec-ring-track { fill: none; stroke: rgba(255,255,255,0.25); stroke-width: 3; }
+.rec-ring-fill { fill: none; stroke: #ef4444; stroke-width: 3; stroke-linecap: round;
+                 stroke-dasharray: 126; stroke-dashoffset: 126; transition: stroke-dashoffset .08s linear; }
+.camera-shutter.recording .shutter-inner { background: #ef4444; border-radius: 22%; transform: scale(0.62); }
+.shutter-inner { transition: background var(--transition-fast), border-radius var(--transition-fast), transform var(--transition-fast); }
+
+.rec-hint { position: absolute; bottom: 96px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.55); color: #fff; padding: 6px 14px; border-radius: 999px;
+            font-size: 12px; font-weight: 500; backdrop-filter: blur(4px); max-width: 88%;
+            text-align: center; line-height: 1.35; }
+
+/* What the tracking dots mean, under the camera. The swatch colours are set
+   in JS from the same constants the overlay draws with, so they are left
+   unstyled here on purpose - a colour hard-coded in this file could drift from
+   the canvas without anything failing. */
+.clip-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px;
+               font-size: 12px; color: var(--text-muted, #6b7280); }
+.clip-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.clip-dot { width: 9px; height: 9px; border-radius: 50%; flex: none;
+            display: inline-block; }
+
+/* The live "turn left / right / up / down" script during recording. Anchored
+   above the shutter rather than centred over the face, so it never sits on
+   top of the tracking dots it is asking the person to move - the two need to
+   be readable at the same time. */
+.rec-prompt { position: absolute; bottom: 108px; left: 50%; transform: translateX(-50%);
+              display: flex; align-items: center; gap: 10px;
+              background: rgba(0,0,0,0.62); color: #fff; padding: 10px 18px;
+              border-radius: 999px; backdrop-filter: blur(4px);
+              max-width: 90%; box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+              transition: opacity var(--transition-fast); }
+.rec-prompt.hidden { display: none; }
+.rec-prompt-arrow { flex: 0 0 auto; display: flex; color: #fbbf24; }
+.rec-prompt-arrow.hidden { display: none; }
+.rec-prompt-text { font-size: 13px; font-weight: 600; text-align: center; line-height: 1.3; }
+/* The live coaching line and the moment a turn is accepted. Both sit inside
+   the prompt pill so the person is looking at one place, not three. */
+.rec-prompt-live { font-size: 11px; opacity: .85; text-align: center; line-height: 1.3;
+                   margin-top: 2px; min-height: 13px; }
+.rec-prompt.done { background: rgba(22, 163, 74, .92); }
+.rec-prompt.done .rec-prompt-arrow { color: #fff; }
+
+.clip-review { position: relative; width: 100%; aspect-ratio: 3/4; background: #000;
+               border-radius: var(--radius-md); overflow: hidden; }
+@media (min-width: 769px) {
+    .clip-review { max-width: 400px; margin-left: auto; margin-right: auto; }
+}
+
+/* Liveness outcome, shown with the frames the decision was made from. */
+.liveness-banner { border-radius: var(--radius-md); padding: 14px 16px; margin-bottom: 16px; border: 1px solid; }
+.liveness-banner.bad  { background: var(--red-bg, #fef2f2); border-color: #fca5a5; }
+.liveness-banner.warn { background: #fffbeb; border-color: #fcd34d; }
+.liveness-banner.good { background: #ecfdf5; border-color: #6ee7b7; }
+.liveness-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.liveness-frames { display: flex; gap: 6px; overflow-x: auto; margin-top: 12px; padding-bottom: 4px; }
+.liveness-frames img { height: 64px; border-radius: var(--radius-sm); flex: 0 0 auto; }
 
 .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 32px 16px; text-align: center; color: var(--text-muted); }
 .empty-state-text { margin-top: 12px; font-size: 14px; }
@@ -444,7 +542,12 @@ a:hover { color: var(--accent-hover); }
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 2000;
+    /* Above .login-gate (5000), because the gate OPENS modals: the signup face
+       capture is a modal launched from inside the sign-in overlay. At 2000 it
+       rendered behind the gate - the camera started, the browser said "camera
+       in use", and the person saw nothing at all. A modal is the topmost thing
+       on screen by definition, so it outranks the wall it was opened from. */
+    z-index: 6000;
 }
 
 .modal-dialog {
@@ -491,7 +594,9 @@ a:hover { color: var(--accent-hover); }
     position: fixed;
     bottom: 24px;
     right: 24px;
-    z-index: 3000;
+    /* Above modals, so a "could not use that clip" toast is readable while the
+       capture modal is still up. Moved with .modal-overlay to keep that. */
+    z-index: 7000;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -791,7 +896,15 @@ a:hover { color: var(--accent-hover); }
     background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;
 }
 
-.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* minmax(0, 1fr), not 1fr. A grid column's min-width defaults to auto, so it
+   cannot shrink below its content - and the centre <select> carries options
+   like "Khelo India State Centre of Excellence (Weightlifting)". That one long
+   option blew its column out and squeezed "Roll number" down to an unusable
+   sliver, with the modal scrolling sideways. minmax(0,...) lets both columns
+   shrink; the select then truncates instead of dictating the layout. */
+.form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.form-row > .form-group { min-width: 0; }
+.form-row select { max-width: 100%; }
 
 @media (max-width: 768px) {
     .form-row { grid-template-columns: 1fr; }
@@ -810,28 +923,11 @@ a:hover { color: var(--accent-hover); }
 .suggest-row:first-child { border-color: var(--border-hover); }
 
 /* Guided multi-view enrolment capture */
-.mv-stage {
-    position: relative; width: 100%; aspect-ratio: 4/3;
-    background: #000; border-radius: var(--radius-md); overflow: hidden;
-}
-.mv-stage video {
-    width: 100%; height: 100%; object-fit: cover;
-    transform: scaleX(-1);          /* mirror the preview only, never the capture */
-}
 /* The ring is the whole interface: 24 segments around the face, each lighting
    as that angle is covered. Progress is a map of which poses exist, not a
    count of button presses. */
-.mv-ringsvg {
-    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    height: 96%; aspect-ratio: 1; pointer-events: none;
-}
-.mv-seg {
-    fill: rgba(255,255,255,0.28);
-    transition: fill 160ms ease-out;
-}
 /* Lit segments are green AND noticeably brighter, so the state does not rest
    on colour alone. */
-.mv-seg.lit { fill: var(--green); }
 
 /* Darkens everything outside the face circle, which is what makes people
    centre themselves without being told to. */
@@ -1236,3 +1332,30 @@ a:hover { color: var(--accent-hover); }
 .meter-row { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
 .meter-copy { flex: 1; min-width: 220px; }
 .meter-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+
+/* --- Utility classes that were used but never defined ----------------------
+   Present Today and Absent Today were marked .text-green / .text-red on the
+   dashboard and both rendered in default ink, so the colour coding the tiles
+   were designed around simply did not exist. The rest are the same story:
+   referenced from markup, absent from the stylesheet. */
+.text-green { color: var(--green, #16a34a); }
+.text-red   { color: var(--red, #dc2626); }
+.text-blue  { color: var(--accent, #2563eb); }
+.font-medium { font-weight: 500; }
+.w-auto { width: auto; }
+.toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.activity-list { display: flex; flex-direction: column; }
+.activity-list .activity-item:not(:last-child) { border-bottom: 1px solid var(--border-subtle); }
+
+/* .data-table-wrapper is styled but appears in no markup - including the rule
+   that gives the records table horizontal scroll. Applied to the table's own
+   container instead, so a wide register scrolls rather than overflowing. */
+.card-body > .data-table { min-width: 100%; }
+.card-body:has(> .data-table) { overflow-x: auto; }
+
+/* Indeterminate progress: the client cannot know the server's progress, so the
+   bar animates rather than claiming a percentage it has not measured. */
+@keyframes indeterminate {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(300%); }
+}

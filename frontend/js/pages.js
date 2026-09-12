@@ -96,17 +96,12 @@ async function openCentreDetail(id) {
     // openModal sets textContent (XSS-safe, since centre names are user input),
     // so the title must be plain text - the DEMO badge lives in the body instead.
     openModal(c.name, `
-        ${c.is_demo ? `<div class="notice notice-amber">
-            This is a <strong>placeholder record</strong>, not real Khelo India data. Replace it by
-            importing a CSV/JSON of real centres, or delete all demo rows, from the Centres page header.
-        </div>` : ''}
         <div class="detail-grid">
             <div><span class="ck">Code</span><div>${E(c.code)}</div></div>
             <div><span class="ck">Type</span><div>${E(c.centre_type)}</div></div>
             <div><span class="ck">State</span><div>${E(c.state || '-')}</div></div>
             <div><span class="ck">District</span><div>${E(c.district || '-')}</div></div>
             <div><span class="ck">Pincode</span><div>${E(c.pincode || '-')}</div></div>
-            <div><span class="ck">Established</span><div>${E(c.established || '-')}</div></div>
             <div><span class="ck">Capacity</span><div>${c.capacity || '-'}</div></div>
             <div><span class="ck">Geo-fence</span><div>${c.geofence_m} m</div></div>
             <div style="grid-column:1/-1"><span class="ck">Address</span><div>${E(c.address || '-')}</div></div>
@@ -117,6 +112,17 @@ async function openCentreDetail(id) {
             <div><span class="ck">Email</span><div>${E(c.contact_email || '-')}</div></div>
             <div><span class="ck">Coordinates</span><div class="font-mono text-sm">${
                 c.latitude != null ? `${c.latitude}, ${c.longitude}` : 'not set'}</div></div>
+            ${c.coach_join_code ? `
+            <div style="grid-column:1/-1"><span class="ck">Coach registration code</span>
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                    <span class="font-mono" style="font-size:18px;letter-spacing:2px">${E(c.coach_join_code)}</span>
+                    <button class="btn btn-secondary" style="min-height:28px;padding:0 10px;font-size:12px"
+                        data-rotate-code data-centre-id="${c.id}">Issue a new code</button>
+                </div>
+                <div class="text-xs text-muted" style="margin-top:4px">
+                    Give this to a coach so they can register themselves. A super admin
+                    still approves them. Issuing a new code stops the old one working.
+                </div></div>` : ''}
         </div>
 
         <div class="stats-grid" style="margin-top:18px">
@@ -135,14 +141,14 @@ async function openCentreDetail(id) {
         <h3 style="margin:20px 0 8px">Coaches (${c.coach_count})</h3>
         ${roster(c.coaches, 'coaches')}
 
-        <h3 style="margin:20px 0 8px">Staff accounts</h3>
-        ${c.staff_accounts.length ? `<div class="detail-people">${c.staff_accounts.map(u => `
-            <div class="detail-person">
-                <div class="avatar avatar-sm">${E(u.full_name.charAt(0))}</div>
-                <div><div style="font-weight:600;font-size:13px">${E(u.full_name)}</div>
-                <div class="text-xs text-muted font-mono">${E(u.username)} &middot; ${E(u.role)}
-                ${u.is_active ? '' : ' &middot; disabled'}</div></div>
-            </div>`).join('')}</div>` : '<div class="text-sm text-muted">No login accounts linked to this centre.</div>'}
+        ${c.pending_count ? `<div class="notice notice-amber" style="margin-top:20px">
+            <strong>${c.pending_count} registration${c.pending_count === 1 ? '' : 's'}
+            waiting for approval</strong>
+            <div class="text-xs text-muted mt-1">Not counted above and not on any
+            roster until somebody approves them. They used to be listed here as
+            though they already trained at this centre.</div>
+        </div>` : ''}
+
         `,
         `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`);
 }
@@ -259,10 +265,98 @@ async function purgeDemoCentres() {
    Users (super admin)
    ========================================================================== */
 
+/* The approval decision and the on/off switch are two different things and
+   were being shown as one. An account can be approved and disabled, or
+   rejected and still nominally "active" in the old column - which is how a
+   rejected registration could sit on this page looking fine. */
+function userStatusBadge(x) {
+    if (!x.is_active) return '<span class="badge badge-red">disabled</span>';
+    if (x.status === 'pending') return '<span class="badge badge-amber">awaiting approval</span>';
+    if (x.status === 'rejected') return '<span class="badge badge-red">rejected</span>';
+    if (x.status && x.status !== 'active') return `<span class="badge badge-red">${E(x.status)}</span>`;
+    return '<span class="badge badge-green">active</span>';
+}
+
+async function reopenUser(id, name) {
+    if (!window.confirm(
+        `Send ${name} back to the approval queue?\n\nThey stay unable to sign in `
+        + `and their face stays out of the register until somebody decides again.`)) return;
+    try {
+        await api.postForm(`/api/approvals/${id}/reopen`, new FormData());
+        showToast('Back in the queue', `${name} is waiting for a decision again.`, 'success');
+        renderUsersPage();
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+async function decideUser(id, approve, name, role) {
+    // Approving a COACH hands over a whole centre, and on this page it sits in
+    // a table of ordinary rows where the habit is to click through. Typing
+    // breaks that habit; an athlete gets a plain confirm.
+    if (approve && role === 'coach') {
+        const typed = window.prompt(
+            `Approving ${name} as a COACH.\n\nThey will see every athlete at their `
+            + `centre, take attendance, and approve athletes themselves.\n\n`
+            + `Type APPROVE to confirm.`, '');
+        if ((typed || '').trim().toUpperCase() !== 'APPROVE') return;
+    } else if (approve) {
+        if (!window.confirm(`Approve ${name}? They will be able to sign in and be `
+                            + `recognised in a capture.`)) return;
+    } else if (!window.confirm(`Reject ${name}? They stay unable to sign in.`)) {
+        return;
+    }
+    try {
+        const fd = new FormData();
+        fd.append('approve', approve ? 'true' : 'false');
+        await api.postForm(`/api/approvals/${id}`, fd);
+        showToast(approve ? 'Approved' : 'Rejected',
+                  approve ? `${name} can now sign in.` : `${name} was rejected.`,
+                  approve ? 'success' : 'info');
+        renderUsersPage();
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+async function deleteUserAccount(id, name, role) {
+    // Two steps for a coach or an admin, one for an athlete. Deleting an
+    // account does not delete the PERSON or their attendance - only the login -
+    // but a coach account is the thing a whole centre signs in with, so it does
+    // not go on a single click.
+    if (role === 'coach' || role === 'super_admin') {
+        const typed = window.prompt(
+            `Delete the ${role === 'coach' ? 'coach' : 'super admin'} account "${name}".`
+            + `\n\nTheir person record, face and attendance are NOT deleted - only `
+            + `the login. This cannot be undone.\n\nType DELETE to confirm.`, '');
+        if ((typed || '').trim().toUpperCase() !== 'DELETE') return;
+    } else if (!window.confirm(
+            `Delete the account "${name}"?\n\nTheir person record, face and `
+            + `attendance are kept - only the login goes. This cannot be undone.`)) {
+        return;
+    }
+    try {
+        // quiet: this handler shows its own message, and two toasts for one
+        // failure is one too many.
+        await api.delete(`/api/users/${id}`, true);
+        showToast('Account deleted', `${name} can no longer sign in.`, 'success');
+        renderUsersPage();
+    } catch (err) {
+        showToast('Could not delete', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
 async function renderUsersPage() {
     const root = document.getElementById('users-root');
     root.innerHTML = '<div class="empty-state py-12">Loading accounts...</div>';
-    const [u, c] = await Promise.all([api.get('/api/users'), api.get('/api/centres')]);
+    let u, c;
+    try {
+        [u, c] = await Promise.all([api.get('/api/users'), api.get('/api/centres')]);
+    } catch (err) {
+        root.innerHTML = `<div class="empty-state py-12">Could not load accounts. `
+            + `${E((err && err.message) || 'The server did not answer.')}</div>`;
+        return;
+    }
     pageState.centres = c.centres;
     root.innerHTML = `
       <div class="card"><div class="card-body p-0">
@@ -271,17 +365,35 @@ async function renderUsersPage() {
         </tr></thead><tbody>${u.users.map(x => `<tr>
           <td>${E(x.full_name)}</td>
           <td class="font-mono text-sm">${E(x.username)}</td>
-          <td><span class="badge ${x.role === 'super_admin' ? 'badge-blue' : 'badge-green'}">
-            ${x.role === 'super_admin' ? 'Super Admin' : 'Coach'}</span></td>
+          <td><span class="badge ${x.role === 'super_admin' ? 'badge-blue'
+              : x.role === 'athlete' ? 'badge-amber' : 'badge-green'}">
+            ${E(roleShort(x.role))}</span></td>
           <td>${E(x.centre_name || '-')}</td>
           <td class="text-sm text-muted">${E(x.last_login ? x.last_login.replace('T', ' ') : 'never')}</td>
-          <td>${x.is_active ? '<span class="badge badge-green">active</span>'
-                            : '<span class="badge badge-red">disabled</span>'}</td>
+          <td>${userStatusBadge(x)}</td>
           <td style="white-space:nowrap">
+            ${x.status === 'pending' ? `
+            <button class="btn btn-primary" style="min-height:30px;padding:0 10px;font-size:12px"
+              data-decide-user="approve" data-user-id="${x.id}" data-user-role="${E(x.role)}"
+              data-username="${E(x.full_name || x.username)}">Approve</button>
+            <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
+              data-decide-user="reject" data-user-id="${x.id}" data-user-role="${E(x.role)}"
+              data-username="${E(x.full_name || x.username)}">Reject</button>` : ''}
+            ${x.status === 'rejected' ? `
+            <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
+              data-reopen-user data-user-id="${x.id}" data-username="${E(x.full_name || x.username)}"
+              >Reconsider</button>` : ''}
             <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
               onclick="toggleUser(${x.id}, ${!x.is_active})">${x.is_active ? 'Disable' : 'Enable'}</button>
+            <!-- dataset, not an interpolated handler. E() is HTML escaping,
+                 and this was a JavaScript string context: the HTML parser
+                 turns &#39; back into a quote before the JS is parsed, so the
+                 escape was not merely weak, it was the wrong kind. -->
             <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
-              onclick="resetUserPassword(${x.id}, '${E(x.username)}')">Reset password</button>
+              data-reset-password data-user-id="${x.id}" data-username="${E(x.username)}">Reset password</button>
+            <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px;color:#dc2626"
+              data-delete-user data-user-id="${x.id}" data-user-role="${E(x.role)}"
+              data-username="${E(x.full_name || x.username)}">Delete</button>
           </td></tr>`).join('')}</tbody></table>
       </div></div>`;
 }
@@ -337,7 +449,19 @@ async function submitUser() {
 async function toggleUser(id, active) {
     const fd = new FormData();
     fd.append('active', active ? 'true' : 'false');
-    await fetch(`/api/users/${id}/active`, { method: 'PATCH', body: fd });
+    try {
+        const res = await fetch(`/api/users/${id}/active`, { method: 'PATCH', body: fd });
+        if (!res.ok) {
+            let msg = 'The server refused that change';
+            try { msg = (await res.json()).detail || msg; } catch { /* not JSON */ }
+            showToast('Not changed', msg, 'error');
+            return;
+        }
+        showToast(active ? 'Account enabled' : 'Account disabled', '', 'success');
+    } catch {
+        showToast('Not changed', 'Could not reach the server', 'error');
+        return;
+    }
     renderUsersPage();
 }
 
@@ -350,4 +474,54 @@ async function resetUserPassword(id, username) {
         await api.postForm(`/api/users/${id}/password`, fd);
         showToast('Password reset', `${username} must sign in again`, 'success');
     } catch { /* surfaced */ }
+}
+
+// Delegated, so the users table can be re-rendered freely and no username is
+// ever interpolated into a handler string. See the note on the button.
+document.addEventListener('click', (e) => {
+    if (!e.target.closest) return;
+    const reset = e.target.closest('[data-reset-password]');
+    if (reset) {
+        e.preventDefault();
+        return resetUserPassword(reset.dataset.userId, reset.dataset.username || '');
+    }
+    const del = e.target.closest('[data-delete-user]');
+    if (del) {
+        e.preventDefault();
+        return deleteUserAccount(del.dataset.userId, del.dataset.username || '',
+                                 del.dataset.userRole || 'athlete');
+    }
+
+    const decide = e.target.closest('[data-decide-user]');
+    if (decide) {
+        e.preventDefault();
+        return decideUser(decide.dataset.userId,
+                          decide.dataset.decideUser === 'approve',
+                          decide.dataset.username || '',
+                          decide.dataset.userRole || 'athlete');
+    }
+    const reopen = e.target.closest('[data-reopen-user]');
+    if (reopen) {
+        e.preventDefault();
+        return reopenUser(reopen.dataset.userId, reopen.dataset.username || '');
+    }
+    const rotate = e.target.closest('[data-rotate-code]');
+    if (rotate) {
+        e.preventDefault();
+        return rotateJoinCode(rotate.dataset.centreId);
+    }
+});
+
+async function rotateJoinCode(centreId) {
+    if (!window.confirm(
+        'Issue a new coach registration code?\n\nThe current one stops working '
+        + 'straight away, so anyone part-way through registering will have to '
+        + 'start again with the new code.')) return;
+    try {
+        const r = await api.postForm(`/api/centres/${centreId}/join-code`, new FormData());
+        showToast('New code issued', r.coach_join_code, 'success');
+        openCentreDetail(centreId);
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
 }
