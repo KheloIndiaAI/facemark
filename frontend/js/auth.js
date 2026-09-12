@@ -227,8 +227,21 @@ async function openSignup(role = 'athlete') {
         const r = await fetch('/api/signup/centres');
         const j = await r.json();
         const sel = document.getElementById('su-centre');
-        if (sel) sel.innerHTML = (j.centres || [])
+        if (!sel) return;
+        const list = (r.ok && j.centres) ? j.centres : [];
+        sel.innerHTML = list
             .map(c => `<option value="${c.id}">${Charts.esc(c.name)}</option>`).join('');
+        // AN EMPTY DROPDOWN USED TO SAY NOTHING. Neither a failed request nor a
+        // genuinely empty list was reported, so the centre picker simply had no
+        // options; pressing Continue then posted an empty centre_id and the
+        // only thing anyone saw was "Could not create the account" - a message
+        // about the account, for a problem with the list above it.
+        if (!list.length) {
+            suMsg(r.ok
+                ? 'No centres are available to register at yet.'
+                : ((r.status < 500 && j && j.detail)
+                    || 'Could not load the centres. Try again later.'));
+        }
     } catch { suMsg('Could not load centres. Try again later.'); }
 }
 
@@ -261,12 +274,55 @@ async function suStart() {
     } catch { suMsg('Could not reach the server'); }
 }
 
+/* Something went wrong FETCHING the coaches, which is not the same as there
+   being none. Shown with a way to try again, because a reload would lose the
+   half-finished signup this page is holding. */
+function suCoachError(host, text, retry) {
+    host.innerHTML = '';
+    const p = document.createElement('div');
+    p.className = 'empty-state';
+    p.textContent = text;
+    host.appendChild(p);
+    if (retry) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn btn-secondary';
+        b.style.width = '100%';
+        b.textContent = 'Try again';
+        b.addEventListener('click', () => suLoadCoaches());
+        host.appendChild(b);
+    }
+}
+
 async function suLoadCoaches() {
     const host = document.getElementById('su-coaches');
     if (!host) return;
-    const r = await fetch(`/api/signup/coaches?token=${encodeURIComponent(suState.token)}`
-                          + `&centre_id=${encodeURIComponent(suState.centre)}`);
-    const j = await r.json();
+    let r, j;
+    try {
+        r = await fetch(`/api/signup/coaches?token=${encodeURIComponent(suState.token)}`
+                        + `&centre_id=${encodeURIComponent(suState.centre)}`);
+        j = await r.json();
+    } catch {
+        // Nothing was thrown here before, so a dropped request left this step
+        // blank with an unhandled rejection in the console and no way forward.
+        return suCoachError(host, 'Could not reach the server.', true);
+    }
+    // A FAILED REQUEST IS NOT AN EMPTY CENTRE. `j.coaches` is undefined on any
+    // error body, so a 401 from an expired token used to fall straight through
+    // to the empty-list branch below - which now offers to continue without a
+    // coach, and would have sent somebody whose registration had already
+    // lapsed on to a camera that could only refuse them, having first told
+    // them something untrue about their centre.
+    if (!r.ok) {
+        // A 4xx detail here is written for the person reading it ("This signup
+        // has expired. Start again."). A 5xx detail is "Internal Server Error",
+        // which explains nothing and reads as though they broke something.
+        const human = (r.status < 500 && j && j.detail)
+            ? j.detail
+            : 'Could not load the coaches at that centre.';
+        // 401 means the signup itself has lapsed; retrying cannot mend it.
+        return suCoachError(host, human, r.status !== 401);
+    }
     const list = j.coaches || [];
     if (!list.length) {
         // A DEAD END UNTIL NOW. The account is created by the step before this
@@ -309,8 +365,20 @@ async function suPickCoach(coachId) {
     const fd = new FormData();
     fd.append('token', suState.token);
     fd.append('coach_id', coachId);
-    const r = await fetch('/api/signup/coach', { method: 'POST', body: fd });
-    if (!r.ok) return suMsg('Could not select that coach');
+    let r, j = null;
+    try {
+        r = await fetch('/api/signup/coach', { method: 'POST', body: fd });
+        j = await r.json();
+    } catch {
+        return suMsg('Could not reach the server. Try again.');
+    }
+    // The server's reason, not a replacement for it. "Could not select that
+    // coach" was shown even when the actual answer was that the registration
+    // had expired - so somebody kept pressing coach after coach, each one
+    // failing for a reason they were never told.
+    if (!r.ok) {
+        return suMsg((r.status < 500 && j && j.detail) || 'Could not select that coach');
+    }
     await suAfterCoach();
 }
 
