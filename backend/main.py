@@ -1158,6 +1158,50 @@ def _pose_label(face, requested: str) -> str:
     return "centre"
 
 
+def _pose_diversity(frames: list, detector, recognizer) -> dict:
+    """Did the head-turning during THIS clip actually happen?
+
+    enroll_multiview answers this per captured shot, by embedding each one and
+    rejecting a frame that lands on top of a pose already seen - so "how many
+    distinct views" is a question about the embeddings, not a yaw estimate,
+    which is unmeasurable the moment pose_reliable is false. This is that same
+    check run once over the frames a video clip already produced, for the two
+    routes that enrol from ONE clip rather than several deliberate shots -
+    register-video and signup/face - which had no way to tell a person "yes,
+    that was seen" or "no, you barely turned" until now. Read-only: nothing
+    here writes a template or a photo, both of which the caller already does.
+    """
+    seen_poses: dict = {}
+    for frame in frames:
+        faces = detector.detect(frame, "accurate")
+        if not faces:
+            continue
+        face = max(faces, key=lambda f: f.width * f.height)
+        if min(face.width, face.height) < config.MULTIVIEW_MIN_FACE_PX:
+            continue
+        emb = recognizer.embed_faces(frame, [face])
+        lead = next(iter(emb.values()))
+        if any(float(lead[0] @ prev) >= config.MULTIVIEW_DUPLICATE_SIM
+               for prev in seen_poses.values()):
+            continue
+        seen_poses[_pose_label(face, "")] = lead[0]
+
+    poses = sorted(seen_poses)
+    enough = len(poses) >= config.MULTIVIEW_MIN_POSES
+    return {
+        "poses_captured": poses,
+        "sufficient": enough,
+        "message": (
+            f"Captured {len(poses)} view(s) of the face: {', '.join(poses)}."
+            if enough else
+            (f"Only {len(poses)} distinct view of the face was captured."
+             if poses else
+             "Only one view of the face was captured.")
+            + " Record again and turn the head further during the clip."
+        ),
+    }
+
+
 def _landmarks_payload(f) -> list:
     """YuNet's five landmarks as [[x, y], ...], for the live overlay.
 
@@ -1547,6 +1591,21 @@ async def register_student_from_video(
         },
         "templates": len(templates) + extra.get("templates_added", 0),
         "poses_captured": extra.get("poses_captured", []),
+        # enroll_multiview already answers "did the head-turning happen" for
+        # every frame beyond the first - see its own docstring. Surfaced here
+        # too because the frontend had been showing "Registered" as an
+        # unqualified success regardless of what this said, silently dropping
+        # the one case - a still face, or extra_uploads empty because the clip
+        # was too short to have a second frame - where the record actually IS
+        # only ever going to be recognised from a single angle.
+        "pose_check": {
+            "sufficient": extra.get("sufficient", False),
+            "message": extra.get("message") or (
+                "Only one view of the face was captured - the clip did not "
+                "produce a second usable frame. Register again and turn the "
+                "head further during the clip."
+            ),
+        },
     }
 
 
@@ -2672,9 +2731,18 @@ async def signup_face(
         conn.execute("UPDATE students SET photo_path = ? WHERE id = ?",
                      (photo_name, student_id))
 
+    # Whether the head-turning the intro asked for actually happened. Every
+    # frame up to here was added as a template regardless - one clip is what
+    # this route has - so nothing about the applicant's account depends on
+    # this answer. It exists only so the applicant is told the truth instead
+    # of "Sent to your coach" standing in for both a good capture and a face
+    # held still for two seconds, which looked identical until now.
+    pose_check = _pose_diversity(result.frames, detector, get_recognizer())
+
     return {"ok": True, "templates": added,
             "liveness": result.to_dict(),
             "role": applicant_role,
+            "pose_check": pose_check,
             "message": ("Sent to a super admin for approval."
                         if applicant_role == "coach"
                         else "Sent to your coach for approval.")}

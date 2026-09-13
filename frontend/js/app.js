@@ -1789,11 +1789,28 @@ async function enrolSubmit(file, ui) {
         }
         const n = r.templates || 1;
         const poses = (r.poses_captured || []).join(', ');
+        const pc = r.pose_check || {};
         ui.close();
-        showToast('Registered',
-                  `${regDetails.name} enrolled with ${n} template${n === 1 ? '' : 's'}`
-                  + (poses ? ` (${poses})` : ''),
-                  'success');
+        // THIS USED TO BE SILENT ON THE CASE THAT MATTERS. "Registered" fired
+        // unqualified whether or not the head-turning the intro asked for ever
+        // happened - a still face for two seconds and a full turn through four
+        // angles produced the identical toast, because pose_check.sufficient
+        // was computed by the server and then never read. The distinction is
+        // exactly the one a coach needs before walking away: one template from
+        // one angle is a person who may not be recognised from across a room
+        // tomorrow, and the only chance to redo it is now, not after the first
+        // missed attendance.
+        if (pc.sufficient === false) {
+            showToast('Registered - but check the recording',
+                      `${regDetails.name} enrolled with ${n} template${n === 1 ? '' : 's'}. `
+                      + (pc.message || 'Only one view of the face was captured.'),
+                      'info');
+        } else {
+            showToast('Registered',
+                      `${regDetails.name} enrolled with ${n} template${n === 1 ? '' : 's'}`
+                      + (poses ? ` (${poses})` : ''),
+                      'success');
+        }
         if (state.currentRoute === '/students') renderStudents();
     } catch (err) {
         // A duplicate NSRS ID is a 409 the person can act on, so it must not
@@ -3618,7 +3635,20 @@ async function openClipEnrol(studentId, studentName) {
                     return;
                 }
                 const poses = (r.poses_captured || []).join(', ') || 'one view';
-                showToast('Face registered', `${r.templates_added} template(s) from ${poses}`, 'success');
+                // r.sufficient/r.message come straight from enroll_multiview,
+                // which already knows whether the turning happened - it was
+                // just never read here. "from one view" used to sit inside an
+                // unqualified success toast, indistinguishable from a real
+                // multi-angle capture unless somebody happened to read the
+                // word "one".
+                if (r.sufficient === false) {
+                    showToast('Registered - but check the recording',
+                              `${r.templates_added} template(s) from ${poses}. `
+                              + (r.message || 'Only one view of the face was captured.'),
+                              'info');
+                } else {
+                    showToast('Face registered', `${r.templates_added} template(s) from ${poses}`, 'success');
+                }
                 ui.close();
                 renderStudents();
             } catch {

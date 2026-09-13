@@ -419,6 +419,25 @@ function suFace() {
                     return;
                 }
                 ui.close();
+                // j.pose_check says whether the turning the intro asked for
+                // was actually seen - see backend._pose_diversity. Without
+                // this, "Sent to your coach" was the whole story whether the
+                // clip showed four angles or one face held still for two
+                // seconds: nothing distinguished them, and by the time a poor
+                // capture caused a recognition problem, nobody would think to
+                // trace it back to this screen.
+                const pc = j.pose_check || {};
+                if (pc.sufficient === false) {
+                    const body = document.getElementById('su-done-body');
+                    if (body) {
+                        body.innerHTML = Charts.esc(body.textContent) + '<br><br>'
+                            + '<strong>' + Charts.esc(pc.message
+                                || 'Only one view of your face was captured.')
+                            + '</strong> Your coach can still approve this, but '
+                            + 'you may be recognised less reliably until you '
+                            + 're-record with more head movement.';
+                    }
+                }
                 suShow(3);
             } catch {
                 ui.status('Could not reach the server');
