@@ -63,7 +63,11 @@ def login(request: Request, response: Response,
 
 @router.post("/auth/logout")
 def logout(request: Request, response: Response):
-    token = request.cookies.get("facemark_token") or ""
+    # The SAME resolution every authenticated route uses - Authorization
+    # header first, cookie second. Reading only the cookie here meant a caller
+    # signed in with a bearer token got {"ok": true} and kept a live session:
+    # the response claimed to have revoked it while nothing was deleted.
+    token = auth._token_from_request(request)
     if token:
         auth.logout(token)
     response.delete_cookie("facemark_token")
