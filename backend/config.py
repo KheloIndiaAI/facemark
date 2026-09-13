@@ -352,7 +352,31 @@ SCREEN_MIN_FACE_PX = 60          # below this the spectrum is too coarse to judg
 LIVENESS_ENABLED = True
 LIVENESS_SAMPLE_FRAMES = 18      # was 12; more samples for the longer clip below
 LIVENESS_MIN_POINTS = 25         # fewer trackable corners than this cannot judge
-LIVENESS_MIN_MOTION = 0.010      # max displacement in face-widths, across the clip
+# FALSE REJECTION, 2026-09-13. A real athlete recorded a Mark Attendance clip,
+# moved the phone "a little", and was told "This looks like a photograph or a
+# screen" - depth 0.0019, motion 0.0296, 163 points, 360px face. Every other
+# signal was fine; the clip simply had too little movement to carry a
+# depth signal, and 0.010 let it through to the depth check anyway.
+#
+# Depth is not motion-independent: parallax is the residual a homography
+# leaves behind, and with no baseline there is nothing for a homography to
+# fail to explain, flat subject or round one. The matched corpus this file's
+# thresholds come from (270 clips, live/matched) never actually tested that -
+# re-measured directly (scripts/calibrate_liveness.py output, kept in this
+# session's notes): the lowest motion in the ENTIRE corpus, real or spoof, is
+# 0.0845. Nothing between 0.010 and 0.0845 was ever a face OR a photograph in
+# what LIVENESS_MIN_DEPTH was calibrated against - it is a gap the guard was
+# supposed to close and did not. The reported clip's 0.0296 sits in exactly
+# that gap: not proven flat, just never measured.
+#
+# 0.05 sits below every corpus clip (so it changes the verdict on none of the
+# 270 - confirmed by re-running them) while excluding the reported failure and
+# the whole untested band around it. A clip this catches is now told to move
+# more, not accused of being a screen - and that costs nothing on the spoof
+# side: FB_MAX_PX and LIVENESS_MIN_DEPTH still apply unchanged to whatever
+# clears this floor, so a photograph waved for longer is exactly as likely to
+# be caught as it was before.
+LIVENESS_MIN_MOTION = 0.05       # max displacement in face-widths, across the clip
 LIVENESS_MIN_DEPTH = 0.0025      # measured - see calibration note above
 # How far a point may drift on a there-and-back track before it is discarded.
 # This is the whole difference between measuring depth and measuring tracking
