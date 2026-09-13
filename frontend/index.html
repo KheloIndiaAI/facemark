@@ -395,6 +395,21 @@
 </template>
 
 <template id="tpl-register">
+    <!-- A coach is pinned server-side to their own centre, so this selector is
+         only meaningful for a super admin - who has none, and without it could
+         not open a register at all. See #mark-centre for the same problem on
+         Mark Attendance; this mirrors it. -->
+    <div class="card mb-6" data-role-only="super_admin">
+        <div class="card-body" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+            <div>
+                <div class="card-title">Register for centre</div>
+                <div class="text-sm text-muted">Which centre&rsquo;s register today&rsquo;s clip and roster belong to.</div>
+            </div>
+            <select id="reg-centre" class="form-input" style="max-width:300px;margin-left:auto">
+                <option value="">Select a centre</option>
+            </select>
+        </div>
+    </div>
     <!-- Shown only when somebody is waiting. A permanently-empty card trains
          people to ignore the space it occupies. -->
     <div class="card" id="reg-approvals-card" style="display:none;margin-bottom:16px">

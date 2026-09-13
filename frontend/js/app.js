@@ -1880,6 +1880,9 @@ async function initRegisterPage() {
     if (rosterBtn) rosterBtn.addEventListener('click', openRosterEditor);
     const rosterBtn2 = document.getElementById('reg-roster-btn-empty');
     if (rosterBtn2) rosterBtn2.addEventListener('click', openRosterEditor);
+    // Centre first, then open: for a super admin regOpen() reads #reg-centre,
+    // which does not exist to read yet until this has run.
+    await populateRegisterCentres();
     await Promise.all([regOpen(), regLoadApprovals()]);
 }
 
@@ -2143,16 +2146,52 @@ async function regDecide(userId, approve, name, role = 'athlete', merge = false)
     }
 }
 
+/* A super admin has no centre_id of their own - they are an operator, not
+ * attached to one - so #reg-centre (see tpl-register) is the only way they
+ * can say which one today's register is for. Without this, regOpen() sent no
+ * centre_id at all, the server correctly refused with "A centre is required
+ * to open a register", and the roster panel was left on "Loading..."
+ * permanently: nothing after that ever set regSession, so regLoad() - the
+ * only thing that would replace that text - was never reached. */
+async function populateRegisterCentres() {
+    const sel = document.getElementById('reg-centre');
+    if (!sel || sel.options.length > 1) return;
+    try {
+        const data = await api.get('/api/centres');
+        data.centres.forEach(c => sel.add(new Option(`${c.name} (${c.code})`, c.id)));
+        // Same key Mark Attendance remembers under: one super admin is almost
+        // always working one centre at a time, and there is no reason picking
+        // it twice should be required on two different pages in the same visit.
+        const remembered = localStorage.getItem('facemark.lastCentre');
+        if (remembered && data.centres.some(c => String(c.id) === remembered)) {
+            sel.value = remembered;
+        }
+        sel.addEventListener('change', () => {
+            if (sel.value) localStorage.setItem('facemark.lastCentre', sel.value);
+            regOpen();
+        });
+    } catch { /* the selector stays empty; regOpen() will report why */ }
+}
+
 async function regOpen() {
     try {
         const fd = new FormData();
-        if (session.user && session.user.centre_id) fd.append('centre_id', session.user.centre_id);
+        if (session.user && session.user.centre_id) {
+            fd.append('centre_id', session.user.centre_id);
+        } else {
+            const cs = document.getElementById('reg-centre');
+            if (cs && cs.value) fd.append('centre_id', cs.value);
+        }
         const r = await api.postForm('/api/sessions', fd);
         regSession = r.session;
         await regLoad();
     } catch (err) {
         const meta = document.getElementById('reg-session-meta');
         if (meta) meta.textContent = (err && err.message) || 'Could not open a register.';
+        // regLoad() never ran, so nothing else clears "Loading..." - which is
+        // exactly the stuck state this whole function exists to avoid.
+        const roster = document.getElementById('reg-roster');
+        if (roster) roster.innerHTML = '<div class="empty-state">Choose a centre above to open its register.</div>';
     }
 }
 
