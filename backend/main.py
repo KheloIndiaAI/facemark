@@ -1277,6 +1277,20 @@ async def enroll_pose_check(
     faces = get_detector().detect(img, config.CLIP_DETECTION_MODE)
     if not faces:
         return {"ok": False, "reason": "no_face", "message": "No face detected"}
+    # GROUP CAPTURE IS A ROOM. Every rule below is for one person at arm's
+    # length - exactly one face, big enough, level, well posed - and the group
+    # capture camera used them too, so pointing it at a squad answered "2 faces
+    # in frame - only the athlete should be visible" and the record button
+    # never switched on. For a group the only question before recording is
+    # whether anyone is in shot; the capture route itself still refuses a still,
+    # judges liveness on any face close enough, and the coach signs the register.
+    if step == "group":
+        big = max(faces, key=lambda x: x.width * x.height)
+        return {"ok": True, "reason": None, "faces": len(faces),
+                "message": f"{len(faces)} face{'s' if len(faces) != 1 else ''} in frame",
+                "box": [round(v, 1) for v in big.box],
+                "landmarks": _landmarks_payload(big),
+                "frame": [img.shape[1], img.shape[0]]}
     if len(faces) > 1:
         return {"ok": False, "reason": "many_faces",
                 "message": f"{len(faces)} faces in frame - only the athlete should be visible"}

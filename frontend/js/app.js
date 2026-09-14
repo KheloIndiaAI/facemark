@@ -2356,6 +2356,10 @@ function regCapture() {
         title: 'Capture the group',
         // No turn prompts: this is a room, not one person being enrolled.
         guided: false,
+        // Ready when anyone is in shot, not "exactly one face" - and the rear
+        // camera, since the coach is pointing the phone at the group.
+        framing: 'group',
+        facingMode: 'environment',
         intro: 'Point the camera at the group and record a few seconds, moving the '
              + 'phone slowly from side to side. Capture again for anyone missed.',
         onClip: async (file, ui) => {
@@ -3017,7 +3021,9 @@ async function openClipCapture(opts) {
     if (dotGood) dotGood.style.background = POSE_ACCENT_GOOD;
 
     const cam = new CameraCapture(video, null, null);
-    cam.facingMode = 'user';                 // enrolment photographs the holder
+    // Enrolment and self-marking photograph the holder; a group capture points
+    // at a room, which is the rear camera (as on the Mark Attendance page).
+    cam.facingMode = opts.facingMode || 'user';
     if (await cam.start() === false) { closeModal(); return; }
 
     const state = { busy: false, timer: null, box: null, landmarks: null, good: false,
@@ -3251,7 +3257,9 @@ async function openClipCapture(opts) {
             if (!blob) return;
             const fd = new FormData();
             fd.append('frame', blob, 'f.jpg');
-            fd.append('step', 'centre');
+            // 'group' only asks whether anyone is in shot - see pose-check.
+            // Everything else keeps the one-person framing rules.
+            fd.append('step', opts.framing === 'group' ? 'group' : 'centre');
             const r = await pollPose(fd);
             if (!state.alive) return;
 
@@ -3271,7 +3279,10 @@ async function openClipCapture(opts) {
             // flickering good frame cannot open the shutter on its own.
             state.good = state.goodStreak >= GOOD_STREAK_TO_ARM;
             hint.textContent = state.good
-                ? (state.recording ? 'Recording - keep moving gently' : 'Face found - tap to record')
+                ? (state.recording ? 'Recording - keep moving gently'
+                   : opts.framing === 'group' && r.faces
+                       ? `${r.faces} face${r.faces === 1 ? '' : 's'} found - tap to record`
+                       : 'Face found - tap to record')
                 : rawGood
                     ? 'Hold steady…'
                     : (r.message || 'No face detected');
