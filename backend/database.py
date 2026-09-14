@@ -734,6 +734,34 @@ def get_student(student_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def pending_application_for(student_id: int) -> bool:
+    """Is this person's own account still an unapproved self-registration?
+
+    Templates added to a student who is in this state affect something more
+    than a gallery: sessions.HAS_VERIFIED_FACE reads "has a template" as
+    "completed the guided recording, verified on the server" and uses exactly
+    that to decide who is even shown to an approver, and the frontend uses the
+    same count to decide whether Approve is offered at all. That equivalence
+    holds only because /api/signup/face is the sole route that is allowed to
+    write a self-registered applicant's first template, and it never does so
+    without a passing liveness AND pose check first.
+
+    /api/students/{id}/photos and /api/students/{id}/enroll-multiview are the
+    other two routes that can add templates to a student, and neither runs
+    that check - they exist for a COACH to add a view of somebody already on
+    the roster, one still photo at a time, with no liveness or head-movement
+    requirement at all. Called for a student who is still mid-application,
+    either one would let a bystander's photo do the one thing only the
+    applicant's own verified recording is supposed to be able to do: get them
+    in front of an approver. This is the guard that keeps that from working.
+    """
+    with connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM users WHERE student_id = ? AND status = 'pending'",
+            (student_id,),
+        ).fetchone() is not None
+
+
 def get_students(student_ids) -> Dict[int, dict]:
     """Several students in ONE query, keyed by id.
 

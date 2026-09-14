@@ -2267,14 +2267,24 @@ const CLIP_MS_PLAIN = 3000;
 // without that flow's ring visualisation. Recording stops once every step has
 // been measured complete, however long that actually took.
 //
-// GUIDED_CAPTURE_MAX_MS is a backstop, not a target: if pose measurement never
-// works at all (bad light, an unreliable estimate for this face, a network
-// hiccup) the loop below moves on from each stuck step after its own timeout
-// rather than trapping someone, and this is the outer ceiling in case that
-// safety valve itself fails - normal use should never come close to it. The
-// server's own liveness check on the finished clip remains the real gate
-// either way; this sequence exists to elicit good motion, not to replace it.
-const GUIDED_CAPTURE_MAX_MS = 45000;
+// A REQUIRED step (see GUIDED_REQUIRED) never gives up on its own: the old
+// behaviour moved on after one timeout and only found out the turn was
+// missing once the whole clip had already been recorded, discarded it, and
+// made the person start over from "hold still". Asking again, on the SAME
+// recording, is strictly better - so a required step keeps re-prompting
+// until it is measured or the recording itself is about to run out. An
+// OPTIONAL step (up/down) still gets one timed attempt and moves on, because
+// the server does not require them and stalling on one would only make a
+// successful attempt take longer for no gain.
+//
+// GUIDED_CAPTURE_MAX_MS is that outer backstop, not a target: if pose
+// measurement never works at all (bad light, an unreliable estimate for this
+// face, a network hiccup) this is the ceiling a required step's retries are
+// budgeted against, so normal use should never come close to it and a truly
+// stuck attempt still ends rather than recording forever. The server's own
+// liveness check on the finished clip remains the real gate either way; this
+// sequence exists to elicit good motion, not to replace it.
+const GUIDED_CAPTURE_MAX_MS = 90000;
 
 // Turns that must be CONFIRMED during the guided capture before the clip is
 // even uploaded. Mirrors the server's ENROL_REQUIRED_POSES (config.py), which
@@ -2791,8 +2801,15 @@ async function openClipCapture(opts) {
      *  pre-recording framing loop (which is stopped for the duration - see
      *  the shutter handler). Resolves the measured response on success, or
      *  null if `timeoutMs` passes first - the caller decides what "gave up"
-     *  means, this function only reports which one happened. */
-    async function waitForStep(stepKey, baseYaw, basePitch, timeoutMs, pollMs) {
+     *  means, this function only reports which one happened.
+     *
+     *  `failFlag`, if passed, is set to `{ fatal: true }` when the reason for
+     *  giving up was an unrecoverable poll failure (an expired token, a
+     *  fatal HTTP status) rather than a plain timeout - a required step's
+     *  retry loop needs that distinction so it stops asking someone to keep
+     *  turning their head at a camera that has already given up talking to
+     *  the server, instead of spinning silently until the outer deadline. */
+    async function waitForStep(stepKey, baseYaw, basePitch, timeoutMs, pollMs, failFlag) {
         const start = Date.now();
         while (!state.closed && Date.now() - start < timeoutMs) {
             // The WHOLE poll attempt is one try/catch, not just the network
@@ -2825,7 +2842,12 @@ async function openClipCapture(opts) {
                         }
                     }
                 }
-            } catch (err) { if (guidedPollFailed(err)) return null; }
+            } catch (err) {
+                if (guidedPollFailed(err)) {
+                    if (failFlag) failFlag.fatal = true;
+                    return null;
+                }
+            }
             await new Promise(res => setTimeout(res, pollMs));
         }
         return null;
@@ -2888,15 +2910,52 @@ async function openClipCapture(opts) {
         if (baseYaw === null) { baseYaw = 0; basePitch = 0; }
         setRing(0.2);
 
+        // A required step's retries are budgeted against the SAME clock the
+        // recording itself is capped by (GUIDED_CAPTURE_MAX_MS), minus room
+        // for whatever optional steps and the final flash/hold still need -
+        // otherwise a person could finally get the turn right a moment after
+        // cam.recordClip had already stopped the tape, and the server would
+        // reject a clip that a "Got it" had just told them was fine.
+        const OPTIONAL_BUDGET_MS = STEP_TIMEOUT_MS * (GUIDED_DIRECTIONS.length - GUIDED_REQUIRED.length);
+        const requiredDeadline = t0 + GUIDED_CAPTURE_MAX_MS - OPTIONAL_BUDGET_MS - MIN_TOTAL_MS;
+
         const measured = [];
         for (let i = 0; i < GUIDED_DIRECTIONS.length && !state.closed; i++) {
             const step = GUIDED_DIRECTIONS[i];
+            const required = GUIDED_REQUIRED.includes(step.key);
             setPromptStep(step);
-            const got = await waitForStep(step.key, baseYaw, basePitch,
-                                          STEP_TIMEOUT_MS, POLL_MS);
-            // Still advances either way - see GUIDED_CAPTURE_MAX_MS's comment,
-            // a stuck step must not become a stuck recording - but the two
-            // outcomes no longer look the same to the person doing it.
+
+            let got = null;
+            if (required) {
+                // Keep the recording rolling and keep asking for exactly this
+                // turn - see the comment on GUIDED_CAPTURE_MAX_MS. Moving on
+                // and finding out only after the whole clip was thrown away
+                // is a worse experience than staying here until it happens.
+                const failFlag = { fatal: false };
+                while (!state.closed && !got && !failFlag.fatal && Date.now() < requiredDeadline) {
+                    got = await waitForStep(step.key, baseYaw, basePitch,
+                                            STEP_TIMEOUT_MS, POLL_MS, failFlag);
+                    if (!got && !failFlag.fatal && !state.closed) {
+                        // A held pause, not just a live-text update - the poll
+                        // that resumes immediately after would otherwise stamp
+                        // its own per-frame message ("turn further", "hold
+                        // still") over this within one 200ms tick, and the
+                        // reminder that a whole timeout just passed with no
+                        // turn detected would never actually be seen.
+                        setPromptLive('Still waiting - please follow the arrow');
+                        if (navigator.vibrate) navigator.vibrate([15, 30, 15, 30, 15]);
+                        await new Promise(res => setTimeout(res, 600));
+                    }
+                }
+            } else {
+                got = await waitForStep(step.key, baseYaw, basePitch, STEP_TIMEOUT_MS, POLL_MS);
+            }
+
+            // Still advances either way - an optional step's single timeout,
+            // or a required step's deadline/fatal give-up (see above) - but
+            // the two outcomes no longer look the same to the person doing
+            // it, and a required give-up here is the rare backstop case, not
+            // the normal path.
             if (got) {
                 measured.push(step.key);
                 await flashStepDone('Got it');

@@ -379,6 +379,15 @@ async def add_student_photo(
     # Without it a coach can attach templates to another centre's athlete,
     # which both alters that athlete's gallery and reveals they exist.
     auth.owns_centre(user, student.get("centre_id"))
+    # See database.pending_application_for: a still-pending self-registration
+    # is not "an existing student" in the sense this route is for, and a
+    # single photo with no liveness or pose check must not be able to do what
+    # only the applicant's own verified recording is supposed to do.
+    if database.pending_application_for(student_id):
+        raise HTTPException(
+            409, "This person's own application has not been approved yet - "
+                 "a photo added here cannot substitute for their own guided "
+                 "face recording. Approve or reject the application first.")
     if source not in ("id", "live"):
         source = "live"
 
@@ -1251,6 +1260,15 @@ async def enroll_multiview(
     if not student:
         raise HTTPException(404, "Athlete not found")
     auth.owns_centre(user, student.get("centre_id"))
+    # See database.pending_application_for and the same guard in
+    # add_student_photo just above it - this route has the identical gap:
+    # frames accepted here need only a detectable face, never liveness or a
+    # confirmed head turn.
+    if database.pending_application_for(student_id):
+        raise HTTPException(
+            409, "This person's own application has not been approved yet - "
+                 "frames added here cannot substitute for their own guided "
+                 "face recording. Approve or reject the application first.")
 
     detector, recognizer = get_detector(), get_recognizer()
     accepted, rejected = [], []
@@ -2549,6 +2567,14 @@ async def assign_face_to_student(
     if not student:
         raise HTTPException(404, "Athlete not found")
     auth.owns_centre(user, student.get("centre_id"))
+    # See database.pending_application_for. A still-pending self-registration
+    # is not on the register yet at all - approve or reject it first, rather
+    # than have a correction here mark them present and (with learn on) teach
+    # the recogniser a face that was never through the guided capture.
+    if database.pending_application_for(student_id):
+        raise HTTPException(
+            409, "This person's own application has not been approved yet - "
+                 "approve or reject it before marking them present.")
 
     crop_name = Path(face_url).name
     if not storage.exists("uploads", crop_name):
