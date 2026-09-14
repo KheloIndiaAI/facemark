@@ -73,14 +73,14 @@ async function doLogin(ev) {
         hideLogin();
         applyRoleChrome();
         await initApp();
-        // Signing in lands on the job that role opens the app to do: Mark
-        // Attendance for a coach or admin, their own page for an athlete.
+        // Signing in lands on the job that role opens the app to do: the
+        // register for a coach or admin, their own page for an athlete.
         // Set here as well as in the router - this assignment overrides
         // whatever default handleRoute() would have picked, so changing one
         // without the other silently keeps the old landing page. That is
         // exactly what happened when the router learned about athletes and
         // this line did not.
-        window.location.hash = isAthlete() ? '#/me' : '#/mark';
+        window.location.hash = isAthlete() ? '#/me' : '#/register';
         handleRoute();
         showToast('Welcome', `Signed in as ${data.user.full_name}`, 'success');
     } catch {

@@ -866,161 +866,23 @@ class _MemoryUpload:
 
 @app.post("/api/attendance/process-video")
 async def process_attendance_video(
-    request: Request,
-    video: UploadFile = File(...),
-    date_str: Optional[str] = Form(None),
-    threshold: Optional[float] = Form(None),
-    detection_mode: Optional[str] = Form(None),
-    source: Optional[str] = Form(None),
-    latitude: Optional[float] = Form(None),
-    longitude: Optional[float] = Form(None),
-    accuracy_m: Optional[float] = Form(None),
-    centre_id: Optional[int] = Form(None),
     user: dict = Depends(auth.require_staff),
 ):
-    """Mark attendance from a short clip, refusing photographs of photographs.
+    """REMOVED. Group capture - a coach's camera pointed at a room - is gone.
 
-    A still frame can only be judged on appearance, and appearance is what a
-    replay reproduces - which is why the earlier moire and 3D-landmark checks
-    both failed. A clip carries something a photograph cannot: parallax. A
-    picture on a screen is a plane, so under camera movement everything in it
-    moves through one homography; a real face does not, and the residual is
-    depth actually measured rather than inferred. See backend/liveness.py.
-
-    The check runs SERVER-SIDE deliberately. Refusing to show an upload button
-    in the browser is a nudge, not a control - anyone can POST to this endpoint
-    directly - so the guard has to live where it cannot be skipped.
+    This was the Mark Attendance page's only route: a coach's own clip drafted
+    whoever it recognised into today's register, a super admin's wrote
+    confirmed attendance directly. Attendance is now only an athlete marking
+    themselves (/api/me/attendance) or a coach adding people by hand on the
+    register, which the coach then signs (/api/sessions/{id}/submit) - both
+    already require a live face and neither depends on a room-sized capture
+    the liveness check was never calibrated to judge (see `too_far` in
+    liveness.py). Kept as an endpoint, not deleted outright, so a stale client
+    or bookmark gets an answer that says what happened instead of a bare 404.
     """
-    data = await video.read()
-    if not data:
-        raise HTTPException(400, "Empty upload")
-
-    # A COACH GOES THROUGH THE REGISTER. This route used to call
-    # process_attendance as a plain function, which meant that route's
-    # Depends(require_super_admin) never ran: any coach reached the
-    # confirmed-attendance writer and wrote straight past the draft, the review
-    # and the signature - "the one thing v1 set out to stop", in its own words.
-    #
-    # Restricting this endpoint to admins would have taken Mark Attendance away
-    # from the coaches whose landing page it is, so the capture goes where the
-    # design says it should: into today's register, as drafts, for the same
-    # coach to review and sign.
-    #
-    # Delegating to the captures route rather than reimplementing it also means
-    # this path inherits its liveness handling, including the `too_far` verdict
-    # for a group across a room - which this endpoint did NOT have, so it was
-    # refusing every group clip on the coach's own landing page.
-    if user.get("role") != "super_admin":
-        day = _validated_day(date_str, back_days=config.SESSION_BACKDATE_DAYS)
-        centre = auth.scope_centre(user, centre_id) or user.get("centre_id")
-        if not centre:
-            raise HTTPException(
-                400, "This account has no centre, so it cannot take attendance")
-        started = time.time()
-        sess = sessions_mod.get_or_create(
-            int(centre), auth.coach_student_id(user), int(user["id"]), day)
-        out = await add_session_capture(
-            session_id=int(sess["id"]),
-            media=_MemoryUpload(data, video.filename or "clip.webm",
-                                content_type="video/webm"),
-            kind="video", threshold=threshold, detection_mode=detection_mode,
-            latitude=latitude, longitude=longitude, accuracy_m=accuracy_m,
-            user=user,
-        )
-        if out.get("ok") is False:
-            return out
-        # The Mark Attendance screen predates the register and reads
-        # `recognized`, `unknown` and `timings`. Rather than leave it broken or
-        # duplicate the capture logic, the register's answer is translated into
-        # the shape that screen already renders - with drafted_to_register set,
-        # so it can say what actually happened: these people are proposed, not
-        # yet present, and the coach still signs the register.
-        drafted = out.get("drafted") or []
-        return {
-            **out,
-            "drafted_to_register": True,
-            "session_id": out.get("session_id"),
-            "newly_marked": out.get("newly_drafted", 0),
-            "recognized_count": out.get("recognized_count", len(drafted)),
-            "recognized": [
-                {
-                    "student_id": d.get("student_id"),
-                    "name": d.get("name"),
-                    "roll_no": d.get("roll_no"),
-                    "similarity": d.get("similarity"),
-                    "confidence": d.get("confidence"),
-                    "face_url": (f"/api/uploads/{d['crop']}" if d.get("crop") else None),
-                    "marked_now": True,
-                }
-                for d in drafted
-            ],
-            "unknown": [],
-            "timings": {"total_ms": int((time.time() - started) * 1000)},
-            "message": (
-                f"{out.get('newly_drafted', 0)} added to today's register as drafts. "
-                "Open Register to review and submit."
-            ),
-        }
-
-    result = liveness.analyse(data, get_detector())
-
-    # Sampled frames are stored whatever the verdict. On a rejection they are
-    # the evidence a coach needs to see why, and a refusal nobody can inspect
-    # is one nobody can appeal.
-    ts = utils.timestamp()
-    frame_names: List[str] = []
-    for i, frame in enumerate(result.frames[: config.LIVENESS_STORE_FRAMES]):
-        name = f"clip_{ts}_{i}.jpg"
-        try:
-            utils.save_image(frame, "uploads", name)
-            frame_names.append(name)
-        except Exception as e:  # noqa: BLE001 - storage must not sink attendance
-            log.warning("Could not store liveness frame %s: %s", name, e)
-
-    liveness_payload = {
-        **result.to_dict(),
-        "frame_urls": [f"/api/uploads/{n}" for n in frame_names],
-    }
-
-    if not result.is_live:
-        log.warning(
-            "Liveness refused a clip: %s (depth=%.5f motion=%.5f) by user %s",
-            result.verdict, result.depth_score, result.motion, user.get("username"),
-        )
-        return {
-            "ok": False,
-            "liveness": liveness_payload,
-            "faces_detected": 0,
-            "recognized_count": 0,
-            "newly_marked": 0,
-            "recognized": [],
-            "unknown": [],
-            "message": result.reason,
-        }
-
-    # Recognition runs on the sharpest frame rather than the first: the first is
-    # often caught before the camera has settled, and face size and focus drive
-    # accuracy far more than anything else measured on this system.
-    ok, buf = cv2.imencode(".jpg", result.best_frame,
-                           [cv2.IMWRITE_JPEG_QUALITY, config.CAMERA_PHOTO_QUALITY])
-    if not ok:
-        raise HTTPException(500, "Could not encode the chosen frame")
-
-    response = await process_attendance(
-        request=request,
-        photo=_MemoryUpload(buf.tobytes(), f"clip_{ts}.jpg"),
-        date_str=date_str,
-        threshold=threshold,
-        detection_mode=detection_mode,
-        source=source or "video",
-        latitude=latitude,
-        longitude=longitude,
-        accuracy_m=accuracy_m,
-        centre_id=centre_id,
-        user=user,
-    )
-    response["liveness"] = liveness_payload
-    return response
+    raise HTTPException(
+        410, "Group capture has been removed. Mark yourself present from your "
+             "own camera, or ask your coach to add you to the register.")
 
 
 def _face_from_original(crop_name: str):
@@ -1277,20 +1139,6 @@ async def enroll_pose_check(
     faces = get_detector().detect(img, config.CLIP_DETECTION_MODE)
     if not faces:
         return {"ok": False, "reason": "no_face", "message": "No face detected"}
-    # GROUP CAPTURE IS A ROOM. Every rule below is for one person at arm's
-    # length - exactly one face, big enough, level, well posed - and the group
-    # capture camera used them too, so pointing it at a squad answered "2 faces
-    # in frame - only the athlete should be visible" and the record button
-    # never switched on. For a group the only question before recording is
-    # whether anyone is in shot; the capture route itself still refuses a still,
-    # judges liveness on any face close enough, and the coach signs the register.
-    if step == "group":
-        big = max(faces, key=lambda x: x.width * x.height)
-        return {"ok": True, "reason": None, "faces": len(faces),
-                "message": f"{len(faces)} face{'s' if len(faces) != 1 else ''} in frame",
-                "box": [round(v, 1) for v in big.box],
-                "landmarks": _landmarks_payload(big),
-                "frame": [img.shape[1], img.shape[0]]}
     if len(faces) > 1:
         return {"ok": False, "reason": "many_faces",
                 "message": f"{len(faces)} faces in frame - only the athlete should be visible"}
@@ -1917,201 +1765,18 @@ def read_session(session_id: int, user: dict = Depends(auth.require_staff)):
 @app.post("/api/sessions/{session_id}/captures")
 async def add_session_capture(
     session_id: int,
-    media: UploadFile = File(...),
-    kind: Optional[str] = Form(None),
-    threshold: Optional[float] = Form(None),
-    detection_mode: Optional[str] = Form(None),
-    latitude: Optional[float] = Form(None),
-    longitude: Optional[float] = Form(None),
-    accuracy_m: Optional[float] = Form(None),
     user: dict = Depends(auth.require_staff),
 ):
-    """Add one capture to a register. Video or photo.
-
-    A VIDEO IS REQUIRED. A still cannot be checked for liveness at all - a
-    photograph of a photograph is exactly what a still reproduces - and it used
-    to be accepted, marked `not_checked`, and allowed to write drafts anyway.
-    The defence was that a coach signs the register afterwards. That is true,
-    and it is not the same as checking: the signature says a human was present,
-    not that the people in the picture were.
-
-    An earlier version of this docstring claimed the parallax check rejected ten
-    of ten flat replays with 2.1x separation. That figure was measured on
-    replays that all happened to move gently, against real clips that all
-    happened to move a lot, and it did not survive a matched comparison: at the
-    same motion, a waved photograph outscored a real face. The check has since
-    been repaired - see backend/liveness.py - and now separates the classes with
-    no overlap on 270 clips. The claim above was wrong before the fix, not after.
-
-    A DISTANT FACE IS NOT JUDGED AT ALL. See the `too_far` branch below: this is
-    the one endpoint pointed at a room rather than at arm's length, and the test
-    does not reach that far.
-
-    Capturing again ADDS to the session. Recall is 100% at 50-pixel faces and
-    23% at 24 pixels, so one frame across a hall loses most of a large group -
-    several captures is the normal case, not an edge case.
+    """REMOVED. This was the Register page's "Capture group" button: a coach's
+    phone pointed at a room, matched against the whole gallery. Attendance for
+    a register now comes from an athlete marking themselves, or a coach ticking
+    a name by hand - both then covered by the coach's own signature on submit.
+    Kept as an endpoint, not deleted outright, so a stale client gets an answer
+    that says what happened instead of a bare 404.
     """
-    sess = _session_or_404(session_id)
-    _may_touch(user, sess)
-    if sess["status"] != "draft":
-        raise HTTPException(409, "This register has already been submitted")
-
-    data = await media.read()
-    if not data:
-        raise HTTPException(400, "Empty upload")
-
-    filename = (media.filename or "").lower()
-    is_video = (kind or "").lower() == "video" or filename.endswith(
-        (".webm", ".mp4", ".mkv", ".mov", ".m4v")
-    )
-
-    if not is_video:
-        raise HTTPException(
-            400,
-            "Attendance needs a short video, not a photo. A still cannot be "
-            "checked for liveness - record a few seconds, moving the phone "
-            "slowly from side to side.")
-
-    detector = get_detector()
-    result = liveness.analyse(data, detector)
-    verdict = result.verdict
-    depth = result.depth_score
-
-    # A ROOM IS NOT A FACE HELD AT ARM'S LENGTH, and this endpoint is the only
-    # one pointed at a room. The parallax test was calibrated on faces 165-313px
-    # wide; the faces in a real group photograph from this centre are 20-74px.
-    # At that size the measurement is reading its own noise, so `too_far` means
-    # the test could not look - not that it looked and saw a photograph. It is
-    # recorded as unchecked, listed on the oversight page, and allowed through,
-    # because the alternative is refusing every genuine group capture with an
-    # accusation the evidence cannot support. A coach cannot move a hall closer.
-    #
-    # What still holds the line: a still is refused outright, a face close
-    # enough to judge IS judged, and the register is signed at the end with the
-    # coach's own face at arm's length, where the check works.
-    if result.code == "too_far":
-        verdict = "too_far"
-        log.info(
-            "Capture on session %s recorded unchecked: %s (face %spx, %s frames) "
-            "by %s", session_id, result.code, result.face_px, result.frames_used,
-            user.get("username"),
-        )
-    elif verdict != "live":
-        # Keep the evidence. A refusal nobody can inspect is a refusal nobody
-        # can appeal, and this route used to return without storing a single
-        # frame - so the one failure a coach would actually report was the one
-        # failure that left no trace to diagnose.
-        ts_ev = utils.timestamp()
-        frame_urls = []
-        for i, frame in enumerate(result.frames[: config.LIVENESS_STORE_FRAMES]):
-            name = f"refused_{session_id}_{ts_ev}_{i}.jpg"
-            try:
-                utils.save_image(frame, "uploads", name)
-                frame_urls.append(f"/api/uploads/{name}")
-            except Exception as e:  # noqa: BLE001 - storage must not sink the reply
-                log.warning("Could not store refused frame %s: %s", name, e)
-        log.warning(
-            "Capture refused on session %s: %s/%s (depth=%.5f motion=%.5f "
-            "face=%spx points=%s frames=%s) by %s",
-            session_id, verdict, result.code, result.depth_score, result.motion,
-            result.face_px, result.tracked_points, result.frames_used,
-            user.get("username"),
-        )
-        return {
-            "ok": False, "session_id": session_id,
-            "message": result.reason,
-            "liveness": {**result.to_dict(), "frame_urls": frame_urls},
-        }
-
-    img = result.best_frame
-    if img is None:
-        raise HTTPException(400, "No usable frame in that clip")
-
-    ts = utils.timestamp()
-    media_name = f"capture_{session_id}_{ts}.jpg"
-    utils.save_image(img, "uploads", media_name)
-
-    active_centre = sess["centre_id"]
-    geo = centres_mod.evaluate_location(active_centre, latitude, longitude)
-
-    thr = _validated_threshold(threshold)
-    det_mode = detection_mode or config.DETECTION_MODE
-
-    # WHOLE gallery, filtered afterwards - see sessions.route_recognised.
-    gallery = database.load_gallery()
-    if not gallery:
-        raise HTTPException(400, "Nobody is enrolled yet")
-    recognizer = get_recognizer()
-    weights = {m.name: m.weight for m in recognizer.models}
-
-    faces = detector.detect(img, mode=det_mode)
-    recognised: List[dict] = []
-    if faces:
-        queries = recognizer.embed_faces(img, faces)
-        fused, gallery_ids = fuse_scores(queries, gallery, weights)
-        if fused is not None and len(gallery_ids):
-            n_f, n_g = len(faces), len(gallery_ids)
-            thr_matrix = np.full((n_f, n_g), float(thr), dtype=np.float64)
-            for i, f in enumerate(faces):
-                if min(f.width, f.height) < config.SMALL_FACE_PX:
-                    thr_matrix[i, :] += config.SMALL_FACE_THRESHOLD_BUMP
-            from .metaheuristics import GlobalMatchOptimizer
-            pairs = GlobalMatchOptimizer.optimize_assignments(
-                fused, gallery_ids, threshold=thr_matrix
-            )
-            by_id = database.get_students(sid for _, sid, _ in pairs)
-            for face_idx, sid, sim in pairs:
-                st = by_id.get(int(sid))
-                if not st:
-                    continue
-                crop_name = f"face_{ts}_{face_idx}.jpg"
-                utils.save_image(utils.crop_face(img, faces[face_idx]), "uploads", crop_name)
-                recognised.append({
-                    "student_id": int(sid), "name": st["name"],
-                    "roll_no": st.get("roll_no"), "centre_id": st.get("centre_id"),
-                    "similarity": float(sim), "crop": crop_name,
-                    "confidence": utils.similarity_to_confidence(float(sim), thr),
-                })
-
-    routed = sessions_mod.route_recognised(
-        sess.get("coach_id"), recognised, active_centre
-    )
-
-    capture_id = sessions_mod.add_capture(
-        session_id, media_name, "video" if is_video else "photo",
-        liveness_verdict=verdict, liveness_depth=depth,
-        faces_detected=len(faces), recognised=len(recognised),
-        latitude=latitude, longitude=longitude,
-        geo_status=geo["geo_status"], distance_m=geo["distance_m"],
-    )
-
-    drafted = 0
-    for r in routed["draft"]:
-        if sessions_mod.draft(
-            session_id, int(r["student_id"]), sess["date"], float(r["similarity"]),
-            origin="recognised", image_path=r.get("crop"), capture_id=capture_id,
-            centre_id=active_centre, latitude=latitude, longitude=longitude,
-            accuracy_m=accuracy_m, geo_status=geo["geo_status"],
-            distance_m=geo["distance_m"], marked_by=int(user["id"]),
-        ):
-            drafted += 1
-
-    return {
-        "ok": True,
-        "session_id": session_id,
-        "capture_id": capture_id,
-        "kind": "video" if is_video else "photo",
-        "liveness": {**result.to_dict(), "verdict": verdict},
-        "unchecked": verdict == "too_far",
-        "faces_detected": len(faces),
-        "recognized_count": len(recognised),
-        "newly_drafted": drafted,
-        "drafted": routed["draft"],
-        "other_coach": routed["other_coach"],
-        "other_centre": routed["other_centre"],
-        "unknown_count": max(0, len(faces) - len(recognised)),
-        "geo": {"status": geo["geo_status"], "distance_m": geo["distance_m"]},
-    }
+    raise HTTPException(
+        410, "Group capture has been removed. Add people to the register by "
+             "hand, or ask them to mark themselves present.")
 
 
 
