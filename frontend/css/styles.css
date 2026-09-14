@@ -320,7 +320,6 @@ a:hover { color: var(--accent-hover); }
 .badge-blue { background-color: var(--accent-bg); color: var(--accent); }
 
 /* Mark Page */
-.mark-layout { display: grid; grid-template-columns: 1fr; gap: 16px; height: auto; }
 .dropzone { border: 1px dashed var(--border-subtle); border-radius: var(--radius-md); background-color: var(--bg-input); position: relative; transition: all var(--transition-fast); cursor: pointer; overflow: hidden; min-height: 150px;}
 .dropzone:hover { border-color: var(--border-hover); background-color: var(--bg-elevated); }
 .dropzone.dragover { border-color: var(--accent); background-color: var(--accent-bg); }
@@ -329,8 +328,6 @@ a:hover { color: var(--accent-hover); }
 .image-preview-container { position: relative; width: 100%; padding-top: 75%; }
 .image-preview { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
 .btn-clear-image { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); color: white; border: none; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 10; }
-.btn-retake { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.68); color: #fff; border: none; border-radius: 999px; padding: 9px 18px; font-size: 13px; font-weight: 600; cursor: pointer; z-index: 10; backdrop-filter: blur(4px); min-height: 38px; }
-.btn-retake:hover { background: rgba(0,0,0,0.82); }
 
 .capture-tabs { display: flex; border-bottom: 1px solid var(--border-subtle); margin-bottom: 16px; }
 .tab-btn { flex: 1; background: transparent; border: none; color: var(--text-secondary); padding: 12px; font-size: 14px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; min-height: 44px; }
@@ -359,15 +356,11 @@ a:hover { color: var(--accent-hover); }
    mirrored. The capture itself is never mirrored - only the preview. */
 .camera-video.mirrored { transform: scaleX(-1); }
 .camera-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
-.camera-guides { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; pointer-events: none; }
-.guide-circle { width: 60%; aspect-ratio: 1; border: 2px dashed rgba(255,255,255,0.5); border-radius: 50%; }
-.camera-quality-badge { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.6); color: #fff; padding: 4px 12px; border-radius: 16px; font-size: 12px; font-weight: 500; backdrop-filter: blur(4px); }
 .camera-controls { position: absolute; bottom: 0; left: 0; width: 100%; padding: 24px; display: flex; align-items: center; justify-content: space-between; background: linear-gradient(transparent, rgba(0,0,0,0.8)); }
 .camera-shutter { width: 72px; height: 72px; border-radius: 50%; background: transparent; border: 4px solid #fff; padding: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform var(--transition-fast); }
 .camera-shutter:active { transform: scale(0.95); }
 .shutter-inner { width: 100%; height: 100%; background: #fff; border-radius: 50%; transition: background var(--transition-fast); }
 .camera-shutter:active .shutter-inner { background: #e5e7eb; }
-.camera-switch-btn, .camera-flash-btn { width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,0.2); border: none; color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; backdrop-filter: blur(4px); }
 
 /* Recording: a ring that fills over the two seconds, so the wait is legible
    rather than a button that simply stops responding. */
@@ -415,12 +408,6 @@ a:hover { color: var(--accent-hover); }
 .rec-prompt.done { background: rgba(22, 163, 74, .92); }
 .rec-prompt.done .rec-prompt-arrow { color: #fff; }
 
-.clip-review { position: relative; width: 100%; aspect-ratio: 3/4; background: #000;
-               border-radius: var(--radius-md); overflow: hidden; }
-@media (min-width: 769px) {
-    .clip-review { max-width: 400px; margin-left: auto; margin-right: auto; }
-}
-
 /* Liveness outcome, shown with the frames the decision was made from. */
 .liveness-banner { border-radius: var(--radius-md); padding: 14px 16px; margin-bottom: 16px; border: 1px solid; }
 .liveness-banner.bad  { background: var(--red-bg, #fef2f2); border-color: #fca5a5; }
@@ -436,28 +423,6 @@ a:hover { color: var(--accent-hover); }
 /* Results Grid */
 .summary-chips { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
 .chip { padding: 8px 12px; border-radius: 16px; font-size: 12px; font-weight: 500; border: 1px solid var(--border-subtle); background-color: var(--bg-elevated); }
-.results-grid { display: grid; grid-template-columns: 1fr; gap: 16px; margin-bottom: 24px; }
-.face-card { background-color: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; display: flex; flex-direction: row; }
-.face-img-wrap { width: 100px; aspect-ratio: 1; overflow: hidden; background-color: var(--bg-input); flex-shrink: 0; }
-.face-img { width: 100%; height: 100%; object-fit: cover; }
-/* min-width:0 is what lets this shrink. A flex item defaults to min-width:auto,
-   so it refuses to go below its content's intrinsic width - and because the
-   card sets overflow:hidden, the surplus was silently clipped rather than
-   wrapping. That is what cut the "Who is this?" buttons in half. */
-.face-info { padding: 12px; flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center;}
-.face-info .btn { white-space: normal; }   /* buttons may wrap in a narrow card */
-
-/* Stacked variant for grids of face thumbnails. Side by side, a 100px image
-   plus a caption plus a button needs more width than a grid cell has. */
-.face-card.stacked { flex-direction: column; }
-.face-card.stacked .face-img-wrap { width: 100%; aspect-ratio: auto; }
-.face-card.stacked .face-info { justify-content: flex-start; gap: 4px; }
-.face-name { font-weight: 600; margin-bottom: 4px; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.face-sub { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); margin-bottom: 8px;}
-.similarity-bar-wrap { height: 4px; background-color: var(--track); border-radius: 2px; margin-bottom: 8px; overflow: hidden; }
-.similarity-bar { height: 100%; background-color: var(--green); }
-.annotated-img-wrap { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; }
-.annotated-img { display: block; max-width: 100%; height: auto; }
 
 /* Students Grid */
 .students-grid {
@@ -759,12 +724,6 @@ a:hover { color: var(--accent-hover); }
         gap: 16px;
     }
 
-    .mark-layout {
-        grid-template-columns: 1fr;
-        height: auto;
-        gap: 16px;
-    }
-
     .students-grid {
         grid-template-columns: 1fr;
         gap: 12px;
@@ -912,16 +871,6 @@ a:hover { color: var(--accent-hover); }
     .login-card { padding: 22px; }
 }
 
-/* Ranked identity suggestions when correcting an unmatched face */
-.suggest-row {
-    display: flex; align-items: center; gap: 10px;
-    padding: 9px 10px; border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md); margin-bottom: 7px; cursor: pointer;
-    background: var(--surface); transition: all var(--transition-fast);
-}
-.suggest-row:hover { border-color: var(--accent); background: var(--accent-bg); }
-.suggest-row:first-child { border-color: var(--border-hover); }
-
 /* Guided multi-view enrolment capture */
 /* The ring is the whole interface: 24 segments around the face, each lighting
    as that angle is covered. Progress is a map of which poses exist, not a
@@ -1018,7 +967,6 @@ a:hover { color: var(--accent-hover); }
     .data-table td.cell-primary::before { content: none; }
 
     .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
-    .results-grid { gap: 12px; }
 
     /* Inputs below 16px make iOS zoom the page on focus, which then leaves the
        layout scrolled sideways. */
