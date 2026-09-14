@@ -139,6 +139,15 @@ def list_users(centre_id: Optional[int] = None) -> list:
         # account from a rejected one - the only screen a super admin has for
         # looking at accounts showed nothing about the decision made on them.
         "u.is_active, u.status, u.approved_at, u.last_login, u.created_at, "
+        # The person and the account are created together at the START of
+        # self-registration, before any face is ever recorded - see
+        # signup.start. So a pending row here can genuinely have zero
+        # templates, whether the capture failed, was abandoned, or never
+        # attempted, and this was the one screen that could approve a coach
+        # or athlete straight into an account nobody can recognise, with
+        # nothing on it to say so. pending_for_coach already carries this for
+        # the athlete queue; the Accounts page had no equivalent.
+        "(SELECT COUNT(*) FROM templates t WHERE t.student_id = u.student_id) AS templates, "
         "c.name AS centre_name "
         "FROM users u LEFT JOIN centres c ON c.id = u.centre_id"
     )

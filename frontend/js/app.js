@@ -1890,7 +1890,8 @@ async function initRegisterPage() {
                               el.dataset.decision === 'approve',
                               el.dataset.personName || '',
                               el.dataset.personRole || 'athlete',
-                              el.dataset.merge === 'true');
+                              el.dataset.merge === 'true',
+                              el.dataset.templates);
         });
     }
     const rosterBtn = document.getElementById('reg-roster-btn');
@@ -2069,7 +2070,15 @@ async function regLoadApprovals() {
                     ${dup}
                     ${orphan}
                                         <div class="text-xs text-muted font-mono">${Charts.esc(p.roll_no || '')}</div>
-                    <div class="text-xs text-muted">${p.templates || 0} face template(s)</div>
+                    <!-- The person row is created before any face is ever
+                         recorded, so 0 here is not unusual - it is what a
+                         failed or abandoned capture looks like. Plain muted
+                         text made it read the same as any other count, and it
+                         was the one number on this card that actually
+                         mattered before pressing Approve. -->
+                    <div class="text-xs${p.templates ? ' text-muted' : ''}"
+                         ${p.templates ? '' : 'style="color:#b45309;font-weight:600"'}>
+                        ${p.templates || 0} face template(s)${p.templates ? '' : ' - no face on file'}</div>
                 </div>
                 ${reassignBtn}
                 ${mergeBtn}
@@ -2079,7 +2088,7 @@ async function regLoadApprovals() {
                         data-person-name="${Charts.esc(name)}">Reject</button>
                 <button type="button" class="btn btn-primary" style="height:30px;font-size:12px;padding:0 10px"
                         data-approve-user="${p.user_id}" data-decision="approve"
-                        data-person-role="${role}"
+                        data-person-role="${role}" data-templates="${Number(p.templates) || 0}"
                         data-person-name="${Charts.esc(name)}">Approve</button>
             </div>`;
         }).join('');
@@ -2111,8 +2120,19 @@ async function regReassign(userId, centreId, name) {
     }
 }
 
-async function regDecide(userId, approve, name, role = 'athlete', merge = false) {
+async function regDecide(userId, approve, name, role = 'athlete', merge = false, templates = 0) {
     let guardian = null;
+    // The person row is created at the START of self-registration, before any
+    // face is ever recorded - see signup.start. So "pending, 0 templates" is
+    // not rare: it is what a capture that failed, or was never attempted,
+    // looks like from here. Approving it anyway can be the right call - a
+    // coach can register the face in person afterwards - but it must be seen,
+    // not defaulted into by a click that looks identical to a clean approval.
+    const noFace = approve && !merge && !(Number(templates) > 0);
+    const faceWarning = noFace
+        ? `\n\n⚠ No face has been captured for this person yet. They will `
+          + `not be recognised in any capture until one is added.\n`
+        : '';
     if (approve && merge) {
         // The merge is the destructive half of this screen - it deletes the
         // record just created and moves its faces onto an existing person - so
@@ -2129,7 +2149,7 @@ async function regDecide(userId, approve, name, role = 'athlete', merge = false)
         // confirmation has to break that rhythm rather than join it.
         const typed = window.prompt(
             `Approving ${name} as a COACH.\n\nThey will see every athlete at `
-            + `their centre, take attendance, and approve athletes themselves.\n\n`
+            + `their centre, take attendance, and approve athletes themselves.${faceWarning}\n`
             + `Type APPROVE to confirm.`, '');
         if ((typed || '').trim().toUpperCase() !== 'APPROVE') return;
     } else if (approve) {
@@ -2137,7 +2157,7 @@ async function regDecide(userId, approve, name, role = 'athlete', merge = false)
         // the person who knows whether this athlete is a minor.
         guardian = window.prompt(
             `Approving ${name}.\n\nIf this athlete is under 18, enter the guardian's `
-            + `name to record consent. Leave blank if they are an adult.`, '');
+            + `name to record consent. Leave blank if they are an adult.${faceWarning}`, '');
         if (guardian === null) return;          // cancelled
     }
     try {
@@ -2988,8 +3008,18 @@ async function openClipCapture(opts) {
     if (await cam.start() === false) { closeModal(); return; }
 
     const state = { busy: false, timer: null, box: null, landmarks: null, good: false,
-                    recording: false, alive: true, fails: 0, closed: false,
+                    goodStreak: 0, recording: false, alive: true, fails: 0, closed: false,
                     mesh: null, raf: 0 };
+    // A single good poll used to be enough to turn the dots green AND arm the
+    // shutter - the same instant. At close range a detector reading can
+    // flicker frame to frame (a second face candidate appearing and vanishing
+    // between two 350ms polls, a blink, a moment of motion blur), and a tap
+    // landing in that one-frame window recorded a clip the very next poll
+    // would have refused. Requiring a short run of consecutive good frames
+    // before arming - never before disarming, which stays immediate - means
+    // the green the person sees is the same green the shutter is honouring,
+    // not a single lucky frame.
+    const GOOD_STREAK_TO_ARM = 2;
     const setRing = p => { if (ring) ring.style.strokeDashoffset = String(126 * (1 - p)); };
 
     // Stop everything however the modal closes - X, Escape, or a route change.
@@ -3217,10 +3247,21 @@ async function openClipCapture(opts) {
             // "ok" means correctly posed AND framed. Pose does not matter for a
             // clip - the recording captures several angles by itself - so only
             // framing and image quality gate the button.
-            state.good = !!r.box && (r.ok || r.reason === 'pose');
+            // The raw per-frame reading. Used for the streak below, not
+            // assigned to state.good directly - see GOOD_STREAK_TO_ARM.
+            const rawGood = !!r.box && (r.ok || r.reason === 'pose');
+            state.goodStreak = rawGood ? state.goodStreak + 1 : 0;
+            // "ok" means correctly posed AND framed. Pose does not matter for a
+            // clip - the recording captures several angles by itself - so only
+            // framing and image quality gate the button. Disarm is immediate -
+            // one bad frame is enough - arm requires the streak, so a single
+            // flickering good frame cannot open the shutter on its own.
+            state.good = state.goodStreak >= GOOD_STREAK_TO_ARM;
             hint.textContent = state.good
                 ? (state.recording ? 'Recording - keep moving gently' : 'Face found - tap to record')
-                : (r.message || 'No face detected');
+                : rawGood
+                    ? 'Hold steady…'
+                    : (r.message || 'No face detected');
             if (!state.recording) shutter.disabled = !state.good;
             // Recovered. Anything the last failure put on screen has just been
             // overwritten by a real answer, so drop back to the fast poll.
@@ -3281,10 +3322,18 @@ async function openClipCapture(opts) {
             if (state.closed) { try { cam.stop(); } catch {} return false; }  // closed while starting
             state.alive = true;
             state.fails = 0;
+            // NOT shutter.disabled = false here. This used to enable the
+            // shutter the instant the camera restarted - before tick() had
+            // run even once for the retry - so a refusal's "try again" could
+            // be followed by a tap that recorded before anything was checked
+            // at all. Leave it disabled; the first good, STABLE poll (see
+            // GOOD_STREAK_TO_ARM) is what is allowed to arm it.
+            state.good = false;
+            state.goodStreak = 0;
+            shutter.disabled = true;
             if (state.timer) clearInterval(state.timer);
             framePollMs = FAST_POLL_MS;
             state.timer = setInterval(tick, framePollMs);
-            shutter.disabled = false;
             return true;
         },
         close() { teardown(); closeModal(); },
@@ -3549,7 +3598,16 @@ async function openClipCapture(opts) {
             // legitimate empty capture (recordClip already toasts the specific
             // reason, e.g. no MediaRecorder support) and the outer catch above
             // firing on something unexpected.
-            shutter.disabled = false;
+            //
+            // NOT shutter.disabled = false here - same reasoning as
+            // ui.resume(). Enabling it before the framing loop has even
+            // restarted let a retry be tapped before a single frame of the
+            // new attempt was checked. state.good/goodStreak reset too, so a
+            // stale "good" from before the failed recording cannot leak into
+            // arming the shutter for the retry on its own.
+            state.good = false;
+            state.goodStreak = 0;
+            shutter.disabled = true;
             ui.status('Recording did not complete. Try again.');
             // The framing loop was stopped to give the guided sequence sole
             // use of pose-check; restore it so the shutter re-enables/

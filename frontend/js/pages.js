@@ -290,19 +290,30 @@ async function reopenUser(id, name) {
     }
 }
 
-async function decideUser(id, approve, name, role) {
+async function decideUser(id, approve, name, role, templates) {
+    // The person row is created at the START of self-registration, before any
+    // face is ever recorded - so a pending account with 0 templates is not
+    // rare, it is what "the capture failed" or "they never got that far"
+    // looks like from here. Approving it anyway is sometimes the right call -
+    // a coach can register the face in person afterwards - but it must be a
+    // decision made with that fact in view, not a default nobody noticed.
+    const noFace = approve && !(Number(templates) > 0);
+    const faceWarning = noFace
+        ? `\n\n⚠ No face has been captured for this person yet. They will `
+          + `not be recognised in any capture until one is added.\n`
+        : '';
     // Approving a COACH hands over a whole centre, and on this page it sits in
     // a table of ordinary rows where the habit is to click through. Typing
     // breaks that habit; an athlete gets a plain confirm.
     if (approve && role === 'coach') {
         const typed = window.prompt(
             `Approving ${name} as a COACH.\n\nThey will see every athlete at their `
-            + `centre, take attendance, and approve athletes themselves.\n\n`
+            + `centre, take attendance, and approve athletes themselves.${faceWarning}\n`
             + `Type APPROVE to confirm.`, '');
         if ((typed || '').trim().toUpperCase() !== 'APPROVE') return;
     } else if (approve) {
         if (!window.confirm(`Approve ${name}? They will be able to sign in and be `
-                            + `recognised in a capture.`)) return;
+                            + `recognised in a capture.${faceWarning}`)) return;
     } else if (!window.confirm(`Reject ${name}? They stay unable to sign in.`)) {
         return;
     }
@@ -370,11 +381,22 @@ async function renderUsersPage() {
             ${E(roleShort(x.role))}</span></td>
           <td>${E(x.centre_name || '-')}</td>
           <td class="text-sm text-muted">${E(x.last_login ? x.last_login.replace('T', ' ') : 'never')}</td>
-          <td>${userStatusBadge(x)}</td>
+          <td>${userStatusBadge(x)}
+            <!-- The person row is created at the start of self-registration,
+                 before any face is ever recorded, so a pending account with
+                 no templates is not an edge case - it is what a failed or
+                 abandoned capture looks like. Shown here, not just in the
+                 confirm dialog below, because a badge visible before anyone
+                 clicks Approve is the one that actually gets read. -->
+            ${x.status === 'pending' && !(Number(x.templates) > 0) ? `
+            <div class="text-xs" style="color:#b45309;font-weight:600;margin-top:2px">
+              No face on file</div>` : ''}
+          </td>
           <td style="white-space:nowrap">
             ${x.status === 'pending' ? `
             <button class="btn btn-primary" style="min-height:30px;padding:0 10px;font-size:12px"
               data-decide-user="approve" data-user-id="${x.id}" data-user-role="${E(x.role)}"
+              data-templates="${Number(x.templates) || 0}"
               data-username="${E(x.full_name || x.username)}">Approve</button>
             <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
               data-decide-user="reject" data-user-id="${x.id}" data-user-role="${E(x.role)}"
@@ -498,7 +520,8 @@ document.addEventListener('click', (e) => {
         return decideUser(decide.dataset.userId,
                           decide.dataset.decideUser === 'approve',
                           decide.dataset.username || '',
-                          decide.dataset.userRole || 'athlete');
+                          decide.dataset.userRole || 'athlete',
+                          decide.dataset.templates);
     }
     const reopen = e.target.closest('[data-reopen-user]');
     if (reopen) {
