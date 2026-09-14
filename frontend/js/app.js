@@ -2899,6 +2899,28 @@ const CLIP_MS_PLAIN = 3000;
 // either way; this sequence exists to elicit good motion, not to replace it.
 const GUIDED_CAPTURE_MAX_MS = 45000;
 
+// Below this many CONFIRMED turns, the clip is not submitted at all - the
+// person is sent straight back to try again, before anything is uploaded.
+//
+// THIS USED TO BE ADVISORY ONLY. Every clip was uploaded regardless of how
+// many of the four prompts were actually followed - "0 of 4 measured" toasted
+// a warning and then submitted the recording anyway, so ignoring every prompt
+// and moving at random produced the identical outcome as following them: a
+// clip sent for enrolment, an account sent for approval. Reported exactly
+// this way - random movement, no prompt followed, and it "still took it."
+// The per-step check IS real (server-side yaw/pitch relative to a measured
+// baseline - see pose-check's step handling), it just had no power over what
+// happened next.
+//
+// 2 matches MULTIVIEW_MIN_POSES, the same bar this codebase already uses
+// elsewhere for "a multi-view capture is worth keeping" - not stricter, not
+// looser, the same number meaning the same thing in both places. Below it the
+// attempt is redone, not refused: nothing is uploaded, no account is touched,
+// and trying again costs a few seconds - a materially different cost than the
+// liveness/identity refusals this codebase is careful never to make wrongly,
+// which is why this gate does not extend that same caution to it.
+const GUIDED_MIN_MEASURED = 2;
+
 // The four directions, named exactly as pose-check expects. Order matters
 // only for how it reads to a person - left/right/up/down, not because the
 // depth measurement needs a particular sequence.
@@ -3553,6 +3575,10 @@ async function openClipCapture(opts) {
         // disabled, the prompt panel stuck visible, and no way back to the
         // camera except closing and reopening the whole modal.
         let file = null;
+        // What the retry path below tells the person, when it fires. Default
+        // covers the outer catch and a genuinely empty capture; the guided
+        // branch overwrites it with something specific when IT is the reason.
+        let retryReason = 'Recording did not complete. Try again.';
         try {
             if (opts.guided === false) {
                 // A group across a room, or one face being verified against one
@@ -3564,22 +3590,46 @@ async function openClipCapture(opts) {
                 file = await cam.recordClip(opts.clipMs || CLIP_MS_PLAIN, setRing);
             } else {
                 const control = { done: false, measured: [] };
-                [file] = await Promise.all([
+                const [recorded] = await Promise.all([
                     cam.recordClip(GUIDED_CAPTURE_MAX_MS, null, control),
                     runGuidedSequence(control),
                 ]);
-                // Honest about what the clip actually contains. A recording
-                // where one turn was never seen is not the same as one where
-                // all four were, and the person is the only one who can decide
-                // whether to redo it.
                 const seen = (control.measured || []).length;
-                if (seen < GUIDED_DIRECTIONS.length) {
-                    showToast(
-                        seen ? 'Some turns were not seen' : 'No turns were seen',
-                        `${seen} of ${GUIDED_DIRECTIONS.length} measured. `
-                        + 'The clip was still recorded - if it is refused, try '
-                        + 'again in better light and turn a little further.',
-                        seen ? 'info' : 'error');
+                if (seen < GUIDED_MIN_MEASURED) {
+                    // NOT UPLOADED. Below GUIDED_MIN_MEASURED, moving at
+                    // random and following every prompt produced the same
+                    // outcome - a clip sent for enrolment - because nothing
+                    // downstream of this loop looked at how many of its own
+                    // steps had actually succeeded. Discarding the recording
+                    // here, before onClip ever sees it, is what makes that no
+                    // longer true: nothing is uploaded and no account is
+                    // touched on an attempt this thin.
+                    file = null;
+                    retryReason = seen
+                        ? `Only ${seen} of ${GUIDED_DIRECTIONS.length} movements were seen - `
+                          + 'record again and follow each prompt.'
+                        : 'No movement was seen - record again and follow each prompt.';
+                    // The status line sits under a camera the person is
+                    // watching, not their eyes - a toast is what is actually
+                    // seen. This is the one message in this whole flow that
+                    // has to land, since it is the difference between "redo
+                    // it" actually happening and a thin capture going through
+                    // unnoticed exactly as it always used to.
+                    showToast(seen ? 'Not enough movement' : 'No movement seen',
+                              retryReason, 'error');
+                } else {
+                    file = recorded;
+                    // Honest about what the clip actually contains, for the
+                    // case that DOES upload: seen enough to proceed, but not
+                    // all four. The person is the only one who can decide
+                    // whether that is worth redoing before walking away.
+                    if (seen < GUIDED_DIRECTIONS.length) {
+                        showToast('Some turns were not seen',
+                                  `${seen} of ${GUIDED_DIRECTIONS.length} measured. `
+                                  + 'The clip was still sent - if it is refused, try '
+                                  + 'again in better light and turn a little further.',
+                                  'info');
+                    }
                 }
             }
         } catch (err) {
@@ -3593,11 +3643,12 @@ async function openClipCapture(opts) {
         setRing(0);
         state.recording = false;
         if (!file) {
-            // Covers two different situations with one message, since neither
-            // is distinguishable from here without extra signalling: a
-            // legitimate empty capture (recordClip already toasts the specific
-            // reason, e.g. no MediaRecorder support) and the outer catch above
-            // firing on something unexpected.
+            // retryReason distinguishes three situations that used to share
+            // one message: a legitimate empty capture (recordClip already
+            // toasts its own specific reason, e.g. no MediaRecorder support),
+            // the outer catch above firing on something unexpected, and now
+            // also too few of the guided prompts having been followed - see
+            // GUIDED_MIN_MEASURED.
             //
             // NOT shutter.disabled = false here - same reasoning as
             // ui.resume(). Enabling it before the framing loop has even
@@ -3608,7 +3659,7 @@ async function openClipCapture(opts) {
             state.good = false;
             state.goodStreak = 0;
             shutter.disabled = true;
-            ui.status('Recording did not complete. Try again.');
+            ui.status(retryReason);
             // The framing loop was stopped to give the guided sequence sole
             // use of pose-check; restore it so the shutter re-enables/
             // disables correctly for the retry instead of staying stuck at
