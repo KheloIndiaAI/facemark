@@ -271,6 +271,12 @@ async function purgeDemoCentres() {
    rejected registration could sit on this page looking fine. */
 function userStatusBadge(x) {
     if (!x.is_active) return '<span class="badge badge-red">disabled</span>';
+    // Not "awaiting approval" until a verified face is on file - the account
+    // is created before any face is recorded, and the server refuses to
+    // approve it until one is (sessions.HAS_VERIFIED_FACE).
+    if (x.status === 'pending' && !(Number(x.templates) > 0)) {
+        return '<span class="badge badge-red">registration incomplete</span>';
+    }
     if (x.status === 'pending') return '<span class="badge badge-amber">awaiting approval</span>';
     if (x.status === 'rejected') return '<span class="badge badge-red">rejected</span>';
     if (x.status && x.status !== 'active') return `<span class="badge badge-red">${E(x.status)}</span>`;
@@ -382,22 +388,17 @@ async function renderUsersPage() {
           <td>${E(x.centre_name || '-')}</td>
           <td class="text-sm text-muted">${E(x.last_login ? x.last_login.replace('T', ' ') : 'never')}</td>
           <td>${userStatusBadge(x)}
-            <!-- The person row is created at the start of self-registration,
-                 before any face is ever recorded, so a pending account with
-                 no templates is not an edge case - it is what a failed or
-                 abandoned capture looks like. Shown here, not just in the
-                 confirm dialog below, because a badge visible before anyone
-                 clicks Approve is the one that actually gets read. -->
             ${x.status === 'pending' && !(Number(x.templates) > 0) ? `
-            <div class="text-xs" style="color:#b45309;font-weight:600;margin-top:2px">
-              No face on file</div>` : ''}
+            <div class="text-xs text-muted" style="margin-top:2px">
+              No verified face yet - cannot be approved</div>` : ''}
           </td>
           <td style="white-space:nowrap">
-            ${x.status === 'pending' ? `
+            ${x.status === 'pending' && Number(x.templates) > 0 ? `
             <button class="btn btn-primary" style="min-height:30px;padding:0 10px;font-size:12px"
               data-decide-user="approve" data-user-id="${x.id}" data-user-role="${E(x.role)}"
               data-templates="${Number(x.templates) || 0}"
-              data-username="${E(x.full_name || x.username)}">Approve</button>
+              data-username="${E(x.full_name || x.username)}">Approve</button>` : ''}
+            ${x.status === 'pending' ? `
             <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
               data-decide-user="reject" data-user-id="${x.id}" data-user-role="${E(x.role)}"
               data-username="${E(x.full_name || x.username)}">Reject</button>` : ''}

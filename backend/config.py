@@ -208,6 +208,30 @@ MULTIVIEW_YAW_TURN = 12.0      # degrees of yaw before a view counts as turned
 MULTIVIEW_PITCH_TURN = 10.0    # degrees of pitch before it counts as up/down
 MULTIVIEW_MIN_POSES = 2        # fewer than this and the capture is just one photo
 MULTIVIEW_MIN_FACE_PX = 90     # a selfie at arm's length gives far more than this
+
+# Poses the SERVER must see in an enrolment clip before it is accepted.
+#
+# The guided capture's own "Got it" per step is reported by the browser, and a
+# browser can say anything. This is checked on the uploaded video itself:
+# frames are labelled centre/left/right/up/down by _pose_label, and a clip
+# missing any of these is refused - nothing stored, nothing sent for approval.
+#
+# Calibrated, not assumed. Every stored enrollment_multiview photo carries the
+# pose the guided capture asked for in its filename, and was accepted at the
+# time by pose-check's baseline-relative test. Re-labelled from the image alone:
+#     centre 142/143   left 90/90   right 50/51   down 20/20   up: no examples
+# "up" is left out for that reason - requiring a direction with zero measured
+# examples would refuse people on a threshold nobody has checked. "down" agrees
+# but has 20 examples against 90 for left; left and right are the turns the
+# data can vouch for, and they are also the ones that carry most of the
+# identity-relevant change in view.
+ENROL_REQUIRED_POSES = ("centre", "left", "right")
+# Frames examined for that check, downscaled to 480px wide (the width pose-check
+# judges live frames at, so MULTIVIEW_MIN_FACE_PX means the same thing). More
+# than liveness samples, because a turn is held for well under a second and
+# 18 frames across a 10-15s guided clip can step straight over it.
+ENROL_POSE_SAMPLE_FRAMES = 60
+ENROL_POSE_FRAME_WIDTH = 480
 # Two views this alike carry the same information, so the second is not stored.
 # Geometry cannot decide this reliably - yaw is unmeasurable without real
 # landmarks - but the embeddings answer it directly.

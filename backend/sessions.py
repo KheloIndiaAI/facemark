@@ -748,7 +748,7 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
             + cs + " ORDER BY cap.id DESC LIMIT 50", cp).fetchall()]
 
         pending = conn.execute(
-            "SELECT COUNT(*) FROM users WHERE status = 'pending'"
+            "SELECT COUNT(*) FROM users u WHERE u.status = 'pending'" + HAS_VERIFIED_FACE
         ).fetchone()[0]
         # Counted separately because these are the ones nobody will action on
         # their own: no coach sees them, so they wait until someone goes
@@ -758,7 +758,7 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
         # was invisible - the applicant sees "waiting for your coach" and waits
         # for a person who will never be shown them.
         orphaned = conn.execute(
-            "SELECT COUNT(*) FROM users u WHERE u.status = 'pending' "
+            "SELECT COUNT(*) FROM users u WHERE u.status = 'pending'" + HAS_VERIFIED_FACE +
             "  AND u.role = 'athlete' AND ("
             "        u.chosen_coach_id IS NULL"
             "     OR NOT EXISTS (SELECT 1 FROM users c "
@@ -793,8 +793,34 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
 # Approvals
 # =============================================================================
 
+# An application is not waiting for a DECISION until its face is on file.
+#
+# signup.start creates the account and the person at step one, before any face
+# is recorded, so "pending" alone covers both "finished registering, waiting
+# for a coach" and "typed a username and never recorded a face". Only the first
+# belongs in front of an approver. Templates for a self-registered person are
+# written by signup/face and nowhere else, and signup/face writes them only
+# after the clip has passed liveness AND the server-side pose check
+# (ENROL_REQUIRED_POSES) - so "has templates" is exactly "completed a verified
+# capture". Appended to every query that lists, counts or decides applications,
+# with `u` as the users alias.
+HAS_VERIFIED_FACE = (
+    " AND EXISTS (SELECT 1 FROM templates t WHERE t.student_id = u.student_id)"
+)
+
+
+def has_verified_face(conn: Conn, student_id: Optional[int]) -> bool:
+    if student_id is None:
+        return False
+    return conn.execute("SELECT 1 FROM templates WHERE student_id = ? LIMIT 1",
+                        (int(student_id),)).fetchone() is not None
+
+
 def pending_for_coach(coach_student_id: Optional[int]) -> List[dict]:
-    """The approval queue. None means every pending account (super admin)."""
+    """The approval queue. None means every pending account (super admin).
+
+    Excludes applications with no verified face - see HAS_VERIFIED_FACE.
+    """
     q = ("SELECT u.id AS user_id, u.username, u.full_name, u.email, u.phone, "
          "       u.status, u.role, u.created_at, u.student_id, u.chosen_coach_id, "
          "       u.guardian_name, "
@@ -816,7 +842,7 @@ def pending_for_coach(coach_student_id: Optional[int]) -> List[dict]:
          "LEFT JOIN students d ON d.id = u.duplicate_of "
          "LEFT JOIN centres dc ON dc.id = d.centre_id "
          "LEFT JOIN centres c ON c.id = u.centre_id "
-         "WHERE u.status = 'pending'")
+         "WHERE u.status = 'pending'" + HAS_VERIFIED_FACE)
     p: list = []
     if coach_student_id is not None:
         # Role as well as ownership. A coach's queue contains athletes and
@@ -948,6 +974,15 @@ def decide(user_id: int, approve: bool, approver_user_id: int,
         if row["status"] != "pending":
             raise ValueError("That account is not pending")
         role = row["role"]
+        # Enforced here, not only by hiding the row. The queue no longer lists
+        # an application without a verified face, but a stale page, a second
+        # tab or a direct request could still name it - and approving it would
+        # activate an account face recognition can never match. Rejecting it
+        # stays allowed: that is how an administrator clears it away.
+        if approve and not has_verified_face(conn, row["student_id"]):
+            raise ValueError(
+                "This registration has no verified face yet, so it cannot be "
+                "approved. The applicant has to finish recording their face first.")
 
         if not approve:
             conn.execute(

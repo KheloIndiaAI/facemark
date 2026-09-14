@@ -1158,20 +1158,30 @@ def _pose_label(face, requested: str) -> str:
     return "centre"
 
 
-def _pose_diversity(frames: list, detector, recognizer) -> dict:
-    """Did the head-turning during THIS clip actually happen?
+_POSE_WORDS = {"centre": "looking straight at the camera",
+               "left": "turned LEFT", "right": "turned RIGHT",
+               "up": "tilted UP", "down": "tilted DOWN"}
 
-    enroll_multiview answers this per captured shot, by embedding each one and
-    rejecting a frame that lands on top of a pose already seen - so "how many
-    distinct views" is a question about the embeddings, not a yaw estimate,
-    which is unmeasurable the moment pose_reliable is false. This is that same
-    check run once over the frames a video clip already produced, for the two
-    routes that enrol from ONE clip rather than several deliberate shots -
-    register-video and signup/face - which had no way to tell a person "yes,
-    that was seen" or "no, you barely turned" until now. Read-only: nothing
-    here writes a template or a photo, both of which the caller already does.
+
+def _verify_enrol_poses(data: bytes, detector) -> dict:
+    """Did the uploaded clip ACTUALLY show the head movements that were asked for?
+
+    The guided capture's per-step "Got it" happens in the browser, and what a
+    browser reports is not evidence: a modified page, an old cached script, or
+    a capture whose steps timed out and "carried on" all upload the same way.
+    So the decision is made here, on the video itself. Frames across the whole
+    clip are labelled by _pose_label, and every pose in ENROL_REQUIRED_POSES
+    must appear in at least one of them. A clip missing one is refused before
+    anything is stored - no template, no photo, and for self-registration no
+    application in anyone's approval queue (sessions.HAS_VERIFIED_FACE).
+
+    The thresholds were checked against stored captures whose pose is known;
+    see ENROL_REQUIRED_POSES in config for the numbers.
     """
-    seen_poses: dict = {}
+    frames, _ = liveness.sample_frames(
+        data, max_frames=config.ENROL_POSE_SAMPLE_FRAMES,
+        max_width=config.ENROL_POSE_FRAME_WIDTH)
+    counts: dict = {}
     for frame in frames:
         faces = detector.detect(frame, "accurate")
         if not faces:
@@ -1179,26 +1189,24 @@ def _pose_diversity(frames: list, detector, recognizer) -> dict:
         face = max(faces, key=lambda f: f.width * f.height)
         if min(face.width, face.height) < config.MULTIVIEW_MIN_FACE_PX:
             continue
-        emb = recognizer.embed_faces(frame, [face])
-        lead = next(iter(emb.values()))
-        if any(float(lead[0] @ prev) >= config.MULTIVIEW_DUPLICATE_SIM
-               for prev in seen_poses.values()):
-            continue
-        seen_poses[_pose_label(face, "")] = lead[0]
+        label = _pose_label(face, "")
+        counts[label] = counts.get(label, 0) + 1
 
-    poses = sorted(seen_poses)
-    enough = len(poses) >= config.MULTIVIEW_MIN_POSES
+    required = list(config.ENROL_REQUIRED_POSES)
+    missing = [p for p in required if not counts.get(p)]
+    if missing:
+        message = ("Your face was not seen "
+                   + " or ".join(_POSE_WORDS.get(p, p) for p in missing)
+                   + ". Record again and follow each prompt.")
+    else:
+        message = ("Head movement confirmed: "
+                   + ", ".join(_POSE_WORDS.get(p, p) for p in required) + ".")
     return {
-        "poses_captured": poses,
-        "sufficient": enough,
-        "message": (
-            f"Captured {len(poses)} view(s) of the face: {', '.join(poses)}."
-            if enough else
-            (f"Only {len(poses)} distinct view of the face was captured."
-             if poses else
-             "Only one view of the face was captured.")
-            + " Record again and turn the head further during the clip."
-        ),
+        "ok": not missing,
+        "poses_seen": sorted(p for p in counts if p in _POSE_WORDS),
+        "missing": missing,
+        "frames_checked": len(frames),
+        "message": message,
     }
 
 
@@ -1504,6 +1512,13 @@ async def register_student_from_video(
         )
         return {"ok": False, "liveness": liveness_payload, "message": result.reason}
 
+    # Before any row is written, like liveness above - see _verify_enrol_poses.
+    pose = _verify_enrol_poses(data, get_detector())
+    if not pose["ok"]:
+        log.warning("Registration clip refused for '%s': poses missing %s (seen %s)",
+                    roll_no, pose["missing"], pose["poses_seen"])
+        return {"ok": False, "pose_check": pose, "message": pose["message"]}
+
     # The sharpest frame becomes the profile photo and the first template: face
     # size and focus drive accuracy more than anything else measured here, and
     # the first frame is often caught before the camera has settled.
@@ -1591,21 +1606,8 @@ async def register_student_from_video(
         },
         "templates": len(templates) + extra.get("templates_added", 0),
         "poses_captured": extra.get("poses_captured", []),
-        # enroll_multiview already answers "did the head-turning happen" for
-        # every frame beyond the first - see its own docstring. Surfaced here
-        # too because the frontend had been showing "Registered" as an
-        # unqualified success regardless of what this said, silently dropping
-        # the one case - a still face, or extra_uploads empty because the clip
-        # was too short to have a second frame - where the record actually IS
-        # only ever going to be recognised from a single angle.
-        "pose_check": {
-            "sufficient": extra.get("sufficient", False),
-            "message": extra.get("message") or (
-                "Only one view of the face was captured - the clip did not "
-                "produce a second usable frame. Register again and turn the "
-                "head further during the clip."
-            ),
-        },
+        # Verified above, or this line is never reached.
+        "pose_check": {**pose, "sufficient": True},
     }
 
 
@@ -1660,6 +1662,14 @@ async def enroll_from_video(
             "rejected": [],
             "message": result.reason,
         }
+
+    pose = _verify_enrol_poses(data, get_detector())
+    if not pose["ok"]:
+        log.warning("Enrolment clip refused for student %s: poses missing %s (seen %s)",
+                    student_id, pose["missing"], pose["poses_seen"])
+        return {"ok": False, "pose_check": pose, "templates_added": 0,
+                "poses_captured": [], "accepted": [], "rejected": [],
+                "message": pose["message"]}
 
     uploads: List[_MemoryUpload] = []
     for i, frame in enumerate(result.frames):
@@ -2687,6 +2697,17 @@ async def signup_face(
     if result.verdict != "live":
         return {"ok": False, "message": result.reason, "liveness": result.to_dict()}
 
+    # THE GATE ON "SENT FOR APPROVAL". The account already exists (signup.start
+    # makes it at step one), but it only enters an approval queue once this
+    # person has templates - and templates are written below this line and
+    # nowhere else. Refusing here therefore keeps a capture that did not show
+    # the requested movements out of every queue, not just out of the gallery.
+    pose = _verify_enrol_poses(data, detector)
+    if not pose["ok"]:
+        log.info("Signup face refused for person %s: poses missing %s (seen %s)",
+                 student_id, pose["missing"], pose["poses_seen"])
+        return {"ok": False, "message": pose["message"], "pose_check": pose}
+
     # The enrolment pipeline per frame. enroll_multiview cannot be reused here:
     # it takes an authenticated user, and this caller has no account yet by
     # definition. _enroll_photo_templates is the same underlying path.
@@ -2731,13 +2752,7 @@ async def signup_face(
         conn.execute("UPDATE students SET photo_path = ? WHERE id = ?",
                      (photo_name, student_id))
 
-    # Whether the head-turning the intro asked for actually happened. Every
-    # frame up to here was added as a template regardless - one clip is what
-    # this route has - so nothing about the applicant's account depends on
-    # this answer. It exists only so the applicant is told the truth instead
-    # of "Sent to your coach" standing in for both a good capture and a face
-    # held still for two seconds, which looked identical until now.
-    pose_check = _pose_diversity(result.frames, detector, get_recognizer())
+    pose_check = pose
 
     return {"ok": True, "templates": added,
             "liveness": result.to_dict(),

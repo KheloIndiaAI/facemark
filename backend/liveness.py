@@ -106,7 +106,8 @@ class LivenessResult:
         }
 
 
-def sample_frames(data: bytes, max_frames: int = None) -> Tuple[List[np.ndarray], dict]:
+def sample_frames(data: bytes, max_frames: int = None,
+                  max_width: Optional[int] = None) -> Tuple[List[np.ndarray], dict]:
     """Decode the clip and return evenly-spaced frames plus what we learned.
 
     OpenCV cannot decode from memory, so the bytes go to a temporary file. The
@@ -164,6 +165,13 @@ def sample_frames(data: bytes, max_frames: int = None) -> Tuple[List[np.ndarray]
             if not ok or frame is None:
                 break
             if seen % stride == 0:
+                # Downscaled BEFORE being held, when asked. A caller that wants
+                # many frames (the enrolment pose check wants ~60) would
+                # otherwise keep up to twice that many full-resolution frames
+                # alive at once - hundreds of MB for one request.
+                if max_width and frame.shape[1] > max_width:
+                    s = max_width / frame.shape[1]
+                    frame = cv2.resize(frame, (max_width, int(round(frame.shape[0] * s))))
                 frames.append(frame)
                 if len(frames) > max_frames * 2:
                     frames = frames[::2]      # keep the span, halve the count

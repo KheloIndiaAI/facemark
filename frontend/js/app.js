@@ -1782,7 +1782,11 @@ async function enrolSubmit(file, ui) {
     try {
         const r = await api.postForm('/api/students/register-video', fd);
         if (r.ok === false) {
-            ui.status(livenessBanner(r.liveness, r.message), true);
+            // A pose refusal comes from a clip that WAS live, and
+            // livenessBanner would title it "Live capture confirmed" right
+            // beside the refusal. Say what was actually missing instead.
+            if (r.pose_check && r.pose_check.ok === false) ui.status(r.message);
+            else ui.status(livenessBanner(r.liveness, r.message), true);
             showToast('Not registered', r.message || 'The clip was refused', 'error');
             await ui.resume();
             return;
@@ -2899,27 +2903,14 @@ const CLIP_MS_PLAIN = 3000;
 // either way; this sequence exists to elicit good motion, not to replace it.
 const GUIDED_CAPTURE_MAX_MS = 45000;
 
-// Below this many CONFIRMED turns, the clip is not submitted at all - the
-// person is sent straight back to try again, before anything is uploaded.
-//
-// THIS USED TO BE ADVISORY ONLY. Every clip was uploaded regardless of how
-// many of the four prompts were actually followed - "0 of 4 measured" toasted
-// a warning and then submitted the recording anyway, so ignoring every prompt
-// and moving at random produced the identical outcome as following them: a
-// clip sent for enrolment, an account sent for approval. Reported exactly
-// this way - random movement, no prompt followed, and it "still took it."
-// The per-step check IS real (server-side yaw/pitch relative to a measured
-// baseline - see pose-check's step handling), it just had no power over what
-// happened next.
-//
-// 2 matches MULTIVIEW_MIN_POSES, the same bar this codebase already uses
-// elsewhere for "a multi-view capture is worth keeping" - not stricter, not
-// looser, the same number meaning the same thing in both places. Below it the
-// attempt is redone, not refused: nothing is uploaded, no account is touched,
-// and trying again costs a few seconds - a materially different cost than the
-// liveness/identity refusals this codebase is careful never to make wrongly,
-// which is why this gate does not extend that same caution to it.
-const GUIDED_MIN_MEASURED = 2;
+// Turns that must be CONFIRMED during the guided capture before the clip is
+// even uploaded. Mirrors the server's ENROL_REQUIRED_POSES (config.py), which
+// is the actual gate: the server re-checks the uploaded video itself and
+// refuses a clip that does not show these, because what a browser reports is
+// not evidence. This copy exists only so an attempt that plainly missed a
+// turn is redone at once, without waiting on an upload the server will refuse.
+// "centre" is the hold-still baseline this sequence always starts from.
+const GUIDED_REQUIRED = ['left', 'right'];
 
 // The four directions, named exactly as pose-check expects. Order matters
 // only for how it reads to a person - left/right/up/down, not because the
@@ -3594,28 +3585,23 @@ async function openClipCapture(opts) {
                     cam.recordClip(GUIDED_CAPTURE_MAX_MS, null, control),
                     runGuidedSequence(control),
                 ]);
-                const seen = (control.measured || []).length;
-                if (seen < GUIDED_MIN_MEASURED) {
-                    // NOT UPLOADED. Below GUIDED_MIN_MEASURED, moving at
-                    // random and following every prompt produced the same
-                    // outcome - a clip sent for enrolment - because nothing
-                    // downstream of this loop looked at how many of its own
-                    // steps had actually succeeded. Discarding the recording
-                    // here, before onClip ever sees it, is what makes that no
-                    // longer true: nothing is uploaded and no account is
-                    // touched on an attempt this thin.
+                const measured = control.measured || [];
+                const seen = measured.length;
+                const missing = GUIDED_REQUIRED.filter(k => !measured.includes(k));
+                if (missing.length) {
+                    // NOT UPLOADED - see GUIDED_REQUIRED. Nothing is sent and
+                    // no account is touched; the person records again.
                     file = null;
-                    retryReason = seen
-                        ? `Only ${seen} of ${GUIDED_DIRECTIONS.length} movements were seen - `
-                          + 'record again and follow each prompt.'
-                        : 'No movement was seen - record again and follow each prompt.';
+                    retryReason = `Your head was not seen turning `
+                        + missing.map(k => k.toUpperCase()).join(' or ')
+                        + ' - record again and follow each prompt.';
                     // The status line sits under a camera the person is
                     // watching, not their eyes - a toast is what is actually
                     // seen. This is the one message in this whole flow that
                     // has to land, since it is the difference between "redo
                     // it" actually happening and a thin capture going through
                     // unnoticed exactly as it always used to.
-                    showToast(seen ? 'Not enough movement' : 'No movement seen',
+                    showToast(seen ? 'Movement not confirmed' : 'No movement seen',
                               retryReason, 'error');
                 } else {
                     file = recorded;
@@ -3738,7 +3724,9 @@ async function openClipEnrol(studentId, studentName) {
             try {
                 const r = await api.postForm(`/api/students/${studentId}/enroll-video`, fd);
                 if (r.ok === false) {
-                    ui.status(livenessBanner(r.liveness, r.message), true);
+                    // Same as enrolSubmit: a pose refusal is not a liveness one.
+                    if (r.pose_check && r.pose_check.ok === false) ui.status(r.message);
+                    else ui.status(livenessBanner(r.liveness, r.message), true);
                     showToast('Not accepted', r.message || 'The clip was refused', 'error');
                     await ui.resume();
                     return;

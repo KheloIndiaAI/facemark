@@ -227,8 +227,11 @@ def centre_detail(centre_id: int) -> Optional[dict]:
         # Surfaced as a NUMBER rather than hidden entirely: an administrator
         # looking at a centre should know applications are waiting, and where.
         centre["pending_count"] = conn.execute(
-            "SELECT COUNT(*) FROM students WHERE centre_id = ? "
-            "  AND status = 'pending'", (centre_id,)
+            "SELECT COUNT(*) FROM students s WHERE s.centre_id = ? "
+            "  AND s.status = 'pending' "
+            # Only finished registrations - see sessions.HAS_VERIFIED_FACE.
+            "  AND EXISTS (SELECT 1 FROM templates t WHERE t.student_id = s.id)",
+            (centre_id,)
         ).fetchone()[0]
         centre["attendance_days"] = conn.execute(
             "SELECT COUNT(DISTINCT date) FROM attendance "
