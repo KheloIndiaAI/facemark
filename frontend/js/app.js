@@ -1411,6 +1411,11 @@ async function initRegisterPage() {
     const host = document.getElementById('reg-roster');
     if (host) {
         host.addEventListener('click', (e) => {
+            const req = e.target.closest('[data-late-request]');
+            if (req) {
+                regRequestLate(parseInt(req.dataset.lateRequest, 10), req.dataset.name || '');
+                return;
+            }
             const el = e.target.closest('[data-toggle-student]');
             if (!el) return;
             regToggle(parseInt(el.dataset.toggleStudent, 10), el.dataset.present !== 'true');
@@ -1813,13 +1818,35 @@ async function regLoad() {
 
     host.innerHTML = data.roster.map(e => {
         const on = e.present;
-        const badge = !on ? ''
+        const late = e.late_request;
+        const badge = !on
+            ? (submitted && late && late.status === 'pending'
+                ? '<span class="badge badge-amber">Late addition - waiting for super admin</span>'
+                : submitted && late && late.status === 'rejected'
+                    ? '<span class="badge badge-red">Late addition rejected</span>'
+                    : '')
+            : e.origin === 'late_approved'
+                ? '<span class="badge badge-green">Added late - approved</span>'
             : e.origin === 'self_marked'
                 ? '<span class="badge badge-blue">Self-marked</span>'
                 : e.origin === 'coach_added'
                     ? '<span class="badge badge-blue">Added by you</span>'
                     : `<span class="badge badge-green">Recognised${
                         e.confidence ? ' \u00b7 ' + Math.round(e.confidence * 100) + '%' : ''}</span>`;
+        // A submitted register is the coach's signed record: a name missing
+        // from it becomes a request a super admin decides, not a tick.
+        const btn = 'style="height:30px;font-size:12px;padding:0 12px"';
+        const action = on
+            ? `<button type="button" class="btn btn-secondary" ${btn}
+                       data-toggle-student="${e.student_id}" data-present="true" ${submitted ? 'disabled' : ''}>Present</button>`
+            : !submitted
+                ? `<button type="button" class="btn btn-primary" ${btn}
+                           data-toggle-student="${e.student_id}" data-present="false">Mark present</button>`
+                : late && late.status === 'pending'
+                    ? ''
+                    : `<button type="button" class="btn btn-secondary" ${btn}
+                               data-late-request="${e.student_id}" data-name="${Charts.esc(e.name)}">${
+                           late && late.status === 'rejected' ? 'Request again' : 'Request late addition'}</button>`;
         const geo = (on && e.geo_status && e.geo_status !== 'inside')
             ? `<span class="badge badge-amber">${Charts.esc(e.geo_status)}${
                 e.distance_m ? ' \u00b7 ' + Math.round(e.distance_m) + 'm' : ''}</span>` : '';
@@ -1833,12 +1860,8 @@ async function regLoad() {
                 <div style="font-weight:600">${Charts.esc(e.name)}</div>
                 <div class="text-xs text-muted font-mono">${Charts.esc(e.roll_no || '')}</div>
             </div>
-            <div style="display:flex;align-items:center;gap:8px">${badge}${geo}</div>
-            <button type="button" class="btn ${on ? 'btn-secondary' : 'btn-primary'}"
-                    style="height:30px;font-size:12px;padding:0 12px"
-                    data-toggle-student="${e.student_id}" data-present="${on}">
-                ${on ? 'Present' : 'Mark present'}
-            </button>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">${badge}${geo}</div>
+            ${action}
         </div>`;
     }).join('');
 }
@@ -1851,6 +1874,27 @@ function resetSessionState() {
     regSession = null;
     regCounts = { present: 0, total: 0 };
     rosterState = { coachId: null, chosen: new Set() };
+}
+
+/* Adding somebody after the register was submitted goes to a super admin as a
+   request - see /api/sessions/{id}/late-requests. */
+async function regRequestLate(studentId, name) {
+    const reason = window.prompt(
+        `Request to add ${name} to this submitted register.\n\n`
+        + `A super admin will approve or reject it. Reason (optional):`, '');
+    if (reason === null) return;
+    try {
+        const fd = new FormData();
+        fd.append('student_id', String(studentId));
+        if (reason.trim()) fd.append('reason', reason.trim());
+        const r = await api.postForm(`/api/sessions/${regSession.id}/late-requests`, fd, 'POST', true);
+        showToast('Request sent', r.result === 'already_pending'
+            ? `${name} is already waiting for a super admin.`
+            : `A super admin will decide whether ${name} is added.`, 'success');
+        await regLoad();
+    } catch (err) {
+        showToast('Could not send the request', (err && err.message) || 'Try again.', 'error');
+    }
 }
 
 async function regToggle(studentId, present) {
@@ -2107,6 +2151,32 @@ async function initOversightPage() {
         picker.value = localISODate();
         picker.addEventListener('change', () => ovLoad(picker.value));
     }
+    // Approve / reject a coach's late addition. One listener on the container,
+    // since the list is re-rendered on every load.
+    const lists = document.getElementById('ov-lists');
+    if (lists) {
+        lists.addEventListener('click', async (e) => {
+            const b = e.target.closest('[data-late-decide]');
+            if (!b) return;
+            const approve = b.dataset.lateDecide === 'approve';
+            const name = b.dataset.name || 'this athlete';
+            if (!window.confirm(approve
+                    ? `Approve: mark ${name} present on that register?`
+                    : `Reject: ${name} will not be added to that register.`)) return;
+            b.disabled = true;
+            try {
+                const fd = new FormData();
+                fd.append('approve', approve ? 'true' : 'false');
+                await api.postForm(`/api/late-requests/${b.dataset.id}`, fd, 'POST', true);
+                showToast(approve ? 'Approved' : 'Rejected',
+                          approve ? `${name} is now marked present on that register.`
+                                  : `${name} was not added.`, approve ? 'success' : 'info');
+            } catch (err) {
+                showToast('Could not decide that', (err && err.message) || 'Try again.', 'error');
+            }
+            await ovLoad(picker ? picker.value : null);
+        });
+    }
     await ovLoad(picker ? picker.value : null);
 }
 
@@ -2136,11 +2206,16 @@ async function ovLoad(day) {
     const meta = document.getElementById('ov-meta');
     if (!tiles || !lists) return;
     try {
-        const o = await api.get('/api/admin/overview' + (day ? `?date_str=${day}` : ''));
+        const [o, lr] = await Promise.all([
+            api.get('/api/admin/overview' + (day ? `?date_str=${day}` : '')),
+            api.get('/api/late-requests').catch(() => ({ requests: [] })),
+        ]);
+        const lateReqs = (lr && lr.requests) || [];
         if (meta) meta.textContent = `for ${o.date}`;
 
         tiles.innerHTML =
-              ovTile('Registers missing', o.missing_count, o.missing_count ? 'bad' : null)
+              ovTile('Late requests', lateReqs.length, lateReqs.length ? 'warn' : null)
+            + ovTile('Registers missing', o.missing_count, o.missing_count ? 'bad' : null)
             + ovTile('Submitted', o.submitted_count)
             + ovTile('Still draft', o.draft_count, o.draft_count ? 'warn' : null)
             + ovTile('Unverified', o.unverified_count, o.unverified_count ? 'bad' : null)
@@ -2158,8 +2233,34 @@ async function ovLoad(day) {
                 <span class="text-xs text-muted">${Charts.esc(sub)}</span>
             </div>`;
 
+        // Waiting on THIS person, so first. Not filtered by the date picker: a
+        // request from yesterday still needs deciding today.
+        const btn = 'style="height:30px;font-size:12px;padding:0 12px"';
+        const lateRow = x => `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--border-subtle);flex-wrap:wrap">
+                <div style="min-width:0">
+                    <div style="font-weight:600">${Charts.esc(x.athlete_name)}
+                        <span class="text-xs text-muted font-mono">${Charts.esc(x.roll_no || '')}</span></div>
+                    <div class="text-xs text-muted">${Charts.esc([
+                        x.date,
+                        x.coach_name ? `register of ${x.coach_name}` : 'centre sweep',
+                        x.centre_name,
+                        `asked by ${x.requested_by_name || 'unknown'}`,
+                    ].filter(Boolean).join(' · '))}</div>
+                    ${x.reason ? `<div class="text-xs" style="margin-top:4px">Reason: ${Charts.esc(x.reason)}</div>` : ''}
+                </div>
+                <div style="display:flex;gap:8px">
+                    <button type="button" class="btn btn-primary" ${btn} data-late-decide="approve"
+                            data-id="${x.id}" data-name="${Charts.esc(x.athlete_name)}">Approve</button>
+                    <button type="button" class="btn btn-secondary" ${btn} data-late-decide="reject"
+                            data-id="${x.id}" data-name="${Charts.esc(x.athlete_name)}">Reject</button>
+                </div>
+            </div>`;
+
         lists.innerHTML =
-              ovList('Coaches with no register today', o.missing,
+              ovList('Late attendance requests', lateReqs, lateRow,
+                     'No late additions waiting for a decision.')
+            + ovList('Coaches with no register today', o.missing,
                      x => row(x.coach_name || `Coach ${x.coach_id}`, x.centre_name || ''),
                      'Every coach with athletes has opened a register.')
             + ovList('Submitted but NOT verified', o.unverified,

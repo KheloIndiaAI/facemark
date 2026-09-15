@@ -363,6 +363,117 @@ def captures_of(session_id: int) -> List[dict]:
 # Draft rows
 # =============================================================================
 
+def request_late_addition(session_id: int, student_id: int, requested_by: int,
+                          reason: Optional[str]) -> str:
+    """Ask a super admin to add somebody to a register that is already submitted.
+
+    Returns 'created' or 'already_pending'. Raises ValueError, with a sentence
+    fit to show a coach, when it cannot be asked at all.
+
+    Only for a SUBMITTED register - an open one is edited directly - and only
+    for an active person who is not already on it. A rejected request can be
+    asked again; it re-opens the same row rather than adding a second.
+    """
+    now = config.now_stamp()
+    with connect() as conn:
+        sess = conn.execute("SELECT status FROM attendance_sessions WHERE id = ?",
+                            (int(session_id),)).fetchone()
+        if sess is None:
+            raise ValueError("No such register")
+        if sess["status"] != "submitted":
+            raise ValueError("This register is still open - mark them present directly")
+        if not _is_active_person(conn, student_id):
+            raise ValueError("That person is not an active athlete")
+        if conn.execute("SELECT 1 FROM attendance WHERE session_id = ? AND student_id = ?",
+                        (int(session_id), int(student_id))).fetchone():
+            raise ValueError("They are already marked present on this register")
+        row = conn.execute(
+            "SELECT status FROM attendance_requests WHERE session_id = ? AND student_id = ?",
+            (int(session_id), int(student_id))).fetchone()
+        if row and row["status"] == "pending":
+            return "already_pending"
+        if row:
+            conn.execute(
+                "UPDATE attendance_requests SET status = 'pending', reason = ?, requested_by = ?, "
+                "  created_at = ?, decided_by = NULL, decided_at = NULL "
+                "WHERE session_id = ? AND student_id = ?",
+                (reason, int(requested_by), now, int(session_id), int(student_id)))
+        else:
+            conn.execute(
+                "INSERT INTO attendance_requests (session_id, student_id, requested_by, reason, "
+                "  status, created_at) VALUES (?,?,?,?,'pending',?) "
+                "ON CONFLICT (session_id, student_id) DO NOTHING",
+                (int(session_id), int(student_id), int(requested_by), reason, now))
+    log.info("Late addition requested: person %s on register %s by user %s",
+             student_id, session_id, requested_by)
+    return "created"
+
+
+def late_requests_for_session(session_id: int) -> Dict[int, dict]:
+    """This register's late-addition requests, keyed by person."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT student_id, status, reason, decided_at FROM attendance_requests "
+            "WHERE session_id = ?", (int(session_id),)).fetchall()
+    return {int(r["student_id"]): dict(r) for r in rows}
+
+
+def list_late_requests(status: str = "pending") -> List[dict]:
+    """Late-addition requests for the super admin, oldest first."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT r.id, r.status, r.reason, r.created_at, r.decided_at, r.session_id, "
+            "       s.date, s.centre_id, c.name AS centre_name, p.name AS coach_name, "
+            "       a.id AS student_id, a.name AS athlete_name, a.roll_no, "
+            "       u.full_name AS requested_by_name, d.full_name AS decided_by_name "
+            "FROM attendance_requests r "
+            "JOIN attendance_sessions s ON s.id = r.session_id "
+            "JOIN students a ON a.id = r.student_id "
+            "LEFT JOIN centres c ON c.id = s.centre_id "
+            "LEFT JOIN students p ON p.id = s.coach_id "
+            "LEFT JOIN users u ON u.id = r.requested_by "
+            "LEFT JOIN users d ON d.id = r.decided_by "
+            "WHERE r.status = ? ORDER BY r.created_at", (status,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def decide_late_request(request_id: int, approve: bool, decided_by: int) -> dict:
+    """Approve or reject a late addition. Approval writes CONFIRMED attendance.
+
+    In one transaction, and only while the request is still pending, so two
+    admins deciding at once cannot both act on it.
+    """
+    now = config.now_stamp()
+    with connect() as conn:
+        r = conn.execute(
+            "SELECT r.id, r.status, r.session_id, r.student_id, r.requested_by, "
+            "       s.date, s.centre_id "
+            "FROM attendance_requests r JOIN attendance_sessions s ON s.id = r.session_id "
+            "WHERE r.id = ? FOR UPDATE OF r", (int(request_id),)).fetchone()
+        if r is None:
+            raise ValueError("No such request")
+        if r["status"] != "pending":
+            raise ValueError("That request has already been decided")
+        added = False
+        if approve:
+            if not _is_active_person(conn, int(r["student_id"])):
+                raise ValueError("That person is no longer an active athlete")
+            cur = conn.execute(
+                "INSERT INTO attendance (student_id, date, confidence, image_path, marked_at, "
+                "  centre_id, marked_by, session_id, status, origin) "
+                "VALUES (?,?,?,?,?,?,?,?,'confirmed','late_approved') "
+                "ON CONFLICT (student_id, session_id) DO NOTHING",
+                (int(r["student_id"]), r["date"], 0.0, None, now, r["centre_id"],
+                 r["requested_by"], int(r["session_id"])))
+            added = cur.rowcount > 0
+        conn.execute(
+            "UPDATE attendance_requests SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?",
+            ("approved" if approve else "rejected", int(decided_by), now, int(request_id)))
+    log.info("Late addition %s %s by user %s (attendance written: %s)",
+             request_id, "approved" if approve else "rejected", decided_by, added)
+    return {"status": "approved" if approve else "rejected", "attendance_added": added}
+
+
 def _is_active_person(conn: Conn, student_id: int) -> bool:
     """Whether attendance may be written for this person at all."""
     row = conn.execute("SELECT status FROM students WHERE id = ?",

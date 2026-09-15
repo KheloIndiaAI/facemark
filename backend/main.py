@@ -1748,6 +1748,7 @@ def read_session(session_id: int, user: dict = Depends(auth.require_staff)):
     _may_touch(user, sess)
 
     rows = sessions_mod.rows_of(session_id)
+    late = sessions_mod.late_requests_for_session(session_id)
     coach_id = sess.get("coach_id")
     if coach_id is not None:
         roster = sessions_mod.athletes_of(int(coach_id))
@@ -1777,6 +1778,8 @@ def read_session(session_id: int, user: dict = Depends(auth.require_staff)):
                          if row and row.get("image_path") else None),
             "geo_status": row.get("geo_status") if row else None,
             "distance_m": row.get("distance_m") if row else None,
+            # A late-addition request on a submitted register, if any.
+            "late_request": late.get(int(st["id"])),
         })
 
     # Anyone drafted who is NOT on this coach's roster - an admin sweep, or a
@@ -1920,6 +1923,50 @@ async def submit_session(
                     "Register submitted, but your face could not be verified - "
                     "this has been flagged for an administrator"),
     }
+
+
+@app.post("/api/sessions/{session_id}/late-requests")
+def request_late_addition(
+    session_id: int,
+    student_id: int = Form(...),
+    reason: Optional[str] = Form(None),
+    user: dict = Depends(auth.require_staff),
+):
+    """Ask a super admin to add somebody to a register already submitted.
+
+    A submitted register is the coach's signed statement of who was there, so
+    it is not edited after the fact by the person who signed it. A late name is
+    a request, and a super admin decides it.
+    """
+    sess = _session_or_404(session_id)
+    _may_touch(user, sess)
+    _person_in_scope(user, student_id)
+    try:
+        out = sessions_mod.request_late_addition(
+            session_id, student_id, int(user["id"]),
+            (reason or "").strip()[:300] or None)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True, "result": out}
+
+
+@app.get("/api/late-requests")
+def list_late_requests(status: str = "pending",
+                       user: dict = Depends(auth.require_super_admin)):
+    if status not in ("pending", "approved", "rejected"):
+        raise HTTPException(400, "status must be pending, approved or rejected")
+    return {"ok": True, "requests": sessions_mod.list_late_requests(status)}
+
+
+@app.post("/api/late-requests/{request_id}")
+def decide_late_request(request_id: int, approve: bool = Form(...),
+                        user: dict = Depends(auth.require_super_admin)):
+    """Approve (writes confirmed attendance on that register) or reject."""
+    try:
+        out = sessions_mod.decide_late_request(request_id, approve, int(user["id"]))
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True, **out}
 
 
 @app.patch("/api/sessions/{session_id}/roster/{student_id}")
