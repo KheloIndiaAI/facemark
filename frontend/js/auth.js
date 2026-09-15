@@ -416,8 +416,27 @@ function suFace() {
                 ((extra && extra.snapshots) || []).forEach((s, i) => {
                     fd.append('snapshots', s.blob, `${i}_${s.step}.jpg`);
                 });
+                // The proxy in front of the app refuses uploads over 12MB with a
+                // plain-text page, which used to surface as "Could not reach the
+                // server". Stop before sending instead, and say why.
+                if (file.size > 11 * 1024 * 1024) {
+                    ui.status('That recording was too long to upload. Record again - '
+                              + 'it only needs a few seconds.');
+                    await ui.resume();
+                    return;
+                }
                 const res = await fetch('/api/signup/face', { method: 'POST', body: fd });
-                const j = await res.json();
+                let j;
+                try {
+                    j = await res.json();
+                } catch {
+                    // Not JSON: the proxy answered, not the app. Say which.
+                    ui.status(res.status === 413
+                        ? 'That recording was too large to upload. Record again - it only needs a few seconds.'
+                        : `The server could not process that recording (error ${res.status}). Please try again.`);
+                    await ui.resume();
+                    return;
+                }
                 if (j.duplicate) {
                     // Already registered or already applied. The server has
                     // removed this application, so the camera cannot help -
@@ -439,7 +458,7 @@ function suFace() {
                 // ok:false above and never reaches "sent for approval".
                 suShow(3);
             } catch {
-                ui.status('Could not reach the server');
+                ui.status('Could not reach the server - check your internet connection and try again.');
                 await ui.resume();
             }
         },

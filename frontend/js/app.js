@@ -296,11 +296,10 @@ class CameraCapture {
         const mime = CameraCapture.pickMimeType();
         let rec;
         try {
-            // An explicit bitrate. Left to itself a phone encoder drops quality
-            // hard in indoor light and while the head is moving, which is
-            // exactly when the server has to find a face in every frame. ~4Mbps
-            // keeps a ten-second clip near 5MB, well inside the 25MB limit.
-            const bits = { videoBitsPerSecond: 4000000 };
+            // An explicit bitrate, sized against the 12MB upload cap at the
+            // proxy: 2Mbps keeps even the 40s longest guided clip near 10MB.
+            // 4Mbps was tried and pushed long clips past the cap.
+            const bits = { videoBitsPerSecond: 2000000 };
             rec = mime ? new MediaRecorder(this.stream, { mimeType: mime, ...bits })
                        : new MediaRecorder(this.stream, bits);
         } catch (err) {
@@ -2320,7 +2319,10 @@ const CLIP_MS_PLAIN = 3000;
 // stuck attempt still ends rather than recording forever. The server's own
 // liveness check on the finished clip remains the real gate either way; this
 // sequence exists to elicit good motion, not to replace it.
-const GUIDED_CAPTURE_MAX_MS = 90000;
+// 40s, not 90s: the proxy in front of the app refuses uploads over 12MB, and at
+// the recording bitrate below a 90s clip was far past it - refused with a
+// plain page the app could only report as "Could not reach the server".
+const GUIDED_CAPTURE_MAX_MS = 40000;
 
 // Turns that must be CONFIRMED during the guided capture before the clip is
 // even uploaded. Mirrors the server's ENROL_REQUIRED_POSES (config.py), which
