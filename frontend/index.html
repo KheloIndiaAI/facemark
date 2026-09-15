@@ -119,6 +119,10 @@
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
                     Register
                 </a>
+                <a href="#/take-attendance" class="nav-item" data-route="/take-attendance" data-role-only="coach">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                    Take Attendance
+                </a>
                 <a href="#/students" class="nav-item" data-route="/students" data-role-only="super_admin,coach">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
                     Directory
@@ -182,13 +186,13 @@
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
                 <span>Register</span>
             </a>
+            <a href="#/take-attendance" class="bottom-nav-item" data-route="/take-attendance" data-role-only="coach">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                <span>Take Attendance</span>
+            </a>
             <a href="#/students" class="bottom-nav-item" data-route="/students" data-role-only="super_admin,coach">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
                 <span>Directory</span>
-            </a>
-            <a href="#/centres" class="bottom-nav-item" data-route="/centres" data-role-only="super_admin,coach">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
-                <span>Centres</span>
             </a>
         </nav>
     </div>
@@ -252,6 +256,23 @@
                 </div>
             </div>
         </div>
+    </template>
+
+    <template id="tpl-take-attendance">
+        <div class="card" style="margin-bottom:16px">
+            <div class="card-body">
+                <div style="font-weight:600;margin-bottom:4px">Scan athletes one at a time</div>
+                <div class="text-sm text-muted" style="margin-bottom:12px">
+                    Point the camera at one athlete. Recording starts by itself, and each
+                    athlete recognised is marked present on today's register. Keep the
+                    camera open for the next one.
+                </div>
+                <button type="button" class="btn btn-primary" id="ta-start" style="width:100%">Start scanning</button>
+                <div id="ta-last" class="text-sm" style="margin-top:12px"></div>
+            </div>
+        </div>
+        <!-- Today's attendance table (P / Not marked), refreshed after each scan. -->
+        <div id="ta-table"></div>
     </template>
 
     <template id="tpl-oversight">

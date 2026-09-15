@@ -1922,6 +1922,55 @@ async def submit_session(
     }
 
 
+@app.post("/api/attendance/scan")
+async def scan_attendance(
+    clip: UploadFile = File(...),
+    user: dict = Depends(auth.require_staff),
+):
+    """Take Attendance: one athlete in front of the coach's camera.
+
+    Recognised only among THIS coach's active athletes, and marked on this
+    coach's register for today: a draft while the register is open (confirmed
+    when the coach submits), or a late addition once it is submitted. A clip
+    that looks like a photograph or a screen is refused.
+    """
+    if not user.get("student_id"):
+        raise HTTPException(400, "Only a coach can take attendance - this account has no register")
+    coach_id = int(auth.coach_student_id(user))
+    data = await clip.read()
+    if not data:
+        raise HTTPException(400, "Empty upload")
+    detector = get_detector()
+    result = liveness.analyse(data, detector)
+    if result.verdict == "screen":
+        return {"ok": False, "reason": "screen", "message": result.reason}
+    frames = portrait_mod.ranked(result.frames or [], detector)[:3]
+    if not frames:
+        return {"ok": False, "reason": "no_face",
+                "message": "No face found - hold the camera on one athlete and try again"}
+    match = sessions_mod.recognise_on_roster(frames, coach_id)
+    if not match:
+        return {"ok": False, "reason": "unknown",
+                "message": "Not recognised as one of your athletes"}
+
+    coach = database.get_student(coach_id)
+    centre_id = (coach or {}).get("centre_id")
+    day = config.today_str()
+    sess = sessions_mod.get_or_create(centre_id, coach_id, int(user["id"]), day)
+    sid, name = match["student_id"], match["name"]
+    if sess["status"] == "submitted":
+        action = sessions_mod.set_late_present(sess["id"], sid, True, day, centre_id, int(user["id"]))
+        already, late = action == "noop", True
+    else:
+        added = sessions_mod.draft(sess["id"], sid, day, match["score"], origin="recognised",
+                                   centre_id=centre_id, marked_by=int(user["id"]))
+        already, late = not added, False
+    log.info("Take Attendance: coach %s scanned person %s (%.3f) - %s",
+             coach_id, sid, match["score"], "already present" if already else ("late" if late else "drafted"))
+    return {"ok": True, "student_id": sid, "name": name, "score": round(match["score"], 4),
+            "late": late, "already": already, "liveness": result.verdict}
+
+
 @app.get("/api/late-additions")
 def late_additions(date_str: Optional[str] = None,
                    user: dict = Depends(auth.require_super_admin)):

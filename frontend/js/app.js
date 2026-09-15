@@ -426,7 +426,7 @@ function handleRoute() {
     // straight past it. The server is the real boundary - every one of these
     // routes' endpoints is staff-only now - but a page that loads and then
     // fails every request is a worse answer than not opening it.
-    const STAFF_ROUTES = ['/dashboard', '/oversight', '/register',
+    const STAFF_ROUTES = ['/dashboard', '/oversight', '/register', '/take-attendance',
                           '/students', '/centres', '/users'];
     if (typeof isAthlete === 'function' && isAthlete() && STAFF_ROUTES.includes(hash)) {
         window.location.hash = '#' + home;
@@ -490,6 +490,11 @@ function handleRoute() {
         const tpl = document.getElementById('tpl-register').content.cloneNode(true);
         root.appendChild(tpl);
         initRegisterPage();
+    }
+    else if (hash === '/take-attendance') {
+        title.textContent = 'Take Attendance';
+        root.appendChild(document.getElementById('tpl-take-attendance').content.cloneNode(true));
+        initTakeAttendancePage();
     }
     else if (hash === '/students') {
         title.textContent = 'Directory';
@@ -685,8 +690,8 @@ async function checkHealth() {
 /* The one dashboard card that depends on who is looking: a coach sees which of
    their athletes have no attendance today; the super admin sees attendance
    that was added after a register was submitted, centre by centre. */
-async function renderDashboardRoleCard() {
-    const host = document.getElementById('dashboard-role-card');
+async function renderDashboardRoleCard(hostId = 'dashboard-role-card') {
+    const host = document.getElementById(hostId);
     if (!host) return;
     const E = Charts.esc;
     const card = (title, sub, body) => `
@@ -1457,6 +1462,57 @@ async function executeDeleteStudent(id) {
 
 let regSession = null;
 let regCounts = { present: 0, total: 0 };
+
+/* ---------------------------------------------------------------------------
+   Take Attendance
+
+   The coach's rear camera, one athlete at a time. Each clip is recognised
+   against this coach's own athletes and, on a match, marks that athlete
+   present on today's register (added late if it is already submitted). The
+   camera stays open: recording starts again by itself once the last face has
+   left the frame and the next athlete steps up.
+--------------------------------------------------------------------------- */
+async function initTakeAttendancePage() {
+    const start = document.getElementById('ta-start');
+    if (start) start.addEventListener('click', taScan);
+    await renderDashboardRoleCard('ta-table');
+}
+
+function taScan() {
+    const last = document.getElementById('ta-last');
+    openClipCapture({
+        title: 'Take attendance',
+        guided: false,
+        facingMode: 'environment',
+        rearmOnNoFace: true,
+        intro: 'Point the camera at one athlete. Recording starts by itself once their '
+             + 'face is found - move the phone slightly while it records.',
+        onClip: async (file, ui) => {
+            ui.status('Checking…');
+            try {
+                const fd = new FormData();
+                fd.append('clip', file);
+                const r = await api.postForm('/api/attendance/scan', fd, 'POST', true);
+                if (!r.ok) {
+                    speak(r.message || 'Not recognised');
+                    ui.status(r.message || 'Not recognised - try again.');
+                } else {
+                    const msg = r.already ? `${r.name} is already marked present`
+                        : r.late ? `${r.name} - added late` : `${r.name} - present`;
+                    speak(r.already ? `${r.name}, already present` : `${r.name}, present`);
+                    ui.status(`✓ ${msg}. Next athlete, please.`);
+                    if (last) last.textContent = `Last scanned: ${msg}`;
+                    renderDashboardRoleCard('ta-table');
+                }
+            } catch (err) {
+                ui.status((err && err.message) || 'Could not check that - try again.');
+            }
+            // A moment to read the result before the next athlete steps up.
+            await new Promise(res => setTimeout(res, 1800));
+            await ui.resume();
+        },
+    });
+}
 
 async function initRegisterPage() {
     const sub = document.getElementById('reg-submit-btn');
@@ -2398,6 +2454,21 @@ const ENROL_CLIP_SAMPLE_FRAMES = 60;  // config.ENROL_POSE_SAMPLE_FRAMES
 const LOCAL_POSE_STALE_MS = 400;      // older than this is not a live reading
 const LOCAL_POSE_GIVEUP_MS = 2500;    // this long with none: hand back to the server
 
+/* Spoken prompts during a recording. The phone is at arm's length and the
+   person is turning their head, so a line of text is easy to miss. Speech
+   runs after the tap that opened the camera, which is what browsers require.
+   Never fatal: no voice is simply no voice. */
+function speak(text) {
+    try {
+        if (!text || !('speechSynthesis' in window)) return;
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = 'en-IN';
+        u.rate = 1;
+        window.speechSynthesis.speak(u);
+    } catch { /* no audio */ }
+}
+
 const POSE_ACCENT_WAIT = '#f59e0b';   // amber: a face, but not usable yet
 const POSE_ACCENT_GOOD = '#22c55e';   // green: framed, and the shutter is live
 
@@ -2419,6 +2490,12 @@ async function openClipCapture(opts) {
             <video id="clip-cap-video" class="camera-video" autoplay playsinline muted></video>
             <canvas id="clip-cap-overlay" class="camera-overlay"></canvas>
             <div class="rec-hint" id="clip-cap-hint">Looking for a face...</div>
+            <div id="clip-cap-analyzing" style="position:absolute;top:12px;left:50%;transform:translateX(-50%);
+                 background:rgba(0,0,0,0.62);color:#fff;padding:6px 14px;border-radius:999px;font-size:13px;
+                 font-weight:600;white-space:nowrap;z-index:5;min-height:18px"></div>
+            <div id="clip-cap-processing" style="display:none;position:absolute;inset:0;align-items:center;
+                 justify-content:center;background:rgba(0,0,0,0.6);color:#fff;font-size:18px;font-weight:600;
+                 z-index:6;text-align:center;padding:16px">Processing, please wait....</div>
             <!-- Shown only while recording. Separate from #clip-cap-hint on
                  purpose: the pose-check poll used for pre-recording framing
                  (tick()) keeps overwriting that pill, which would fight the
@@ -2465,6 +2542,32 @@ async function openClipCapture(opts) {
     const video   = document.getElementById('clip-cap-video');
     const overlay = document.getElementById('clip-cap-overlay');
     const hint    = document.getElementById('clip-cap-hint');
+    const analyzing  = document.getElementById('clip-cap-analyzing');
+    const processing = document.getElementById('clip-cap-processing');
+
+    // "Please hold - Analyzing", typed out letter by letter and looped, while
+    // the camera looks for a usable face. Hidden once recording starts.
+    const TYPE_TEXT = 'Please hold - Analyzing';
+    let typeTimer = 0;
+    function showAnalyzing(on) {
+        if (!analyzing) return;
+        if (!on) {
+            clearInterval(typeTimer); typeTimer = 0;
+            analyzing.style.display = 'none';
+            return;
+        }
+        analyzing.style.display = '';
+        if (typeTimer) return;
+        let i = 0;
+        typeTimer = setInterval(() => {
+            i = (i + 1) % (TYPE_TEXT.length + 10);          // a short pause after each pass
+            const n = Math.min(i, TYPE_TEXT.length);
+            analyzing.textContent = TYPE_TEXT.slice(0, n) + (i <= TYPE_TEXT.length ? '▌' : '');
+        }, 90);
+    }
+    // Over the frozen camera while the server checks the recording.
+    const showProcessing = on => { if (processing) processing.style.display = on ? 'flex' : 'none'; };
+    showAnalyzing(true);
     const shutter = document.getElementById('clip-cap-shutter');
     const ring    = document.getElementById('clip-cap-ring');
     const status  = document.getElementById('clip-cap-status');
@@ -2477,7 +2580,8 @@ async function openClipCapture(opts) {
     if (dotGood) dotGood.style.background = POSE_ACCENT_GOOD;
 
     const cam = new CameraCapture(video, null, null);
-    cam.facingMode = 'user';                 // enrolment photographs the holder
+    // Front camera photographs the holder; Take Attendance scans somebody else.
+    cam.facingMode = opts.facingMode || 'user';
     if (await cam.start() === false) { closeModal(); return; }
 
     const state = { busy: false, timer: null, box: null, landmarks: null, good: false,
@@ -2505,6 +2609,8 @@ async function openClipCapture(opts) {
         state.raf = 0;
         state.mesh = null;
         state.pose = null;
+        clearInterval(typeTimer);
+        try { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); } catch { /* ok */ }
         try { cam.stop(); } catch { /* already stopped */ }
     };
     const modal = document.getElementById('modal-container');
@@ -2747,12 +2853,21 @@ async function openClipCapture(opts) {
             state.good = state.goodStreak >= GOOD_STREAK_TO_ARM;
             hint.textContent = state.good
                 ? (state.recording ? 'Recording - keep moving gently'
-                    : angleOnly ? `Tap to record - ${(r.message || '').toLowerCase()} if you can`
-                    : 'Face found - tap to record')
+                    : angleOnly ? `Starting - ${(r.message || '').toLowerCase()} if you can`
+                    : 'Face found - starting')
                 : rawGood
                     ? 'Hold steady…'
                     : (r.message || 'No face detected');
             if (!state.recording) shutter.disabled = !state.good;
+            showAnalyzing(!state.good && !state.recording);
+            // Scanning several people: wait for the last face to leave the frame
+            // before recording again, or the same athlete is recorded on a loop.
+            if (!rawGood && opts.rearmOnNoFace) state.autoFired = false;
+            // AUTO-RECORD. The green dots are the go signal - nobody taps.
+            if (state.good && !state.recording && !state.autoFired && opts.autoRecord !== false) {
+                state.autoFired = true;
+                shutter.click();
+            }
             // Recovered. Anything the last failure put on screen has just been
             // overwritten by a real answer, so drop back to the fast poll.
             state.fails = 0;
@@ -2812,6 +2927,13 @@ async function openClipCapture(opts) {
             if (state.closed) { try { cam.stop(); } catch {} return false; }  // closed while starting
             state.alive = true;
             state.fails = 0;
+            // Back to looking for a face: analyzing banner on, processing off,
+            // and auto-record armed again (or armed once the face has left, when
+            // scanning one person after another).
+            state.autoFired = !!opts.rearmOnNoFace;
+            showProcessing(false);
+            hint.classList.remove('hidden');
+            showAnalyzing(true);
             // NOT shutter.disabled = false here. This used to enable the
             // shutter the instant the camera restarted - before tick() had
             // run even once for the retry - so a refusal's "try again" could
@@ -2879,6 +3001,7 @@ async function openClipCapture(opts) {
         promptArrow.classList.add('hidden');
         setPromptLive('');
         if (navigator.vibrate) navigator.vibrate([25, 40, 25]);
+        speak(text || 'Got it');
         await new Promise(res => setTimeout(res, 450));
         promptBox.classList.remove('done');
     }
@@ -2893,6 +3016,7 @@ async function openClipCapture(opts) {
         // usually held at arm's length during this, where a small on-screen
         // text change is easy to miss.
         if (navigator.vibrate) navigator.vibrate(25);
+        speak(step.text);
     }
 
     /** Wait for one frame captured DURING an active recording to satisfy one
@@ -3236,6 +3360,7 @@ async function openClipCapture(opts) {
         state.recording = true;
         shutter.disabled = true;
         shutter.classList.add('recording');
+        showAnalyzing(false);
         ui.status(opts.guided === false
             ? 'Recording - move the phone slowly side to side.'
             : 'Recording - follow the on-screen prompts.');
@@ -3338,6 +3463,8 @@ async function openClipCapture(opts) {
             state.goodStreak = 0; state.goodHist = [];
             shutter.disabled = true;
             ui.status(retryReason);
+            state.autoFired = false;            // record again by itself once framed
+            showAnalyzing(true);
             // The framing loop was stopped to give the guided sequence sole
             // use of pose-check; restore it so the shutter re-enables/
             // disables correctly for the retry instead of staying stuck at
@@ -3357,7 +3484,12 @@ async function openClipCapture(opts) {
         // the opposite of what the person just asked for. state.closed is
         // one-way, so testing it here is the whole fix.
         if (state.closed) return;
+        // The server check takes a few seconds: say so in the middle of the
+        // frozen camera, not with a stale "recording" pill left on it.
+        hint.classList.add('hidden');
+        showProcessing(true);
         await opts.onClip(file, ui, { snapshots });
+        showProcessing(false);
     });
 }
 

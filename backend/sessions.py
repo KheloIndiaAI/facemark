@@ -413,6 +413,37 @@ def set_late_present(session_id: int, student_id: int, present: bool, day: str,
         return "removed"
 
 
+def recognise_on_roster(frames, coach_id: int) -> Optional[dict]:
+    """Which of this coach's athletes is in these frames?
+
+    For Take Attendance. The best match over the given frames, at the
+    register's MATCH_THRESHOLD, against a gallery narrowed to the coach's
+    ACTIVE athletes - so it can only ever mark somebody on this coach's own
+    register. None when nobody clears the threshold.
+    """
+    from . import database
+    roster = {int(a["id"]): a for a in athletes_of(coach_id)
+              if (a.get("status") or "active") == "active"}
+    if not roster:
+        return None
+    narrowed = {}
+    for model, (tids, sids, mat) in database.load_gallery().items():
+        keep = np.isin(np.asarray(sids).astype(int), list(roster))
+        if keep.any():
+            narrowed[model] = (np.asarray(tids)[keep], np.asarray(sids)[keep], mat[keep])
+    if not narrowed:
+        return None
+    best = None
+    for f in frames:
+        m = find_existing_person(f, narrowed)
+        if m.get("student_id") and (best is None or m["score"] > best["score"]):
+            best = m
+    if best is None:
+        return None
+    sid = int(best["student_id"])
+    return {"student_id": sid, "name": roster[sid]["name"], "score": float(best["score"])}
+
+
 def late_additions(day: str) -> dict:
     """Attendance added after its register was submitted, for one day.
 
