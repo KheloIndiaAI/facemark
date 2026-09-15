@@ -1050,6 +1050,43 @@ def attendance_for_day(day: str, centre_id: Optional[int] = None) -> List[dict]:
         return out
 
 
+def student_attendance_timeline(student_id: int, limit: int = 120) -> List[dict]:
+    """An athlete's OWN view: confirmed days, plus marks still waiting on a coach.
+
+    student_attendance_history stays confirmed-only - staff pages build
+    percentages from it. The athlete needs to see a self-mark the moment it is
+    made: listing confirmed rows only showed "No attendance recorded yet" right
+    after they had marked themselves, with nothing to say it was waiting.
+
+    `state`: confirmed (on a submitted register), pending (on a register the
+    coach has not submitted), lapsed (on a register that closed unsubmitted).
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT a.id, a.date, a.marked_at, a.status, a.origin, "
+            "       ss.status AS session_status, p.name AS coach_name "
+            "FROM attendance a "
+            "LEFT JOIN attendance_sessions ss ON ss.id = a.session_id "
+            "LEFT JOIN students p ON p.id = ss.coach_id "
+            "WHERE a.student_id = ? AND a.status IN ('confirmed', 'draft') "
+            "ORDER BY a.date DESC, a.marked_at DESC LIMIT ?",
+            (student_id, int(limit)),
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d["status"] == "confirmed":
+            d["state"] = "confirmed"
+        elif d.get("session_status") in ("draft", "expired"):
+            # An expired register is reopened as soon as the coach asks for it
+            # again, so the mark is still waiting rather than lost.
+            d["state"] = "pending"
+        else:
+            d["state"] = "lapsed"
+        out.append(d)
+    return out
+
+
 def student_attendance_history(student_id: int) -> List[dict]:
     """Full attendance history for one student, newest first."""
     with connect() as conn:
@@ -1116,6 +1153,21 @@ def stats(centre_id: Optional[int] = None) -> dict:
             "WHERE a.status = 'confirmed' AND a.date = ? AND s.role = 'coach'"
             + acs, [today] + cp
         ).fetchone()[0]
+        # Marked today on a register still open - self-marks and names ticked
+        # by hand - and not already confirmed elsewhere today. NOT attendance:
+        # every count above stays confirmed-only, which CI asserts. But the
+        # dashboard has to say these exist; "Present 0" beside a register full
+        # of names read as if marking had not worked at all.
+        marked_today = conn.execute(
+            "SELECT COUNT(DISTINCT a.student_id) FROM attendance a "
+            "JOIN students s ON s.id = a.student_id "
+            "JOIN attendance_sessions ss ON ss.id = a.session_id "
+            "WHERE a.status = 'draft' AND ss.status = 'draft' AND a.date = ? "
+            "  AND s.role = 'athlete' "
+            "  AND NOT EXISTS (SELECT 1 FROM attendance c2 WHERE c2.student_id = a.student_id "
+            "                  AND c2.date = a.date AND c2.status = 'confirmed')"
+            + acs, [today] + cp
+        ).fetchone()[0]
         total_rows = conn.execute(
             "SELECT COUNT(*) FROM attendance a WHERE a.status = 'confirmed'" + acs, cp
         ).fetchone()[0]
@@ -1133,6 +1185,7 @@ def stats(centre_id: Optional[int] = None) -> dict:
         "unenrolled": max(n_students - n_enrolled, 0),
         "present_today": present_today,
         "coaches_present_today": coaches_present_today,
+        "marked_today": marked_today,
         "absent_today": max(n_enrolled - present_today, 0),
         "attendance_rate": round(100.0 * present_today / n_enrolled, 1) if n_enrolled else 0.0,
         "total_records": total_rows,

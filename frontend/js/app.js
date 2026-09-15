@@ -702,6 +702,10 @@ async function renderDashboard() {
                     <span>Present Today</span>
                 </div>
                 <div class="stat-value text-green">${stats.present_today}</div>
+                ${stats.marked_today ? `
+                <a href="#/register" class="text-xs" style="display:block;margin-top:6px;color:#b45309;font-weight:500">
+                    +${stats.marked_today} marked, not yet confirmed - submit the register to count them
+                </a>` : ''}
                 ${spark ? `<div class="stat-spark">${spark}</div>` : ''}
             </div>
             <div class="stat-card">
@@ -1965,17 +1969,31 @@ async function meLoadCoaches() {
                     Your coach adds you to their roster.</div></div>`;
             return;
         }
-        host.innerHTML = r.coaches.map(c => `
+        // Where today stands with each coach, so a mark never vanishes into
+        // silence: waiting for the coach, confirmed, or left off a submitted
+        // register. The button is only offered while nothing is recorded yet.
+        const TODAY = {
+            confirmed:  ['badge-green', 'Present today - confirmed by your coach'],
+            pending:    ['badge-amber', 'Marked - waiting for your coach to confirm'],
+            not_marked: ['badge-red',   'Not marked present today'],
+        };
+        host.innerHTML = r.coaches.map(c => {
+            const state = (c.today && c.today.state) || 'open';
+            const badge = TODAY[state];
+            return `
             <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border-subtle)">
                 <div style="flex:1;min-width:0">
                     <div style="font-weight:600">${Charts.esc(c.name)}</div>
                     <div class="text-xs text-muted">${Charts.esc(c.centre_name || '')}</div>
+                    ${badge ? `<span class="badge ${badge[0]}" style="margin-top:6px;white-space:normal;line-height:1.3">${badge[1]}</span>` : ''}
                 </div>
+                ${state === 'open' ? `
                 <button type="button" class="btn btn-primary" style="height:32px;font-size:12px;padding:0 14px"
                         data-mark-coach="${c.id}" data-coach-name="${Charts.esc(c.name)}">
                     Mark me present
-                </button>
-            </div>`).join('');
+                </button>` : ''}
+            </div>`;
+        }).join('');
     } catch (err) {
         host.innerHTML = `<div class="empty-state">Could not load your coaches.</div>`;
     }
@@ -1990,11 +2008,24 @@ async function meLoadHistory() {
             host.innerHTML = `<div class="empty-state">No attendance recorded yet.</div>`;
             return;
         }
-        host.innerHTML = r.records.slice(0, 60).map(x => `
-            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-subtle)">
-                <span class="font-mono">${Charts.esc(x.date)}</span>
-                <span class="text-xs text-muted">${Charts.esc((x.marked_at || '').replace('T', ' '))}</span>
-            </div>`).join('');
+        const LABEL = {
+            confirmed: ['badge-green', 'Confirmed'],
+            pending:   ['badge-amber', 'Waiting for coach'],
+            lapsed:    ['badge-red',   'Not confirmed'],
+        };
+        host.innerHTML = r.records.slice(0, 60).map(x => {
+            const [cls, text] = LABEL[x.state] || LABEL.confirmed;
+            const sub = [x.coach_name, (x.marked_at || '').replace('T', ' ').slice(0, 16)]
+                .filter(Boolean).join(' · ');
+            return `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-subtle)">
+                <div style="min-width:0">
+                    <div class="font-mono">${Charts.esc(x.date)}</div>
+                    <div class="text-xs text-muted">${Charts.esc(sub)}</div>
+                </div>
+                <span class="badge ${cls}">${text}</span>
+            </div>`;
+        }).join('');
     } catch (err) {
         host.innerHTML = `<div class="empty-state">Could not load your history.</div>`;
     }
@@ -2039,7 +2070,7 @@ function meMark(coachId, coachName) {
                     ui.close();
                     showToast('Marked', r.message || 'Your coach will confirm it.',
                               r.geo && r.geo.status === 'inside' ? 'success' : 'warning');
-                    await meLoadHistory();
+                    await Promise.all([meLoadCoaches(), meLoadHistory()]);
                 } catch (err) {
                     ui.status((err && err.message) || 'Could not mark you present.');
                     await ui.resume();

@@ -2046,21 +2046,40 @@ def unlink_athlete(coach_id: int, athlete_id: int,
 
 @app.get("/api/me/coaches")
 def my_coaches(user: dict = Depends(auth.current_user)):
-    """Which coaches this athlete trains under."""
+    """Which coaches this athlete trains under, and where today stands with each.
+
+    `today.state`: confirmed (on the coach's submitted register), pending
+    (marked, not submitted yet), not_marked (the coach submitted today's
+    register without them), open (nothing yet - they can mark themselves).
+    """
     me = auth.scope_self(user, None)
-    return {"ok": True, "student_id": me, "coaches": sessions_mod.coaches_of(me)}
+    today = sessions_mod.my_registers_today(me, config.today_str())
+    coaches = sessions_mod.coaches_of(me)
+    for c in coaches:
+        t = today.get(int(c["id"])) or {}
+        if t.get("mine") == "confirmed":
+            state = "confirmed"
+        elif t.get("mine") == "draft":
+            state = "pending"
+        elif t.get("session") == "submitted":
+            state = "not_marked"
+        else:
+            state = "open"
+        c["today"] = {"state": state}
+    return {"ok": True, "student_id": me, "coaches": coaches}
 
 
 @app.get("/api/me/attendance")
 def my_attendance(user: dict = Depends(auth.current_user)):
-    """This athlete's own confirmed history."""
+    """This athlete's own attendance, including marks still waiting on a
+    coach - see database.student_attendance_timeline."""
     me = auth.scope_self(user, None)
     st = database.get_student(me)
     return {
         "ok": True,
         "student_id": me,
         "name": st["name"] if st else None,
-        "records": database.student_attendance_history(me),
+        "records": database.student_attendance_timeline(me),
     }
 
 

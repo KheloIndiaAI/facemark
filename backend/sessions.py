@@ -159,6 +159,23 @@ def coaches_of(athlete_id: int) -> List[dict]:
         return [dict(r) for r in rows]
 
 
+def my_registers_today(athlete_id: int, day: str) -> Dict[int, dict]:
+    """Today's register of each of this athlete's coaches, keyed by coach id:
+    the register's status and this athlete's row on it (None if not on it)."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT s.coach_id, s.status AS session_status, "
+            "  (SELECT a.status FROM attendance a WHERE a.session_id = s.id "
+            "     AND a.student_id = ?) AS mine "
+            "FROM attendance_sessions s "
+            "JOIN coach_athletes ca ON ca.coach_id = s.coach_id AND ca.athlete_id = ? "
+            "WHERE s.date = ?",
+            (int(athlete_id), int(athlete_id), day),
+        ).fetchall()
+    return {int(r["coach_id"]): {"session": r["session_status"], "mine": r["mine"]}
+            for r in rows}
+
+
 def athlete_ids_of(coach_id: int) -> set:
     with connect() as conn:
         return {
