@@ -80,7 +80,10 @@ async function doLogin(ev) {
         // without the other silently keeps the old landing page. That is
         // exactly what happened when the router learned about athletes and
         // this line did not.
-        window.location.hash = isAthlete() ? '#/me' : '#/register';
+        // A super admin has no register of their own - landing them on Register
+        // raised "A centre is required to open a register" on every sign-in -
+        // so they start on the Dashboard, where late attendance is reported.
+        window.location.hash = isAthlete() ? '#/me' : isSuperAdmin() ? '#/dashboard' : '#/register';
         handleRoute();
         showToast('Welcome', `Signed in as ${data.user.full_name}`, 'success');
     } catch {

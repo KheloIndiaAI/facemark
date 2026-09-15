@@ -196,25 +196,6 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON auth_sessions(user_id);
 
--- ---------------------------------------------- late additions to a register
--- Once a coach has submitted a register it is closed. Adding somebody after
--- that is a REQUEST, decided by a super admin; approval writes a confirmed
--- attendance row on that register. One request per person per register - a
--- rejected one may be asked again, which re-opens the same row.
-CREATE TABLE IF NOT EXISTS attendance_requests (
-    id           SERIAL PRIMARY KEY,
-    session_id   INTEGER NOT NULL REFERENCES attendance_sessions(id) ON DELETE CASCADE,
-    student_id   INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-    requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    reason       TEXT,
-    status       TEXT NOT NULL DEFAULT 'pending',     -- pending | approved | rejected
-    decided_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    decided_at   TEXT,
-    created_at   TEXT NOT NULL,
-    UNIQUE (session_id, student_id)
-);
-CREATE INDEX IF NOT EXISTS idx_att_requests_status ON attendance_requests(status, created_at);
-
 """
 
 # Sources: id (raw ID-card crop), restored (GFPGAN), live (recent photo),
@@ -555,7 +536,10 @@ def _drop_removed_tables(conn: Conn) -> None:
     # otp_challenges joins them: phone verification was removed with the SMS
     # provider it depended on. Dropping rather than leaving an empty table
     # behind, which is the sort of thing that gets rediscovered and reconnected.
-    for t in ("performance", "metrics", "otp_challenges"):
+    # attendance_requests joins them: late additions to a submitted register
+    # went to a super admin for approval, and that flow was replaced by coaches
+    # adding late joiners directly, reported centre by centre instead.
+    for t in ("performance", "metrics", "otp_challenges", "attendance_requests"):
         conn.execute(f"DROP TABLE IF EXISTS {t}")
 
 
