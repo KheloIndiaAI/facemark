@@ -1750,7 +1750,10 @@ def read_session(session_id: int, user: dict = Depends(auth.require_staff)):
     rows = sessions_mod.rows_of(session_id)
     coach_id = sess.get("coach_id")
     if coach_id is not None:
-        roster = sessions_mod.athletes_of(int(coach_id))
+        # Linked athletes AND the centre's active athletes - the same people
+        # Take Attendance recognises, so anyone it marks is listed here to be
+        # seen, ticked or unticked before the register is submitted.
+        roster = sessions_mod.register_roster(int(coach_id), sess["centre_id"])
     else:
         # Admin sweep: the centre's whole roster, minus anybody not approved.
         # Attendance cannot be written for them anyway, so listing them offers

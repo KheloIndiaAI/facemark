@@ -715,7 +715,7 @@ async function renderDashboardRoleCard(hostId = 'dashboard-role-card') {
             const everyone = (r.athletes || []).slice()
                 .sort((x, y) => (x.present - y.present) || x.name.localeCompare(y.name));
             const body = !r.roster_count
-                ? '<div class="empty-state">No athletes are linked to you yet.</div>'
+                ? '<div class="empty-state">No athletes are registered at your centre yet.</div>'
                 : `<table class="data-table">
                     <thead><tr><th>Athlete</th><th>Roll no</th><th>Sport</th><th>Today</th><th>Last attended</th></tr></thead>
                     <tbody>${everyone.map(a => `<tr>
@@ -1808,19 +1808,22 @@ async function regLoad() {
     // Kept for the submit confirmation, which has to say what it is about to
     // record. regLoad already has the authoritative counts from the server;
     // recounting them from the DOM would be a second source of the same truth.
-    regCounts = { present: data.present_count, total: data.roster_count };
+    // Off-roster rows (on the register but not in the listed roster) count too -
+    // they are attendance the coach is about to sign for.
+    const extras = data.off_roster || [];
+    regCounts = { present: data.present_count, total: data.roster_count + extras.length };
 
     const meta = document.getElementById('reg-session-meta');
     if (meta) {
         meta.textContent =
-            `${data.session.date} \u00b7 ${data.present_count} of ${data.roster_count} present`
+            `${data.session.date} \u00b7 ${data.present_count} of ${data.roster_count + extras.length} present`
             + ` \u00b7 ${data.session.status}`;
     }
 
     // An empty roster is the state every coach starts in, and it looks
     // identical to "everybody is absent". Say which it is.
     const emptyCard = document.getElementById('reg-empty-roster');
-    if (emptyCard) emptyCard.style.display = data.roster_count ? 'none' : '';
+    if (emptyCard) emptyCard.style.display = (data.roster_count || extras.length) ? 'none' : '';
 
     const submitted = data.session.status === 'submitted';
     const subBtn = document.getElementById('reg-submit-btn');
@@ -1833,15 +1836,17 @@ async function regLoad() {
 
     const host = document.getElementById('reg-roster');
     if (!host) return;
-    if (!data.roster.length) {
+    if (!data.roster.length && !extras.length) {
         host.innerHTML = `<div class="empty-state">
-            <div>No athletes are linked to you yet.</div>
+            <div>No athletes are registered at your centre yet.</div>
             <div class="text-xs text-muted" style="margin-top:6px">
-                A super admin links athletes to a coach.</div></div>`;
+                Athletes appear here once they are registered and approved.</div></div>`;
         return;
     }
 
-    host.innerHTML = data.roster.map(e => {
+    // Everyone on the register is drawn - including anybody marked who is not
+    // in the listed roster - so what the coach signs for is what they can see.
+    host.innerHTML = [...data.roster, ...extras].map(e => {
         const on = e.present;
         const lateOrigin = e.origin === 'late_added' || e.origin === 'late_approved';
         const badge = !on ? ''

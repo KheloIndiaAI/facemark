@@ -413,6 +413,30 @@ def set_late_present(session_id: int, student_id: int, present: bool, day: str,
         return "removed"
 
 
+def register_roster(coach_id: int, centre_id: Optional[int]) -> List[dict]:
+    """Who a coach's register lists: their linked athletes plus every active
+    athlete at the centre - active only, by name.
+
+    Linking alone left most registers empty: athletes enrolled by an admin are
+    linked to nobody, and coaches no longer choose their own. So attendance
+    marked by Take Attendance, which recognises the whole centre, landed on a
+    register that did not show it - "0 of 0 present", nothing to review, and
+    nothing meaningful to submit. The register, the scan and the coach's
+    attendance table now all work from this same list.
+    """
+    people = {int(a["id"]): a for a in athletes_of(coach_id)
+              if (a.get("status") or "active") == "active"}
+    if centre_id is not None:
+        with connect() as conn:
+            for r in conn.execute(
+                    "SELECT s.*, c.name AS centre_name FROM students s "
+                    "LEFT JOIN centres c ON c.id = s.centre_id "
+                    "WHERE s.role = 'athlete' AND s.status = 'active' AND s.centre_id = ?",
+                    (int(centre_id),)).fetchall():
+                people.setdefault(int(r["id"]), dict(r))
+    return sorted(people.values(), key=lambda a: (a.get("name") or "").lower())
+
+
 def recognise_on_roster(frames, coach_id: int, centre_id: Optional[int] = None) -> Optional[dict]:
     """Which athlete is in these frames?
 
@@ -494,7 +518,11 @@ def absent_today(coach_id: int, day: str) -> dict:
     """This coach's active athletes with NO attendance on today's register -
     nobody ticked them and they did not mark themselves - with the last day
     each one did attend."""
-    athletes = [a for a in athletes_of(coach_id) if (a.get("status") or "active") == "active"]
+    # The same people the register lists - see register_roster.
+    with connect() as conn:
+        crow = conn.execute("SELECT centre_id FROM students WHERE id = ?",
+                            (int(coach_id),)).fetchone()
+    athletes = register_roster(coach_id, crow["centre_id"] if crow else None)
     with connect() as conn:
         sess = conn.execute(
             "SELECT id, status FROM attendance_sessions WHERE coach_id = ? AND date = ? "
