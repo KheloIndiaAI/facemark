@@ -1730,6 +1730,14 @@ def open_session(
         date_str,
         back_days=None if user["role"] == "super_admin" else config.SESSION_BACKDATE_DAYS,
     )
+    # An earlier register with attendance on it and never submitted comes
+    # first: a coach cannot move on to a later day until it is signed.
+    if user["role"] == "coach" and user.get("student_id"):
+        pend = sessions_mod.pending_register(int(auth.coach_student_id(user)),
+                                             config.today_str(), config.SESSION_BACKDATE_DAYS)
+        if pend and day > pend["date"]:
+            raise HTTPException(409, f"Submit your register for {pend['date']} first, "
+                                     "then take today's attendance.")
     sess = sessions_mod.get_or_create(
         scoped_centre, scoped_coach, int(user["id"]), day
     )
@@ -1925,6 +1933,17 @@ async def submit_session(
     }
 
 
+@app.get("/api/pending-register")
+def pending_register(user: dict = Depends(auth.require_staff)):
+    """An earlier register of this coach's with attendance marked but never
+    submitted, if any - the reminder to submit it before today's."""
+    if not user.get("student_id") or user.get("role") != "coach":
+        return {"ok": True, "pending": None}
+    p = sessions_mod.pending_register(int(auth.coach_student_id(user)), config.today_str(),
+                                      config.SESSION_BACKDATE_DAYS)
+    return {"ok": True, "pending": p}
+
+
 @app.post("/api/attendance/scan")
 async def scan_attendance(
     clip: UploadFile = File(...),
@@ -1941,6 +1960,14 @@ async def scan_attendance(
     if not user.get("student_id"):
         raise HTTPException(400, "Only a coach can take attendance - this account has no register")
     coach_id = int(auth.coach_student_id(user))
+    # An earlier register left unsubmitted comes first - it is reviewed and
+    # signed before today's attendance is taken.
+    pend = sessions_mod.pending_register(coach_id, config.today_str(),
+                                         config.SESSION_BACKDATE_DAYS)
+    if pend:
+        return {"ok": False, "reason": "pending_register", "pending": pend,
+                "message": f"Submit your register for {pend['date']} first, "
+                           "then take today's attendance."}
     data = await clip.read()
     if not data:
         raise HTTPException(400, "Empty upload")

@@ -413,6 +413,29 @@ def set_late_present(session_id: int, student_id: int, present: bool, day: str,
         return "removed"
 
 
+def pending_register(coach_id: int, today: str, back_days: int) -> Optional[dict]:
+    """The coach's most recent EARLIER register that has attendance marked on it
+    but was never submitted - within the window a coach may still reopen.
+
+    Coaches are reminded to submit it before taking today's attendance, and
+    Take Attendance refuses to scan until they do. Older than the window it is
+    an administrator's job, so it is not reported here.
+    """
+    from datetime import datetime
+    earliest = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=back_days)).strftime("%Y-%m-%d")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT s.id, s.date, s.status, s.centre_id, "
+            "  (SELECT COUNT(*) FROM attendance a WHERE a.session_id = s.id) AS marked "
+            "FROM attendance_sessions s "
+            "WHERE s.coach_id = ? AND s.date < ? AND s.date >= ? "
+            "  AND s.status IN ('draft', 'expired') "
+            "  AND EXISTS (SELECT 1 FROM attendance a WHERE a.session_id = s.id) "
+            "ORDER BY s.date DESC LIMIT 1",
+            (int(coach_id), today, earliest)).fetchone()
+    return dict(row) if row else None
+
+
 def register_roster(coach_id: int, centre_id: Optional[int]) -> List[dict]:
     """Who a coach's register lists: their linked athletes plus every active
     athlete at the centre - active only, by name.
@@ -916,8 +939,8 @@ def admin_overview(day: Optional[str] = None, centre_id: Optional[int] = None) -
         # no longer has, and `missing` only finds coaches with NO session row at
         # all - so a coach who opened a register, captured into it and never
         # submitted vanished from the one screen that exists to notice that.
-        # The attendance inside was deleted by the sweep, so nothing else was
-        # ever going to mention it either.
+        # Its draft attendance is kept (never counted) so the coach can reopen
+        # and submit it - see sessions.pending_register.
         expired = [dict(r) for r in conn.execute(
             "SELECT s.*, c.name AS centre_name, p.name AS coach_name "
             "FROM attendance_sessions s "

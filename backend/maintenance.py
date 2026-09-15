@@ -50,10 +50,13 @@ def _cutoff(days: int) -> str:
 def expire_drafts() -> int:
     """Close registers nobody submitted. Returns how many.
 
-    The drafts inside them go with the session: a draft is a proposal, and an
-    18-hour-old proposal nobody signed is not attendance and must never become
-    it. Confirmed rows are untouched by construction - the WHERE only ever
-    matches sessions still in 'draft'.
+    The DRAFT ROWS ARE KEPT. They used to be deleted here, so a coach who
+    marked attendance and forgot to submit found nothing to submit the next
+    day. Now the register is only marked 'expired': its drafts still never
+    count as attendance (every count is confirmed-only), the coach is reminded
+    to submit it (sessions.pending_register), and reopening it - which
+    get_or_create does - brings them back to review and sign. Confirmed rows
+    are untouched by construction.
     """
     now = config.local_now().replace(tzinfo=None).isoformat(timespec="seconds")
     with connect() as conn:
@@ -63,13 +66,6 @@ def expire_drafts() -> int:
         if not stale:
             return 0
         marks = ",".join("?" for _ in stale)
-        # Only the sessions still in 'draft' at this moment - one subquery, no
-        # second parameter list.
-        conn.execute(
-            f"DELETE FROM attendance WHERE status = 'draft' "
-            f"  AND session_id IN (SELECT id FROM attendance_sessions "
-            f"                      WHERE id IN ({marks}) AND status = 'draft')",
-            stale)
         cur = conn.execute(
             f"UPDATE attendance_sessions SET status = 'expired' "
             f" WHERE id IN ({marks}) AND status = 'draft'",

@@ -465,10 +465,6 @@ function handleRoute() {
 
     if (hash === '/dashboard') {
         title.textContent = 'Dashboard';
-        actions.innerHTML = `
-            <button class="btn btn-secondary" onclick="window.location.hash='/students'">Add Student</button>
-            <button class="btn btn-primary" onclick="window.location.hash='/register'">Open Register</button>
-        `;
         const tpl = document.getElementById('tpl-dashboard').content.cloneNode(true);
         root.appendChild(tpl);
         renderDashboard();
@@ -685,6 +681,44 @@ async function checkHealth() {
     }
 }
 
+/* An earlier register the coach marked attendance on but never submitted.
+   It comes first: the coach is reminded everywhere they would take
+   attendance, the Register page opens it before today's, and Take Attendance
+   will not scan until it is submitted. */
+async function loadPendingRegister() {
+    if (typeof isCoach !== 'function' || !isCoach()) return null;
+    try {
+        const r = await api.get('/api/pending-register');
+        return r.pending || null;
+    } catch {
+        return null;
+    }
+}
+
+function prettyDay(iso) {
+    const d = new Date(`${iso}T00:00:00`);
+    return isNaN(d) ? iso : d.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'short' });
+}
+
+async function renderPendingBanner(hostId, withButton = true) {
+    const host = document.getElementById(hostId);
+    const p = await loadPendingRegister();
+    if (!host) return p;
+    if (!p) { host.innerHTML = ''; return null; }
+    host.innerHTML = `
+        <div style="background:#fffbeb;border:1px solid #fcd34d;border-left:4px solid #f59e0b;
+                    border-radius:var(--radius-md, 10px);padding:14px 16px;margin-bottom:16px">
+            <div style="font-weight:600;margin-bottom:4px">
+                Your register for ${Charts.esc(prettyDay(p.date))} was not submitted</div>
+            <div class="text-sm" style="margin-bottom:${withButton ? '10px' : '0'}">
+                ${p.marked} ${p.marked === 1 ? 'athlete was' : 'athletes were'} marked on it.
+                Submit it first, then take today's attendance.</div>
+            ${withButton ? `<button type="button" class="btn btn-primary" onclick="window.location.hash='#/register'">
+                Submit the ${Charts.esc(prettyDay(p.date))} register</button>` : ''}
+        </div>`;
+    return p;
+}
+
 // --- Dashboard ---
 
 /* The one dashboard card that depends on who is looking: a coach sees which of
@@ -816,6 +850,7 @@ async function renderDashboard() {
         document.getElementById('dashboard-stats').innerHTML = statsHtml;
         Charts.countUp(document.getElementById('dashboard-stats'));
         renderDashboardRoleCard();
+        renderPendingBanner('dashboard-pending');
 
         const trendBox = document.getElementById('dashboard-trend');
         if (trendBox) {
@@ -1474,7 +1509,16 @@ let regCounts = { present: 0, total: 0 };
 --------------------------------------------------------------------------- */
 async function initTakeAttendancePage() {
     const start = document.getElementById('ta-start');
-    if (start) start.addEventListener('click', taScan);
+    // An earlier register left unsubmitted comes first - no scanning until then.
+    const pend = await renderPendingBanner('ta-pending');
+    if (start) {
+        if (pend) {
+            start.disabled = true;
+            start.textContent = 'Submit your earlier register first';
+        } else {
+            start.addEventListener('click', taScan);
+        }
+    }
     await renderDashboardRoleCard('ta-table');
 }
 
@@ -1494,6 +1538,13 @@ function taScan() {
                 const fd = new FormData();
                 fd.append('clip', file);
                 const r = await api.postForm('/api/attendance/scan', fd, 'POST', true);
+                if (!r.ok && r.reason === 'pending_register') {
+                    // The server's own ordering check: send them to submit it.
+                    ui.close();
+                    showToast('Submit your earlier register first', r.message, 'warning');
+                    window.location.hash = '#/register';
+                    return;
+                }
                 if (!r.ok) {
                     speak(r.message || 'Not recognised');
                     ui.status(r.message || 'Not recognised - try again.');
@@ -1778,7 +1829,7 @@ async function populateRegisterCentres() {
     } catch { /* the selector stays empty; regOpen() will report why */ }
 }
 
-async function regOpen() {
+async function regOpen(forceToday = false) {
     try {
         const fd = new FormData();
         if (session.user && session.user.centre_id) {
@@ -1787,6 +1838,11 @@ async function regOpen() {
             const cs = document.getElementById('reg-centre');
             if (cs && cs.value) fd.append('centre_id', cs.value);
         }
+        // An earlier register with attendance marked but not submitted is
+        // opened FIRST (reopening it if it had expired), so it is reviewed and
+        // signed before today's.
+        const pend = forceToday ? null : await loadPendingRegister();
+        if (pend) fd.append('date_str', pend.date);
         const r = await api.postForm('/api/sessions', fd);
         regSession = r.session;
         await regLoad();
@@ -1805,6 +1861,31 @@ async function regLoad() {
     const data = await api.get(`/api/sessions/${regSession.id}`);
     regSession = data.session;
 
+    // Working on an EARLIER day's register: say so, and once it is submitted
+    // offer the way on to today's.
+    const pendHost = document.getElementById('reg-pending');
+    if (pendHost) {
+        if (data.session.date !== localISODate()) {
+            const day = Charts.esc(prettyDay(data.session.date));
+            const done = data.session.status === 'submitted';
+            pendHost.innerHTML = done
+                ? `<div style="background:#ecfdf5;border:1px solid #6ee7b7;border-left:4px solid #16a34a;
+                               border-radius:var(--radius-md, 10px);padding:14px 16px;margin-bottom:16px">
+                       <div style="font-weight:600;margin-bottom:8px">Register for ${day} submitted.</div>
+                       <button type="button" class="btn btn-primary" id="reg-go-today">Take today's attendance</button>
+                   </div>`
+                : `<div style="background:#fffbeb;border:1px solid #fcd34d;border-left:4px solid #f59e0b;
+                               border-radius:var(--radius-md, 10px);padding:14px 16px;margin-bottom:16px">
+                       <div style="font-weight:600;margin-bottom:4px">This is your register for ${day} - it was not submitted</div>
+                       <div class="text-sm">Review it and submit it first. Today's register opens after that.</div>
+                   </div>`;
+            const go = document.getElementById('reg-go-today');
+            if (go) go.addEventListener('click', () => regOpen(true));
+        } else {
+            pendHost.innerHTML = '';
+        }
+    }
+
     // Kept for the submit confirmation, which has to say what it is about to
     // record. regLoad already has the authoritative counts from the server;
     // recounting them from the DOM would be a second source of the same truth.
@@ -1813,6 +1894,11 @@ async function regLoad() {
     const extras = data.off_roster || [];
     regCounts = { present: data.present_count, total: data.roster_count + extras.length };
 
+    const regTitle = document.getElementById('reg-session-title');
+    if (regTitle) {
+        regTitle.textContent = data.session.date === localISODate()
+            ? 'Today’s register' : `Register for ${prettyDay(data.session.date)}`;
+    }
     const meta = document.getElementById('reg-session-meta');
     if (meta) {
         meta.textContent =
@@ -1934,7 +2020,7 @@ function regSubmit() {
     const total = regCounts.total || 0;
     const absent = Math.max(0, total - present);
     if (!window.confirm(
-            `Submit today's register?
+            `Submit the register for ${regSession.date}?
 
 `
             + `Present: ${present}
@@ -1946,7 +2032,7 @@ function regSubmit() {
 `
             + `This records attendance for ${present} `
             + `${present === 1 ? 'athlete' : 'athletes'} and closes the register `
-            + `for today. It cannot be undone from here.`)) {
+            + `for that day. It cannot be undone from here.`)) {
         return;
     }
 

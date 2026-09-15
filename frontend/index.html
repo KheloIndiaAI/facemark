@@ -218,6 +218,8 @@
     <!-- Page Templates -->
     <template id="tpl-dashboard">
         <div class="dashboard-page">
+            <!-- Coach: an earlier register left unsubmitted. -->
+            <div id="dashboard-pending"></div>
             <div class="stats-grid" id="dashboard-stats">
                 <!-- Stats loaded here -->
             </div>
@@ -259,6 +261,8 @@
     </template>
 
     <template id="tpl-take-attendance">
+        <!-- An earlier register left unsubmitted blocks scanning until it is. -->
+        <div id="ta-pending"></div>
         <div class="card" style="margin-bottom:16px">
             <div class="card-body">
                 <div style="font-weight:600;margin-bottom:4px">Scan athletes one at a time</div>
@@ -328,6 +332,9 @@
             <div id="reg-approvals"></div>
         </div>
     </div>
+    <!-- An earlier register left unsubmitted, opened here first. -->
+    <div id="reg-pending"></div>
+
     <!-- Shown only when the roster is empty. That is the state every coach
          starts in, and without this the register is a blank list with no
          explanation and nothing to press. -->
@@ -344,7 +351,7 @@
     <div class="card" style="margin-bottom:16px">
         <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
             <div>
-                <div style="font-weight:600">Today&rsquo;s register</div>
+                <div style="font-weight:600" id="reg-session-title">Today&rsquo;s register</div>
                 <div class="text-xs text-muted" id="reg-session-meta">Opening&hellip;</div>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
