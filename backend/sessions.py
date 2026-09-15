@@ -466,13 +466,18 @@ def absent_today(coach_id: int, day: str) -> dict:
             "WHERE status = 'confirmed' AND date < ? "
             "  AND student_id IN (SELECT athlete_id FROM coach_athletes WHERE coach_id = ?) "
             "GROUP BY student_id", (day, int(coach_id))).fetchall()}
-    absent = [{
+    rows = [{
         "student_id": int(a["id"]), "name": a["name"], "roll_no": a.get("roll_no"),
         "sport": a.get("sport"), "centre_name": a.get("centre_name"),
+        "present": int(a["id"]) in marked,
         "last_attended": last.get(int(a["id"])),
-    } for a in athletes if int(a["id"]) not in marked]
+    } for a in athletes]
+    absent = [r for r in rows if not r["present"]]
     return {"date": day, "register_status": sess["status"] if sess else None,
-            "roster_count": len(athletes), "absent_count": len(absent), "absent": absent}
+            "roster_count": len(rows), "present_count": len(rows) - len(absent),
+            "absent_count": len(absent), "absent": absent,
+            # Everyone, present and not, for the coach's attendance table.
+            "athletes": rows}
 
 
 def _is_active_person(conn: Conn, student_id: int) -> bool:

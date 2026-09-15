@@ -704,19 +704,26 @@ async function renderDashboardRoleCard() {
             const sub = !r.register_status ? 'No register opened today yet'
                 : r.register_status === 'submitted' ? 'Register submitted'
                 : 'Register open - not submitted yet';
+            // Everyone on the roster, not just the absentees: P for anybody with
+            // attendance on today's register, "Not marked" for everybody else -
+            // listed first, since they are the ones that need chasing.
+            const everyone = (r.athletes || []).slice()
+                .sort((x, y) => (x.present - y.present) || x.name.localeCompare(y.name));
             const body = !r.roster_count
                 ? '<div class="empty-state">No athletes are linked to you yet.</div>'
-                : !r.absent.length
-                    ? '<div class="empty-state">Everyone on your roster has attendance today.</div>'
-                    : `<table class="data-table">
-                        <thead><tr><th>Athlete</th><th>Roll no</th><th>Sport</th><th>Last attended</th></tr></thead>
-                        <tbody>${r.absent.map(a => `<tr>
-                            <td class="cell-primary" data-label="Athlete">${E(a.name)}</td>
-                            <td class="font-mono text-sm" data-label="Roll no">${E(a.roll_no || '-')}</td>
-                            <td data-label="Sport">${E(a.sport || '-')}</td>
-                            <td data-label="Last attended">${E(a.last_attended || 'Never')}</td>
-                        </tr>`).join('')}</tbody></table>`;
-            host.innerHTML = card(`Absent today (${r.absent_count} of ${r.roster_count})`, sub, body);
+                : `<table class="data-table">
+                    <thead><tr><th>Athlete</th><th>Roll no</th><th>Sport</th><th>Today</th><th>Last attended</th></tr></thead>
+                    <tbody>${everyone.map(a => `<tr>
+                        <td class="cell-primary" data-label="Athlete">${E(a.name)}</td>
+                        <td class="font-mono text-sm" data-label="Roll no">${E(a.roll_no || '-')}</td>
+                        <td data-label="Sport">${E(a.sport || '-')}</td>
+                        <td data-label="Today">${a.present
+                            ? '<span class="badge badge-green">P</span>'
+                            : '<span class="badge badge-red">Not marked</span>'}</td>
+                        <td data-label="Last attended">${E(a.present ? 'Today' : (a.last_attended || 'Never'))}</td>
+                    </tr>`).join('')}</tbody></table>`;
+            host.innerHTML = card(
+                `Today's attendance - ${r.present_count} present, ${r.absent_count} not marked`, sub, body);
         } else if (isSuperAdmin()) {
             const r = await api.get('/api/late-additions');
             const summary = !r.centres.length
@@ -1507,121 +1514,12 @@ async function initRegisterPage() {
                               el.dataset.templates);
         });
     }
-    const rosterBtn = document.getElementById('reg-roster-btn');
-    if (rosterBtn) rosterBtn.addEventListener('click', openRosterEditor);
-    const rosterBtn2 = document.getElementById('reg-roster-btn-empty');
-    if (rosterBtn2) rosterBtn2.addEventListener('click', openRosterEditor);
     // Centre first, then open: for a super admin regOpen() reads #reg-centre,
     // which does not exist to read yet until this has run.
     await populateRegisterCentres();
     await Promise.all([regOpen(), regLoadApprovals()]);
 }
 
-
-/* ---------------------------------------------------------------------------
-   Who is on the register
-
-   coach_athletes decides what the register lists, and until now nothing wrote
-   it except signup approval - so a centre whose athletes were enrolled by an
-   admin had an empty register and no way to fill it. The whole roster is sent
-   at once and the server reconciles, so a coach ticks their boxes and presses
-   save once.
---------------------------------------------------------------------------- */
-
-let rosterState = { coachId: null, chosen: new Set() };
-
-async function openRosterEditor() {
-    // student_id is the coach's own students row, which is what addresses a
-    // register. It was absent from the auth payload until it was added to
-    // public_user, so this fell through to '' and asked for
-    // /api/coaches//roster - a 404 that read as "you have no athletes".
-    const coachId = (regSession && regSession.coach_id)
-        || (session.user && session.user.student_id) || '';
-    if (!coachId) {
-        // Normal for a super admin who is an operator, not a coach: there is no
-        // register that belongs to them. Say which account is the problem
-        // rather than sending a request that cannot succeed.
-        return openModal('Choose my athletes',
-            '<div class="empty-state">This account is not linked to a person '
-            + 'record for a coach, so it has no register of its own. Open a centre and '
-            + 'pick a coach, or ask a super admin to link this account.</div>',
-            '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
-    }
-    try {
-        const r = await api.get(`/api/coaches/${coachId}/roster`);
-        rosterState.coachId = r.coach_id;
-        rosterState.chosen = new Set((r.linked || []).map(Number));
-        const list = r.athletes || [];
-        if (!list.length) {
-            return openModal('Choose my athletes',
-                '<div class="empty-state">There are no enrolled athletes at this centre yet. '
-                + 'Add them on the Students page first.</div>',
-                '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
-        }
-        openModal('Choose my athletes', `
-            <div class="text-sm text-muted" style="margin-bottom:10px">
-                Tick everyone you take attendance for. Removing somebody does not
-                delete any attendance already recorded for them.
-            </div>
-            <div style="display:flex;gap:8px;margin-bottom:10px">
-                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
-                        id="roster-all">Select all</button>
-                <button type="button" class="btn btn-secondary" style="height:30px;font-size:12px;padding:0 10px"
-                        id="roster-none">Clear</button>
-                <span class="text-xs text-muted" id="roster-count" style="margin-left:auto;align-self:center"></span>
-            </div>
-            <div id="roster-list" style="max-height:46vh;overflow-y:auto">
-                ${list.map(a => `
-                <label style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border-subtle);cursor:pointer">
-                    <input type="checkbox" data-roster-id="${a.id}" ${a.linked ? 'checked' : ''}>
-                    <div style="flex:1;min-width:0">
-                        <div style="font-weight:600;font-size:13px">${Charts.esc(a.name)}</div>
-                        <div class="text-xs text-muted font-mono">${Charts.esc(a.roll_no || '')}</div>
-                    </div>
-                </label>`).join('')}
-            </div>`,
-            `<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-             <button class="btn btn-primary" id="roster-save">Save register</button>`);
-
-        const box = document.getElementById('roster-list');
-        const count = () => {
-            const n = box.querySelectorAll('[data-roster-id]:checked').length;
-            const el = document.getElementById('roster-count');
-            if (el) el.textContent = `${n} of ${list.length} selected`;
-        };
-        box.addEventListener('change', count);
-        document.getElementById('roster-all').addEventListener('click', () => {
-            box.querySelectorAll('[data-roster-id]').forEach(c => { c.checked = true; });
-            count();
-        });
-        document.getElementById('roster-none').addEventListener('click', () => {
-            box.querySelectorAll('[data-roster-id]').forEach(c => { c.checked = false; });
-            count();
-        });
-        document.getElementById('roster-save').addEventListener('click', saveRoster);
-        count();
-    } catch (err) {
-        showToast('Could not load the roster', (err && err.message) || 'Try again.', 'error');
-    }
-}
-
-async function saveRoster() {
-    const box = document.getElementById('roster-list');
-    if (!box) return;
-    const ids = Array.from(box.querySelectorAll('[data-roster-id]:checked'))
-        .map(c => c.dataset.rosterId);
-    const fd = new FormData();
-    fd.append('athlete_ids', ids.join(','));
-    try {
-        const r = await api.postForm(`/api/coaches/${rosterState.coachId}/roster`, fd, 'PUT');
-        closeModal();
-        showToast('Register updated',
-                  `${r.total} athlete${r.total === 1 ? '' : 's'} on your register.`, 'success');
-        await regLoad();
-    } catch (err) {
-        showToast('Could not save', (err && err.message) || 'Try again.', 'error');
-    }
-}
 
 async function regLoadApprovals() {
     const card = document.getElementById('reg-approvals-card');
@@ -1935,7 +1833,6 @@ async function regLoad() {
 function resetSessionState() {
     regSession = null;
     regCounts = { present: 0, total: 0 };
-    rosterState = { coachId: null, chosen: new Set() };
 }
 
 async function regToggle(studentId, present, name) {

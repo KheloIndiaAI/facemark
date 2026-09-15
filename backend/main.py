@@ -2007,13 +2007,16 @@ def read_roster(coach_id: int, user: dict = Depends(auth.require_staff)):
 def write_roster(
     coach_id: int,
     athlete_ids: str = Form(""),
-    user: dict = Depends(auth.require_staff),
+    user: dict = Depends(auth.require_super_admin),
 ):
-    """Set this coach's roster to exactly these athletes.
+    """Set this coach's roster to exactly these athletes. Super admin only.
 
-    Takes the whole list, not one change at a time: a coach setting up for the
-    first time is ticking thirty boxes, and thirty requests is thirty chances to
-    end up with a roster that is half of what they chose.
+    Coaches no longer choose their own athletes: an athlete joins a coach's
+    register by registering under that coach (and being approved), or by a
+    super admin linking them here.
+
+    Takes the whole list, not one change at a time: thirty boxes ticked should
+    either all land or all fail, not leave half a roster.
     """
     scoped = auth.scope_coach(user, coach_id)
     if scoped is None:
@@ -2022,17 +2025,6 @@ def write_roster(
         ids = [int(x) for x in athlete_ids.replace(" ", "").split(",") if x]
     except ValueError:
         raise HTTPException(400, "athlete_ids must be a comma-separated list of ids")
-    # A coach may only add people from their own centre, checked here rather
-    # than trusted from the browser.
-    if user["role"] != "super_admin" and ids:
-        with pgdb.connect() as conn:
-            marks = ",".join("?" for _ in ids)
-            outside = conn.execute(
-                f"SELECT COUNT(*) FROM students WHERE id IN ({marks}) "
-                "AND (centre_id IS DISTINCT FROM ?)", ids + [user["centre_id"]],
-            ).fetchone()[0]
-        if outside:
-            raise HTTPException(403, "You can only add athletes from your own centre")
     try:
         return {"ok": True, **sessions_mod.set_roster(int(scoped), ids)}
     except ValueError as e:
@@ -2041,7 +2033,8 @@ def write_roster(
 
 @app.post("/api/coaches/{coach_id}/athletes/{athlete_id}")
 def link_athlete(coach_id: int, athlete_id: int,
-                 user: dict = Depends(auth.require_staff)):
+                 user: dict = Depends(auth.require_super_admin)):
+    # Super admin only, like write_roster: coaches do not pick their athletes.
     scoped = auth.scope_coach(user, coach_id)
     _person_in_scope(user, athlete_id)
     try:
@@ -2053,7 +2046,8 @@ def link_athlete(coach_id: int, athlete_id: int,
 
 @app.delete("/api/coaches/{coach_id}/athletes/{athlete_id}")
 def unlink_athlete(coach_id: int, athlete_id: int,
-                   user: dict = Depends(auth.require_staff)):
+                   user: dict = Depends(auth.require_super_admin)):
+    # Super admin only, like write_roster: coaches do not pick their athletes.
     scoped = auth.scope_coach(user, coach_id)
     return {"ok": True, "removed": sessions_mod.unlink_athlete(int(scoped), athlete_id)}
 
