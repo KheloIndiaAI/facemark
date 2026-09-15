@@ -1062,6 +1062,15 @@ def _verify_enrol_poses(data: bytes, detector) -> dict:
             continue
         label = _pose_label(face, "")
         counts[label] = counts.get(label, 0) + 1
+        # "centre" in ENROL_REQUIRED_POSES means NOT TURNED SIDEWAYS. _pose_label
+        # calls any frame past 10 deg of pitch up/down, and pitch is mostly
+        # where the phone is held - a phone at chest height reads 15-30 deg for
+        # a person looking straight at it. Without this, the framing guide
+        # (which only advises on phone angle) would let that person record,
+        # and this check would then refuse the clip for never facing forward.
+        if label in ("up", "down") and abs(float((face.quality or {}).get("yaw", 0.0))) \
+                < config.MULTIVIEW_YAW_TURN:
+            counts["centre"] = counts.get("centre", 0) + 1
 
     required = list(config.ENROL_REQUIRED_POSES)
     missing = [p for p in required if not counts.get(p)]

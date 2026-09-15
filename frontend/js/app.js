@@ -2683,7 +2683,16 @@ async function openClipCapture(opts) {
             // framing and image quality gate the button.
             // The raw per-frame reading. Used for the streak below, not
             // assigned to state.good directly - see GOOD_STREAK_TO_ARM.
-            const rawGood = !!r.box && (r.ok || r.reason === 'pose');
+            // 'pitch' (phone below or above eye level) is ADVICE, not a gate.
+            // Replayed over 50 real registration clips it was the only reason
+            // any frame was ever refused - one in seven, and a tenth of frames
+            // in clips that went on to succeed sat past 27 degrees - so a phone
+            // held at chest height could keep the dots amber and the shutter
+            // locked indefinitely. The 5-point pitch estimate also carries a
+            // per-face bias. The advice stays on screen; the portrait is picked
+            // from the most frontal frame of the clip regardless.
+            const angleOnly = r.reason === 'pitch';
+            const rawGood = !!r.box && (r.ok || r.reason === 'pose' || angleOnly);
             state.goodStreak = rawGood ? state.goodStreak + 1 : 0;
             // "ok" means correctly posed AND framed. Pose does not matter for a
             // clip - the recording captures several angles by itself - so only
@@ -2692,7 +2701,9 @@ async function openClipCapture(opts) {
             // flickering good frame cannot open the shutter on its own.
             state.good = state.goodStreak >= GOOD_STREAK_TO_ARM;
             hint.textContent = state.good
-                ? (state.recording ? 'Recording - keep moving gently' : 'Face found - tap to record')
+                ? (state.recording ? 'Recording - keep moving gently'
+                    : angleOnly ? `Tap to record - ${(r.message || '').toLowerCase()} if you can`
+                    : 'Face found - tap to record')
                 : rawGood
                     ? 'Hold steady…'
                     : (r.message || 'No face detected');
