@@ -2577,12 +2577,52 @@ const LOCAL_POSE_GIVEUP_MS = 2500;    // this long with none: hand back to the s
    person is turning their head, so a line of text is easy to miss. Speech
    runs after the tap that opened the camera, which is what browsers require.
    Never fatal: no voice is simply no voice. */
+/* Australian English. Setting only `lang` is a hint many browsers ignore -
+   they keep speaking in the device's default voice - so an installed en-AU
+   voice is chosen explicitly when there is one (iOS: Karen/Lee, Android
+   Chrome: Google English (Australia), Windows: Catherine/James). The voice
+   list loads asynchronously and is often empty on the first call, hence the
+   cache refreshed on voiceschanged. Android reports the tag as en_AU.
+   A device with no Australian voice gets the nearest: New Zealand, then
+   British, then any English except Indian - never silently the default, which
+   on many phones here is the Indian voice this replaced. */
+const SPEECH_LANG = 'en-AU';
+const SPEECH_PREFERENCE = ['AU', 'NZ', 'GB'];
+let speechVoice = null;
+function pickSpeechVoice() {
+    try {
+        const voices = window.speechSynthesis.getVoices() || [];
+        const region = v => ((v.lang || '').match(/^en[-_]([a-z]{2})/i) || [])[1];
+        // A local voice starts speaking at once; a network one lags the prompt.
+        const best = list => list.find(v => v.localService) || list[0] || null;
+        speechVoice = null;
+        for (const r of SPEECH_PREFERENCE) {
+            speechVoice = best(voices.filter(v => (region(v) || '').toUpperCase() === r));
+            if (speechVoice) break;
+        }
+        if (!speechVoice) {
+            speechVoice = best(voices.filter(v => region(v) && region(v).toUpperCase() !== 'IN'));
+        }
+    } catch { speechVoice = null; }
+    return speechVoice;
+}
+if ('speechSynthesis' in window) {
+    pickSpeechVoice();
+    try {
+        window.speechSynthesis.addEventListener('voiceschanged', pickSpeechVoice);
+    } catch {
+        window.speechSynthesis.onvoiceschanged = pickSpeechVoice;
+    }
+}
+
 function speak(text) {
     try {
         if (!text || !('speechSynthesis' in window)) return;
         window.speechSynthesis.cancel();
         const u = new SpeechSynthesisUtterance(text);
-        u.lang = 'en-IN';
+        const voice = speechVoice || pickSpeechVoice();
+        if (voice) u.voice = voice;
+        u.lang = voice ? voice.lang : SPEECH_LANG;
         u.rate = 1;
         window.speechSynthesis.speak(u);
     } catch { /* no audio */ }
