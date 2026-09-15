@@ -154,6 +154,25 @@ def choose(frames: Sequence[np.ndarray], detector) -> Tuple[Optional[np.ndarray]
     return crop, info
 
 
+def ranked(frames: Sequence[np.ndarray], detector) -> list:
+    """Frames that hold a face, best portrait first - choose()'s scoring, uncropped."""
+    scored = []
+    for frame in frames:
+        if frame is None:
+            continue
+        try:
+            faces = detector.detect(frame)
+        except Exception as e:                      # noqa: BLE001
+            log.warning("Portrait: detection failed on a frame: %s", e)
+            continue
+        if not faces:
+            continue
+        face = max(faces, key=lambda f: f.width * f.height)
+        scored.append((_score(FaceQualityAssessor.assess(frame, face), face), frame))
+    scored.sort(key=lambda s: s[0], reverse=True)
+    return [f for _, f in scored]
+
+
 def from_single(img: np.ndarray, detector) -> Tuple[np.ndarray, dict]:
     """Crop one already-chosen image to its subject. Never returns None."""
     out, info = choose([img], detector)

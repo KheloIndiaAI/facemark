@@ -227,6 +227,29 @@ def _enroll_photo_templates(
     return templates, face, info
 
 
+def _enrol_from_clip(result) -> Tuple[List[dict], Optional[Face], dict, Optional[np.ndarray]]:
+    """Templates from the best FACE in a recorded clip, not its sharpest frame.
+
+    liveness.best_frame is the frame with the most whole-image detail. In the
+    ~5-second guided clip most frames are mid-turn, so that frame was often a
+    turned head or a sharp ceiling, and registration was refused with "No
+    usable face" from a clip that had just passed liveness and the pose check.
+    Frames are tried in portrait order (frontal, sharp, large face first) until
+    one yields templates. Returns (templates, face, info, frame).
+    """
+    order = portrait_mod.ranked(result.frames or [], get_detector())
+    if result.best_frame is not None:
+        order.append(result.best_frame)
+    for frame in order[:8]:
+        try:
+            templates, face, info = _enroll_photo_templates(frame, "id")
+        except HTTPException:
+            continue                    # face too small in THIS frame; try the next
+        if templates and face is not None:
+            return templates, face, info, frame
+    return [], None, {"faces_found": 0}, None
+
+
 # --- students ---------------------------------------------------------------
 
 @app.get("/api/students")
@@ -1420,8 +1443,7 @@ async def register_student_from_video(
         # a 500 once already, and this route writes roster rows about minors.
         return {"ok": False, "liveness": liveness_payload,
                 "message": "Could not read any frames from the clip - record again"}
-    best = result.best_frame if result.best_frame is not None else result.frames[0]
-    templates, face, info = _enroll_photo_templates(best, "id")
+    templates, face, info, best = _enrol_from_clip(result)
     if face is None:
         return {
             "ok": False,
@@ -2406,44 +2428,33 @@ async def signup_face(
     if result.verdict != "live":
         return {"ok": False, "message": result.reason, "liveness": result.to_dict()}
 
-    # THE GATE ON "SENT FOR APPROVAL". The account already exists (signup.start
-    # makes it at step one), but it only enters an approval queue once this
-    # person has templates - and templates are written below this line and
-    # nowhere else. Refusing here therefore keeps a capture that did not show
-    # the requested movements out of every queue, not just out of the gallery.
-    pose = _verify_enrol_poses(data, detector)
-    if not pose["ok"]:
-        log.info("Signup face refused for person %s: poses missing %s (seen %s)",
-                 student_id, pose["missing"], pose["poses_seen"])
-        return {"ok": False, "message": pose["message"], "pose_check": pose}
-
-    # The enrolment pipeline per frame. enroll_multiview cannot be reused here:
-    # it takes an authenticated user, and this caller has no account yet by
-    # definition. _enroll_photo_templates is the same underlying path.
-    best = result.best_frame if result.best_frame is not None else result.frames[0]
-    templates, face, info = _enroll_photo_templates(best, "id")
-    if not templates or face is None:
-        return {"ok": False,
-                "message": "No usable face in that clip - try again in better light",
-                "liveness": result.to_dict()}
-
-    # NO DUPLICATE REGISTRATIONS. Asked before this face joins anything, at the
-    # register's own MATCH_THRESHOLD: first against everyone already approved -
-    # athletes AND coaches, so a coach cannot also sign up as an athlete - and
-    # then against applications still waiting, which the normal gallery leaves
-    # out and which is how one person used to apply twice. This used to only
-    # flag the approver; a person is now refused outright and the unfinished
-    # application is removed, since it can never legitimately complete.
+    # NO DUPLICATE REGISTRATIONS - checked FIRST, straight after liveness. It
+    # used to run last, after the pose check and template extraction, so a
+    # person already registered whose attempt failed an earlier step (a missed
+    # turn, "No usable face") was shown that step's message and never the real
+    # answer. Still after liveness, so a photograph cannot be used to probe
+    # who is enrolled.
+    #
+    # Matched at the register's own MATCH_THRESHOLD, first against everyone
+    # already approved - athletes AND coaches, so a coach cannot also sign up
+    # as an athlete - then against applications still waiting, which the
+    # normal gallery leaves out. Up to three of the clip's best face frames,
+    # so one poor frame cannot let a duplicate through. The unfinished
+    # application is withdrawn: it can never legitimately complete.
     #
     # The reply names nobody. The caller is unauthenticated, and saying WHO the
     # face matched would turn this into a lookup of registered minors.
-    dup = sessions_mod.find_existing_person(best)
-    dup_kind = "registered"
-    if not dup.get("student_id"):
-        dup = sessions_mod.find_existing_person(
-            best, database.load_pending_gallery(student_id))
-        dup_kind = "pending"
-    if dup.get("student_id"):
+    pending_gallery = None
+    for probe in portrait_mod.ranked(result.frames or [], detector)[:3]:
+        dup = sessions_mod.find_existing_person(probe)
+        dup_kind = "registered"
+        if not dup.get("student_id"):
+            if pending_gallery is None:
+                pending_gallery = database.load_pending_gallery(student_id)
+            dup = sessions_mod.find_existing_person(probe, pending_gallery)
+            dup_kind = "pending"
+        if not dup.get("student_id"):
+            continue
         log.warning("Signup for person %s refused: face matches %s person %s (%.3f)",
                     student_id, dup_kind, dup["student_id"], dup["score"])
         try:
@@ -2458,6 +2469,26 @@ async def signup_face(
             "An application with this face is already waiting for approval. "
             "You can only apply once - ask your coach or centre administrator "
             "to approve or remove the earlier one.")}
+
+    # THE GATE ON "SENT FOR APPROVAL". The account already exists (signup.start
+    # makes it at step one), but it only enters an approval queue once this
+    # person has templates - and templates are written below this line and
+    # nowhere else. Refusing here therefore keeps a capture that did not show
+    # the requested movements out of every queue, not just out of the gallery.
+    pose = _verify_enrol_poses(data, detector)
+    if not pose["ok"]:
+        log.info("Signup face refused for person %s: poses missing %s (seen %s)",
+                 student_id, pose["missing"], pose["poses_seen"])
+        return {"ok": False, "message": pose["message"], "pose_check": pose}
+
+    # The enrolment pipeline per frame. enroll_multiview cannot be reused here:
+    # it takes an authenticated user, and this caller has no account yet by
+    # definition. _enroll_photo_templates is the same underlying path.
+    templates, face, info, best = _enrol_from_clip(result)
+    if not templates or face is None:
+        return {"ok": False,
+                "message": "No usable face in that clip - try again in better light",
+                "liveness": result.to_dict()}
 
     ts = utils.timestamp()
     photo_name = f"signup_{student_id}_{ts}.jpg"

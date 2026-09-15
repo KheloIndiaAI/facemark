@@ -2703,7 +2703,12 @@ async function openClipCapture(opts) {
             // from the most frontal frame of the clip regardless.
             const angleOnly = r.reason === 'pitch';
             const rawGood = !!r.box && (r.ok || r.reason === 'pose' || angleOnly);
-            state.goodStreak = rawGood ? state.goodStreak + 1 : 0;
+            // Two of the last three polls, not two in a row. On a phone one poll
+            // in a pair often lands on a blink or a hand tremor, so "in a row"
+            // left people parked on "Hold steady..." with a face clearly in shot.
+            // The server's check on the finished clip is still the real gate.
+            state.goodHist = [...(state.goodHist || []), rawGood].slice(-3);
+            state.goodStreak = state.goodHist.filter(Boolean).length;
             // "ok" means correctly posed AND framed. Pose does not matter for a
             // clip - the recording captures several angles by itself - so only
             // framing and image quality gate the button. Disarm is immediate -
@@ -2784,7 +2789,7 @@ async function openClipCapture(opts) {
             // at all. Leave it disabled; the first good, STABLE poll (see
             // GOOD_STREAK_TO_ARM) is what is allowed to arm it.
             state.good = false;
-            state.goodStreak = 0;
+            state.goodStreak = 0; state.goodHist = [];
             shutter.disabled = true;
             if (state.timer) clearInterval(state.timer);
             framePollMs = FAST_POLL_MS;
@@ -3144,6 +3149,34 @@ async function openClipCapture(opts) {
         }
         control.measured = measured;
 
+        // Close on a held straight-ahead look. It puts frontal frames at the end
+        // of the clip for the enrolment photo and templates, and it makes the
+        // capture visibly deliberate - a few seconds of turns alone read as if
+        // no face had been recorded at all.
+        if (!state.closed && measured.length) {
+            setPromptStep({ text: 'Now look straight at the camera', arrow: null });
+            if (useLocal) {
+                const start = Date.now();
+                let since = 0;
+                while (!state.closed && Date.now() - start < 4000) {
+                    const p = livePose();
+                    if (p && Math.abs(p.yaw - baseYaw) < LOCAL_CENTRE_MAX_YAW / 2) {
+                        if (!since) since = Date.now();
+                        if (Date.now() - since >= 800) break;
+                        setPromptLive('Hold it…');
+                    } else {
+                        since = 0;
+                        setPromptLive('Look straight at the camera');
+                    }
+                    await sleep(40);
+                }
+            } else {
+                await sleep(1200);
+            }
+            await flashStepDone('Face recorded');
+        }
+        setRing(1);
+
         const elapsed = Date.now() - t0;
         if (!state.closed && elapsed < MIN_TOTAL_MS) {
             await new Promise(res => setTimeout(res, MIN_TOTAL_MS - elapsed));
@@ -3253,7 +3286,7 @@ async function openClipCapture(opts) {
             // stale "good" from before the failed recording cannot leak into
             // arming the shutter for the retry on its own.
             state.good = false;
-            state.goodStreak = 0;
+            state.goodStreak = 0; state.goodHist = [];
             shutter.disabled = true;
             ui.status(retryReason);
             // The framing loop was stopped to give the guided sequence sole
