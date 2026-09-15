@@ -370,6 +370,18 @@ a:hover { color: var(--accent-hover); }
 .rec-ring-fill { fill: none; stroke: #ef4444; stroke-width: 3; stroke-linecap: round;
                  stroke-dasharray: 126; stroke-dashoffset: 126; transition: stroke-dashoffset .08s linear; }
 .camera-shutter.recording .shutter-inner { background: #ef4444; border-radius: 22%; transform: scale(0.62); }
+
+/* Front/rear camera switch, beside the shutter - see flipCamera in app.js. The
+   [hidden] rule is needed: display:flex below would otherwise override the
+   attribute and show the button on a phone with only one camera. */
+.camera-flip { position: absolute; right: 24px; top: 50%; transform: translateY(-50%);
+               width: 48px; height: 48px; padding: 0; border-radius: 50%; cursor: pointer;
+               display: flex; align-items: center; justify-content: center; color: #fff;
+               background: rgba(0,0,0,0.45); border: 2px solid rgba(255,255,255,0.85);
+               transition: transform var(--transition-fast); }
+.camera-flip:active { transform: translateY(-50%) scale(0.92); }
+.camera-flip:disabled { opacity: 0.5; cursor: default; }
+.camera-flip[hidden] { display: none; }
 .shutter-inner { transition: background var(--transition-fast), border-radius var(--transition-fast), transform var(--transition-fast); }
 
 .rec-hint { position: absolute; bottom: 96px; left: 50%; transform: translateX(-50%);

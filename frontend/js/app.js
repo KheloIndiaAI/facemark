@@ -1395,8 +1395,27 @@ function regContinue() {
     });
 }
 
-async function enrolSubmit(file, ui) {
+/* The step photos the guided capture took at each confirmed turn. The server
+   judges those instead when it cannot find the face in the compressed video -
+   which is what "could not see your face" was, over a face the camera had
+   just tracked through every turn. */
+function appendStepPhotos(fd, extra) {
+    ((extra && extra.snapshots) || []).forEach((s, i) => {
+        fd.append('snapshots', s.blob, `${i}_${s.step}.jpg`);
+    });
+}
+
+// The app refuses clips over 25MB and the proxy over 30MB, the proxy with an
+// empty page the app can only call "Could not reach the server".
+const CLIP_UPLOAD_MAX_BYTES = 24 * 1024 * 1024;
+
+async function enrolSubmit(file, ui, extra) {
     ui.status('Checking the clip and registering...');
+    if (file.size > CLIP_UPLOAD_MAX_BYTES) {
+        ui.status('That recording was too long to upload. Record again - it only needs a few seconds.');
+        await ui.resume();
+        return;
+    }
 
     // ONE request, deliberately. The old flow created the person from the first
     // frame and then added the rest, so a failure part-way left a roster entry
@@ -1410,9 +1429,16 @@ async function enrolSubmit(file, ui) {
     fd.append('centre_id', regDetails.centre_id);
     fd.append('role', regDetails.role);
     if (regDetails.sport) fd.append('sport', regDetails.sport);
+    appendStepPhotos(fd, extra);
 
     try {
         const r = await api.postForm('/api/students/register-video', fd);
+        if (r.ok === false && r.duplicate) {
+            // Recording again cannot change the answer - close and say why.
+            ui.close();
+            showToast('Already registered', r.message, 'error');
+            return;
+        }
         if (r.ok === false) {
             // A pose refusal comes from a clip that WAS live, and
             // livenessBanner would title it "Live capture confirmed" right
@@ -2677,6 +2703,16 @@ async function openClipCapture(opts) {
                 <div class="rec-move-bar"><div class="rec-move-fill" id="clip-cap-move-fill"></div></div>
             </div>
             <div class="camera-controls" style="justify-content:center">
+                <!-- Front / rear camera. Shown only on a device that has both,
+                     and never while recording - see flipCamera. -->
+                <button type="button" class="camera-flip" id="clip-cap-flip" aria-label="Switch camera" hidden>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M4 9a8 8 0 0 1 14-3l2 2"/><path d="M20 4v4h-4"/>
+                        <path d="M20 15a8 8 0 0 1-14 3l-2-2"/><path d="M4 20v-4h4"/>
+                        <circle cx="12" cy="12" r="2.5"/>
+                    </svg>
+                </button>
                 <button type="button" class="camera-shutter" id="clip-cap-shutter"
                         aria-label="Record - follow the on-screen prompts" disabled>
                     <svg class="rec-ring" viewBox="0 0 44 44" aria-hidden="true">
@@ -2771,6 +2807,55 @@ async function openClipCapture(opts) {
     // not a single lucky frame.
     const GOOD_STREAK_TO_ARM = 2;
     const setRing = p => { if (ring) ring.style.strokeDashoffset = String(126 * (1 - p)); };
+
+    /* Front or rear camera, on the capture screen itself. Each flow opens the
+       one it expects - rear for Take Attendance, front for a selfie - but a
+       coach registering an athlete is pointing the phone at somebody else and
+       needs the rear one, and a scan can need the front. Hidden on a device
+       with only one camera, and while recording: switching mid-clip would cut
+       the very video the server judges. The choice holds for the rest of this
+       capture, including the next athlete after a scan. */
+    const flipBtn = document.getElementById('clip-cap-flip');
+    const flipLabel = () => (cam.facingMode === 'user' ? 'Switch to rear camera' : 'Switch to front camera');
+    const setFlipVisible = on => { if (flipBtn) flipBtn.hidden = !on || !state.canFlip; };
+    async function flipCamera() {
+        if (!flipBtn || state.recording || state.flipping || state.closed || !cam.isActive) return;
+        state.flipping = true;
+        flipBtn.disabled = true;
+        const was = cam.facingMode;
+        // Nothing seen through the old lens may arm the shutter through the new one.
+        state.good = false; state.goodStreak = 0; state.goodHist = [];
+        state.mesh = null; state.meshT = 0; state.meshW = 0; state.pose = null;
+        state.box = null; state.landmarks = null; state.autoFired = false;
+        shutter.disabled = true;
+        showAnalyzing(true);
+        try {
+            await cam.switchCamera();
+            if (!cam.isActive && !state.closed) {
+                // The other camera would not open: go back to the one that did.
+                cam.facingMode = was;
+                await cam.start();
+            }
+        } finally {
+            if (state.closed) { try { cam.stop(); } catch { /* already stopped */ } }
+            state.flipping = false;
+            flipBtn.disabled = false;
+            flipBtn.setAttribute('aria-label', flipLabel());
+            flipBtn.title = flipLabel();
+            draw();
+        }
+    }
+    if (flipBtn) flipBtn.addEventListener('click', flipCamera);
+    // Device labels need permission, but the COUNT is available once the
+    // camera has opened, which it has by this point.
+    (async () => {
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            state.canFlip = devices.filter(d => d.kind === 'videoinput').length > 1;
+        } catch { state.canFlip = false; }
+        if (flipBtn) { flipBtn.setAttribute('aria-label', flipLabel()); flipBtn.title = flipLabel(); }
+        setFlipVisible(!state.recording);
+    })();
 
     // Stop everything however the modal closes - X, Escape, or a route change.
     // A stream left running behind a closed dialog keeps the camera light on.
@@ -3614,10 +3699,11 @@ async function openClipCapture(opts) {
     }
 
     shutter.addEventListener('click', async () => {
-        if (state.recording) return;
+        if (state.recording || state.flipping) return;
         state.recording = true;
         shutter.disabled = true;
         shutter.classList.add('recording');
+        setFlipVisible(false);
         showAnalyzing(false);
         ui.status(opts.guided === false
             ? 'Recording - move the phone slowly side to side.'
@@ -3723,6 +3809,7 @@ async function openClipCapture(opts) {
         shutter.classList.remove('recording');
         setRing(0);
         state.recording = false;
+        setFlipVisible(true);
         if (!file) {
             // retryReason distinguishes three situations that used to share
             // one message: a legitimate empty capture (recordClip already
@@ -3819,12 +3906,23 @@ async function openClipEnrol(studentId, studentName) {
         intro: "Look at the camera and keep turning your head slowly - left, right, "
              + "up and down - for the whole recording. The movement is what proves "
              + "a real person is present.",
-        onClip: async (file, ui) => {
+        onClip: async (file, ui, extra) => {
             ui.status('Checking the clip and building templates...');
+            if (file.size > CLIP_UPLOAD_MAX_BYTES) {
+                ui.status('That recording was too long to upload. Record again - it only needs a few seconds.');
+                await ui.resume();
+                return;
+            }
             const fd = new FormData();
             fd.append('video', file);
+            appendStepPhotos(fd, extra);
             try {
                 const r = await api.postForm(`/api/students/${studentId}/enroll-video`, fd);
+                if (r.ok === false && r.duplicate) {
+                    ui.close();
+                    showToast('Not accepted', r.message, 'error');
+                    return;
+                }
                 if (r.ok === false) {
                     // Same as enrolSubmit: a pose refusal is not a liveness one.
                     if (r.pose_check && r.pose_check.ok === false) ui.status(r.message);

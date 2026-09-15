@@ -250,6 +250,79 @@ def _enrol_from_clip(result) -> Tuple[List[dict], Optional[Face], dict, Optional
     return [], None, {"faces_found": 0}, None
 
 
+def _step_photo_fallback(result, shots: list, what: str) -> Optional[bool]:
+    """Should a guided clip be judged on its step photos instead of its video?
+
+    False: the video was judged live - use it. True: the video gave NO verdict
+    (no face, unreadable, too little detail or movement to measure) and step
+    photos came with it, so result.frames is now those photos. None: refuse
+    with result.reason - a "screen" verdict is positive evidence of a
+    photograph and is never overridden, and with no photos there is nothing to
+    fall back on.
+
+    The rule signup_face has used since the compressed video from some phones,
+    filmed from below while turning, turned out not to show a face the live
+    camera plainly had. Registering someone from the coach's phone never got
+    it, and was refused again and again for exactly that reason.
+    """
+    if result.is_live:
+        return False
+    if result.verdict == "screen" or not shots:
+        return None
+    log.warning("%s: video gave no verdict (%s) - using %d step photos",
+                what, result.code, len(shots))
+    result.frames = shots
+    result.best_frame = None
+    return True
+
+
+def _enrol_pose_check(data: bytes, shots: list, from_snapshots: bool, detector) -> dict:
+    """The required head turns, checked on whatever is being judged: the video,
+    or the step photos - and the photos again when the video's frames missed a
+    turn a step photo caught. The same order signup_face uses."""
+    pose = (_verify_snapshot_poses(shots, detector) if from_snapshots
+            else _verify_enrol_poses(data, detector))
+    if not from_snapshots and not pose["ok"] and shots:
+        shot_pose = _verify_snapshot_poses(shots, detector)
+        if shot_pose["ok"]:
+            pose = shot_pose
+    return pose
+
+
+_DUPLICATE_MESSAGES = {
+    "registered": "This face is already registered. Find the person in the Directory "
+                  "instead of registering them again.",
+    "pending": "This face matches a registration still waiting for approval. Approve or "
+               "remove that one in Accounts instead of registering again.",
+}
+
+
+def _already_registered(frames: list, detector, what: str,
+                        exclude_student_id: Optional[int] = None) -> Optional[str]:
+    """'registered' or 'pending' when the face in these frames is somebody else
+    already enrolled or waiting for approval; None otherwise.
+
+    signup_face's check, for the staff paths that never had it - a coach could
+    register a face that was already a coach or an athlete, their own included.
+    Up to three of the best face frames, so one poor frame cannot let a
+    duplicate through. `exclude_student_id` is the person being re-recorded,
+    who naturally matches themselves. The reply names nobody: the match may be
+    at another centre, whose people this caller has no business seeing.
+    """
+    pending = None
+    for probe in portrait_mod.ranked(frames or [], detector)[:3]:
+        for kind in ("registered", "pending"):
+            if kind == "pending" and pending is None:
+                pending = database.load_pending_gallery(int(exclude_student_id or 0))
+            dup = sessions_mod.find_existing_person(probe, pending if kind == "pending" else None)
+            sid = dup.get("student_id")
+            if sid and sid != exclude_student_id:
+                log.warning("%s refused: face matches %s person %s (%.3f)",
+                            what, kind, sid, dup.get("score", 0.0))
+                return kind
+    return None
+
+
 # --- students ---------------------------------------------------------------
 
 @app.get("/api/students")
@@ -1384,6 +1457,7 @@ async def enroll_multiview(
 async def register_student_from_video(
     request: Request,
     video: UploadFile = File(...),
+    snapshots: Optional[List[UploadFile]] = File(None),
     name: str = Form(...),
     roll_no: str = Form(...),
     role: str = Form("athlete"),
@@ -1409,18 +1483,28 @@ async def register_student_from_video(
     if not data:
         raise HTTPException(400, "Empty upload")
 
-    result = liveness.analyse(data, get_detector())
+    detector = get_detector()
+    result = liveness.analyse(data, detector)
     liveness_payload = result.to_dict()
+    shots = await _read_snapshots(snapshots)
 
-    if not result.is_live:
+    what = f"Registration of '{roll_no}'"
+    from_snapshots = _step_photo_fallback(result, shots, what)
+    if from_snapshots is None:
         log.warning(
             "Registration clip refused for '%s': %s (depth=%.5f motion=%.5f)",
             roll_no, result.verdict, result.depth_score, result.motion,
         )
         return {"ok": False, "liveness": liveness_payload, "message": result.reason}
 
+    # Straight after liveness, before the pose check: a person already enrolled
+    # is told so, not asked to turn their head again - see _already_registered.
+    dup = _already_registered(result.frames, detector, what)
+    if dup:
+        return {"ok": False, "duplicate": True, "message": _DUPLICATE_MESSAGES[dup]}
+
     # Before any row is written, like liveness above - see _verify_enrol_poses.
-    pose = _verify_enrol_poses(data, get_detector())
+    pose = _enrol_pose_check(data, shots, from_snapshots, detector)
     if not pose["ok"]:
         log.warning("Registration clip refused for '%s': poses missing %s (seen %s)",
                     roll_no, pose["missing"], pose["poses_seen"])
@@ -1522,6 +1606,7 @@ async def enroll_from_video(
     request: Request,
     student_id: int,
     video: UploadFile = File(...),
+    snapshots: Optional[List[UploadFile]] = File(None),
     user: dict = Depends(auth.require_staff),
 ):
     """Enrol an athlete from a short clip instead of a posed frame sequence.
@@ -1551,25 +1636,34 @@ async def enroll_from_video(
     if not data:
         raise HTTPException(400, "Empty upload")
 
-    result = liveness.analyse(data, get_detector())
+    detector = get_detector()
+    result = liveness.analyse(data, detector)
     liveness_payload = result.to_dict()
+    shots = await _read_snapshots(snapshots)
+    refused = {"templates_added": 0, "poses_captured": [], "accepted": [], "rejected": []}
 
-    if not result.is_live:
+    what = f"Re-recording student {student_id}"
+    from_snapshots = _step_photo_fallback(result, shots, what)
+    if from_snapshots is None:
         log.warning(
             "Enrolment clip refused for student %s: %s (depth=%.5f motion=%.5f)",
             student_id, result.verdict, result.depth_score, result.motion,
         )
-        return {
-            "ok": False,
-            "liveness": liveness_payload,
-            "templates_added": 0,
-            "poses_captured": [],
-            "accepted": [],
-            "rejected": [],
-            "message": result.reason,
-        }
+        return {"ok": False, "liveness": liveness_payload, **refused,
+                "message": result.reason}
 
-    pose = _verify_enrol_poses(data, get_detector())
+    # Somebody else's face added to this person would let either of them be
+    # marked as the other from then on.
+    dup = _already_registered(result.frames, detector, what, exclude_student_id=student_id)
+    if dup:
+        return {"ok": False, "duplicate": True, **refused, "message": (
+            "This face belongs to someone else who is already registered - check you "
+            "are recording the right person."
+            if dup == "registered" else
+            "This face matches a registration still waiting for approval - check you "
+            "are recording the right person.")}
+
+    pose = _enrol_pose_check(data, shots, from_snapshots, detector)
     if not pose["ok"]:
         log.warning("Enrolment clip refused for student %s: poses missing %s (seen %s)",
                     student_id, pose["missing"], pose["poses_seen"])
