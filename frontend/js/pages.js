@@ -338,25 +338,25 @@ async function decideUser(id, approve, name, role, templates) {
 
 async function deleteUserAccount(id, name, role) {
     // Two steps for a coach or an admin, one for an athlete. Deleting an
-    // account does not delete the PERSON or their attendance - only the login -
-    // but a coach account is the thing a whole centre signs in with, so it does
-    // not go on a single click.
+    // account now deletes the PERSON too - Directory entry, face, photos and
+    // attendance - because a login removed while its face stayed on file left
+    // that person matchable and blocked them from ever registering again.
     if (role === 'coach' || role === 'super_admin') {
         const typed = window.prompt(
             `Delete the ${role === 'coach' ? 'coach' : 'super admin'} account "${name}".`
-            + `\n\nTheir person record, face and attendance are NOT deleted - only `
-            + `the login. This cannot be undone.\n\nType DELETE to confirm.`, '');
+            + `\n\nThis also removes them from the Directory, with their face, photos `
+            + `and attendance. This cannot be undone.\n\nType DELETE to confirm.`, '');
         if ((typed || '').trim().toUpperCase() !== 'DELETE') return;
     } else if (!window.confirm(
-            `Delete the account "${name}"?\n\nTheir person record, face and `
-            + `attendance are kept - only the login goes. This cannot be undone.`)) {
+            `Delete the account "${name}"?\n\nThis also removes them from the `
+            + `Directory, with their face, photos and attendance. This cannot be undone.`)) {
         return;
     }
     try {
         // quiet: this handler shows its own message, and two toasts for one
         // failure is one too many.
         await api.delete(`/api/users/${id}`, true);
-        showToast('Account deleted', `${name} can no longer sign in.`, 'success');
+        showToast('Account deleted', `${name} was removed, along with their Directory entry.`, 'success');
         renderUsersPage();
     } catch (err) {
         showToast('Could not delete', (err && err.message) || 'Try again.', 'error');

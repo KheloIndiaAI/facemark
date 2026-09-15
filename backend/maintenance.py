@@ -154,12 +154,63 @@ def purge_abandoned_signups() -> Dict[str, int]:
     return out
 
 
+def purge_person(student_id: int) -> Dict[str, int]:
+    """Delete a person and everything of theirs: account, face templates,
+    attendance, coach links, photo rows and the image files themselves.
+
+    One place for it - the Directory's delete, deleting an account, and the
+    orphan sweep below all come through here, so none of them can leave
+    photographs of a deleted person behind on disk.
+    """
+    names = database.photo_files_for(student_id)      # before the rows go
+    database.forget_photo_rows(student_id)
+    removed = database.delete_student(student_id)
+    gone = 0
+    for name in names:
+        for prefix in ("students", "uploads"):
+            try:
+                storage.delete(prefix, name)
+                gone += 1
+            except Exception:      # noqa: BLE001 - a missing file is fine
+                pass
+    removed["image_files"] = gone
+    return removed
+
+
+def purge_orphaned_signup_people() -> int:
+    """Remove self-registered people whose account has been deleted.
+
+    Deleting an account used to delete only the login. The person stayed in
+    the Directory with their face on file - still matchable, and refused as a
+    duplicate if they ever registered again. Deleting an account now removes
+    the person too; this clears the ones left behind before that.
+
+    Only people a SIGNUP created (roll number PEND-...) with no account at all,
+    never anybody an admin enrolled, and never in their first hour, while a
+    registration may still be writing its account row.
+    """
+    before = (config.local_now() - timedelta(hours=1)) \
+        .replace(tzinfo=None).isoformat(timespec="seconds")
+    with connect() as conn:
+        ids = [int(r["id"]) for r in conn.execute(
+            "SELECT s.id FROM students s WHERE s.roll_no LIKE ? AND s.created_at < ? "
+            "AND NOT EXISTS (SELECT 1 FROM users u WHERE u.student_id = s.id)",
+            ("PEND-%", before)).fetchall()]
+    for sid in ids:
+        purge_person(sid)
+    if ids:
+        log.warning("Removed %d self-registered person(s) whose account had been "
+                    "deleted, with their faces, photos and attendance.", len(ids))
+    return len(ids)
+
+
 def run_all() -> Dict[str, int]:
     """Every sweep, unconditionally. Safe to call at any time."""
     drafts = expire_drafts()
     purged = purge_abandoned_signups()
+    orphans = purge_orphaned_signup_people()
     return {"expired_registers": drafts, "purged_pending": purged["pending"],
-            "purged_rejected": purged["rejected"]}
+            "purged_rejected": purged["rejected"], "purged_orphans": orphans}
 
 
 def run_due(force: bool = False) -> Dict[str, int]:

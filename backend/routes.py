@@ -16,7 +16,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 
-from . import auth, centres as centres_mod, config, database
+from . import auth, centres as centres_mod, config, database, maintenance as maintenance_mod
 
 log = logging.getLogger("routes")
 router = APIRouter(prefix="/api")
@@ -150,6 +150,16 @@ def reset_password(user_id: int, new_password: str = Form(...), user: dict = Dep
 def remove_user(user_id: int, user: dict = Depends(auth.require_super_admin)):
     if user_id == user["id"]:
         raise HTTPException(400, "You cannot delete your own account")
+    # The PERSON goes with the account: Directory entry, face, photos and
+    # attendance. Deleting only the login left the face on file - still
+    # matchable, and refusing that person as a duplicate if they registered
+    # again.
+    with database.connect() as conn:
+        row = conn.execute("SELECT student_id FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row and row["student_id"]:
+        removed = maintenance_mod.purge_person(int(row["student_id"]))
+        log.info("Deleted account %s and person %s: %s", user_id, row["student_id"], removed)
+        return {"ok": True, "removed": removed}
     auth.delete_user(user_id)
     return {"ok": True}
 

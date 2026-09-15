@@ -453,24 +453,10 @@ def remove_student(student_id: int, user: dict = Depends(auth.require_staff)):
     # Without this a coach can delete any athlete at any centre in the country,
     # and ON DELETE CASCADE takes their templates and attendance history too.
     auth.owns_centre(user, student.get("centre_id"))
-    # Gathered BEFORE the rows go, or the answer disappears with them. This
-    # used to delete students.photo_path alone, so every multi-view enrolment
-    # frame, every added photo and the signup capture stayed on disk after the
-    # person was gone - photographs of children, kept for no reason anybody
-    # could state, and still listable by a super admin because photos.student_id
-    # is ON DELETE SET NULL rather than CASCADE.
-    names = database.photo_files_for(student_id)
-    database.forget_photo_rows(student_id)
-    removed = database.delete_student(student_id)
-    gone = 0
-    for name in names:
-        for prefix in ("students", "uploads"):
-            try:
-                storage.delete(prefix, name)
-                gone += 1
-            except Exception:      # noqa: BLE001 - a missing file is fine
-                pass
-    log.info("Deleted person %s: %s (%d image file(s))", student_id, removed, gone)
+    # Rows, account, templates, attendance AND every image file - see
+    # maintenance.purge_person, shared with deleting an account.
+    removed = maintenance_mod.purge_person(student_id)
+    log.info("Deleted person %s: %s", student_id, removed)
     return {"ok": True, "removed": removed}
 
 
@@ -1179,7 +1165,11 @@ async def enroll_pose_check(
     # config.CLIP_DETECTION_MODE. Detecting more permissively here told people
     # their face was found and then refused the recording they made on the
     # strength of it.
-    faces = get_detector().detect(img, config.CLIP_DETECTION_MODE)
+    # detect_robust, like every check on the recorded clip: the same answer
+    # whenever the strict pass finds a face, and a second, gentler look when it
+    # does not - so the guide stops going amber on a face it can plainly see,
+    # without ever being more permissive than the judge that follows it.
+    faces = get_detector().detect_robust(img, config.CLIP_DETECTION_MODE)
     if not faces:
         return {"ok": False, "reason": "no_face", "message": "No face detected"}
     if len(faces) > 1:
