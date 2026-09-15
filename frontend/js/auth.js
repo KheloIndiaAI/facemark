@@ -405,12 +405,17 @@ function suFace() {
         // invited. An applicant has no session - the account is what they are
         // applying for - so the signup token stands in for one.
         signupToken: suState.token,
-        onClip: async (file, ui) => {
+        onClip: async (file, ui, extra) => {
             ui.status('Checking\u2026');
             try {
                 const fd = new FormData();
                 fd.append('token', suState.token);
                 fd.append('video', file);
+                // Stills from each confirmed step - the server's fallback when
+                // it cannot find the face in the compressed video.
+                ((extra && extra.snapshots) || []).forEach((s, i) => {
+                    fd.append('snapshots', s.blob, `${i}_${s.step}.jpg`);
+                });
                 const res = await fetch('/api/signup/face', { method: 'POST', body: fd });
                 const j = await res.json();
                 if (j.duplicate) {

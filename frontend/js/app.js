@@ -296,8 +296,13 @@ class CameraCapture {
         const mime = CameraCapture.pickMimeType();
         let rec;
         try {
-            rec = mime ? new MediaRecorder(this.stream, { mimeType: mime })
-                       : new MediaRecorder(this.stream);
+            // An explicit bitrate. Left to itself a phone encoder drops quality
+            // hard in indoor light and while the head is moving, which is
+            // exactly when the server has to find a face in every frame. ~4Mbps
+            // keeps a ten-second clip near 5MB, well inside the 25MB limit.
+            const bits = { videoBitsPerSecond: 4000000 };
+            rec = mime ? new MediaRecorder(this.stream, { mimeType: mime, ...bits })
+                       : new MediaRecorder(this.stream, bits);
         } catch (err) {
             showToast('Recording unavailable', 'The camera stream could not be recorded.', 'error');
             return null;
@@ -2954,6 +2959,20 @@ async function openClipCapture(opts) {
     }
 
     const sleep = ms => new Promise(res => setTimeout(res, ms));
+
+    /* A still photo at each confirmed step, sent with the clip. They come from
+       the same live camera the green dots are drawn over, so they show the face
+       the guide actually saw - the server falls back to them when it cannot
+       find a face in the compressed video. Never fatal: a failed grab is
+       simply skipped. */
+    async function snap(control, step) {
+        try {
+            const c = grab(720);
+            if (!c) return;
+            const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.92));
+            if (blob && control.snapshots.length < 6) control.snapshots.push({ step, blob });
+        } catch { /* skip this one */ }
+    }
     const median = a => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
     const livePose = () => {
         const p = state.pose;
@@ -3108,6 +3127,7 @@ async function openClipCapture(opts) {
         // reading; the server's liveness check on the finished clip is the
         // actual authority regardless of how this phase went.
         if (baseYaw === null) { baseYaw = 0; basePitch = 0; }
+        await snap(control, 'centre');
         setRing(0.2);
 
         // A required step's retries are budgeted against the SAME clock the
@@ -3171,6 +3191,7 @@ async function openClipCapture(opts) {
             // the normal path.
             if (got) {
                 measured.push(step.key);
+                await snap(control, step.key);
                 await flashStepDone('Got it');
             } else if (!state.closed) {
                 setPromptLive('Did not see that turn - carrying on');
@@ -3204,6 +3225,7 @@ async function openClipCapture(opts) {
             } else {
                 await sleep(1200);
             }
+            await snap(control, 'straight');
             await flashStepDone('Face recorded');
         }
         setRing(1);
@@ -3239,6 +3261,7 @@ async function openClipCapture(opts) {
         // disabled, the prompt panel stuck visible, and no way back to the
         // camera except closing and reopening the whole modal.
         let file = null;
+        let snapshots = [];
         // What the retry path below tells the person, when it fires. Default
         // covers the outer catch and a genuinely empty capture; the guided
         // branch overwrites it with something specific when IT is the reason.
@@ -3253,12 +3276,13 @@ async function openClipCapture(opts) {
                 ui.status('Recording - move the phone slowly side to side.');
                 file = await cam.recordClip(opts.clipMs || CLIP_MS_PLAIN, setRing);
             } else {
-                const control = { done: false, measured: [] };
+                const control = { done: false, measured: [], snapshots: [] };
                 const [recorded] = await Promise.all([
                     cam.recordClip(GUIDED_CAPTURE_MAX_MS, null, control),
                     runGuidedSequence(control),
                 ]);
                 const measured = control.measured || [];
+                snapshots = control.snapshots || [];
                 const seen = measured.length;
                 const missing = GUIDED_REQUIRED.filter(k => !measured.includes(k));
                 if (missing.length) {
@@ -3339,7 +3363,7 @@ async function openClipCapture(opts) {
         // the opposite of what the person just asked for. state.closed is
         // one-way, so testing it here is the whole fix.
         if (state.closed) return;
-        await opts.onClip(file, ui);
+        await opts.onClip(file, ui, { snapshots });
     });
 }
 

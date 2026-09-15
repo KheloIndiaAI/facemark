@@ -121,7 +121,7 @@ def choose(frames: Sequence[np.ndarray], detector) -> Tuple[Optional[np.ndarray]
             continue
         info["considered"] += 1
         try:
-            faces = detector.detect(frame)
+            faces = detector.detect_robust(frame)
         except Exception as e:                      # noqa: BLE001
             log.warning("Portrait: detection failed on a frame: %s", e)
             continue
@@ -161,7 +161,7 @@ def ranked(frames: Sequence[np.ndarray], detector) -> list:
         if frame is None:
             continue
         try:
-            faces = detector.detect(frame)
+            faces = detector.detect_robust(frame)
         except Exception as e:                      # noqa: BLE001
             log.warning("Portrait: detection failed on a frame: %s", e)
             continue

@@ -366,6 +366,57 @@ class FaceDetector:
             stats = dict(getattr(self, "_last_stats", {"printed": 0, "screens": 0}))
         return faces, stats
 
+    def detect_robust(self, img_bgr: np.ndarray, mode: Optional[str] = None) -> List[Face]:
+        """detect(), for frames of a RECORDED CLIP, where a real face can sit just
+        under the bar that a sharp camera snapshot clears.
+
+        The framing guide judges a 480px snapshot straight off the camera; the
+        clip is judged on full-size, video-compressed frames of somebody turning
+        their head, often from a phone held low. A face the guide called found
+        could then score just under the bar in every recorded frame, and the
+        person was refused with "No face was found in the clip" moments after
+        being told to tap record - over and over, with nothing they could change.
+
+        Same answer as detect() whenever that finds a face, so nothing that
+        passes today is judged differently. Only when it finds none: the
+        "accurate" bar (0.70 - still above the 0.632 a resting hand scored),
+        then 640px and 480px copies, since YuNet is not scale-invariant and the
+        guide's own 480px view is where the face was seen. Boxes and landmarks
+        come back in the ORIGINAL image's pixels.
+        """
+        mode = (mode or self.mode).lower()
+        faces = self.detect(img_bgr, mode)
+        if faces:
+            return faces
+        if mode != "accurate":
+            faces = self.detect(img_bgr, "accurate")
+            if faces:
+                return faces
+        h, w = img_bgr.shape[:2]
+        for target in (640, 480):
+            if w <= target:
+                continue
+            s = target / w
+            small = cv2.resize(img_bgr, (target, int(round(h * s))), interpolation=cv2.INTER_AREA)
+            found = self.detect(small, "accurate")
+            if found:
+                return [self._rescaled(f, 1.0 / s, img_bgr) for f in found]
+        return []
+
+    @staticmethod
+    def _rescaled(face: Face, k: float, img_bgr: np.ndarray) -> Face:
+        """A face found on a resized copy, in the original image's coordinates."""
+        x1, y1, x2, y2 = face.box
+        raw = None
+        if face.raw is not None:
+            raw = face.raw.copy()
+            raw[:14] = raw[:14] * k          # box + 5 landmark points; [14] is the score
+        f = Face(box=(x1 * k, y1 * k, x2 * k, y2 * k), conf=face.conf,
+                 landmarks=None if face.landmarks is None else face.landmarks * k,
+                 source=face.source, raw=raw)
+        f.quality = FaceQualityAssessor.assess(img_bgr, f)
+        return f
+
 
 _detector: Optional[FaceDetector] = None
 

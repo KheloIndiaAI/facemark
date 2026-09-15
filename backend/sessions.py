@@ -532,7 +532,7 @@ def verify_face(img, student_id: int) -> dict:
     from . import database
 
     detector, recognizer = get_detector(), get_recognizer()
-    faces = detector.detect(img)
+    faces = detector.detect_robust(img)
     if not faces:
         return {"ok": False, "score": 0.0, "reason": "No face found in that clip"}
 
@@ -580,7 +580,7 @@ def find_existing_person(img, gallery=None) -> dict:
     from . import database
 
     detector, recognizer = get_detector(), get_recognizer()
-    faces = detector.detect(img)
+    faces = detector.detect_robust(img)
     if not faces:
         return {"student_id": None, "score": 0.0}
     face = max(faces, key=lambda f: f.width * f.height)

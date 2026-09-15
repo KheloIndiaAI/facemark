@@ -166,7 +166,7 @@ def sync_all_student_templates() -> int:
 
 def _primary_face(img: np.ndarray, detector) -> Tuple[Optional[Face], List[Face]]:
     """Largest detected face (the enrollee) + all faces found."""
-    faces = detector.detect(img, mode="accurate")
+    faces = detector.detect_robust(img, mode="accurate")
     if not faces:
         return None, faces
     face = max(faces, key=lambda f: f.width * f.height)
@@ -1075,9 +1075,11 @@ def _verify_enrol_poses(data: bytes, detector) -> dict:
     frames, _ = liveness.sample_frames(
         data, max_frames=config.ENROL_POSE_SAMPLE_FRAMES,
         max_width=config.ENROL_POSE_FRAME_WIDTH)
+    # Decoded separately from liveness, so turned upright separately too.
+    frames, _ = liveness.upright(frames, detector)
     counts: dict = {}
     for frame in frames:
-        faces = detector.detect(frame, "accurate")
+        faces = detector.detect_robust(frame, "accurate")
         if not faces:
             continue
         face = max(faces, key=lambda f: f.width * f.height)
@@ -2409,11 +2411,54 @@ def signup_choose_coach(token: str = Form(...), coach_id: int = Form(...)):
     return {"ok": True}
 
 
+async def _read_snapshots(files) -> list:
+    """Decode up to six step photos sent with a guided clip. Bad ones are skipped."""
+    out = []
+    for f in (files or [])[:6]:
+        try:
+            raw = await f.read()
+            if raw and len(raw) <= 5 * 1024 * 1024:
+                out.append(utils.decode_image(raw))
+        except Exception:                               # noqa: BLE001
+            continue
+    return out
+
+
+def _verify_snapshot_poses(images: list, detector) -> dict:
+    """_verify_enrol_poses, on the step photos instead of the video frames.
+
+    Same labels and the same rule that "centre" means not turned sideways, so
+    the required poses mean exactly what they mean for a clip.
+    """
+    counts: dict = {}
+    for img in images:
+        faces = detector.detect_robust(img, "accurate")
+        if not faces:
+            continue
+        face = max(faces, key=lambda f: f.width * f.height)
+        if min(face.width, face.height) < config.MULTIVIEW_MIN_FACE_PX:
+            continue
+        label = _pose_label(face, "")
+        counts[label] = counts.get(label, 0) + 1
+        if label in ("up", "down") and abs(float((face.quality or {}).get("yaw", 0.0))) \
+                < config.MULTIVIEW_YAW_TURN:
+            counts["centre"] = counts.get("centre", 0) + 1
+    required = list(config.ENROL_REQUIRED_POSES)
+    missing = [p for p in required if not counts.get(p)]
+    message = ("Your face was not seen " + " or ".join(_POSE_WORDS.get(p, p) for p in missing)
+               + ". Record again and follow each prompt.") if missing else \
+              ("Head movement confirmed: " + ", ".join(_POSE_WORDS.get(p, p) for p in required) + ".")
+    return {"ok": not missing, "poses_seen": sorted(p for p in counts if p in _POSE_WORDS),
+            "missing": missing, "frames_checked": len(images), "message": message,
+            "source": "snapshots"}
+
+
 @app.post("/api/signup/face")
 async def signup_face(
     request: Request,
     token: str = Form(...),
     video: UploadFile = File(...),
+    snapshots: Optional[List[UploadFile]] = File(None),
 ):
     """The guided capture, into a pending account.
 
@@ -2444,8 +2489,26 @@ async def signup_face(
 
     detector = get_detector()
     result = liveness.analyse(data, detector)
+    shots = await _read_snapshots(snapshots)
+    from_snapshots = False
     if result.verdict != "live":
-        return {"ok": False, "message": result.reason, "liveness": result.to_dict()}
+        # FALLBACK TO THE STEP PHOTOS. People were refused over and over with
+        # "No face was found in the clip" straight after the guide had tracked
+        # their face - the compressed video from some phones, filmed from below
+        # while turning, simply does not show a detectable face. The stills
+        # were taken from the same live camera at each confirmed step.
+        #
+        # Only when the video gave NO verdict (no face, unreadable, too little
+        # detail or movement to measure). A "screen" verdict is positive
+        # evidence of a photograph and is always refused. Every application
+        # is still approved by a person before it can do anything.
+        if result.verdict == "screen" or not shots:
+            return {"ok": False, "message": result.reason, "liveness": result.to_dict()}
+        from_snapshots = True
+        log.warning("Signup for person %s: video gave no verdict (%s) - using %d step photos",
+                    student_id, result.code, len(shots))
+        result.frames = shots
+        result.best_frame = None
 
     # NO DUPLICATE REGISTRATIONS - checked FIRST, straight after liveness. It
     # used to run last, after the pose check and template extraction, so a
@@ -2494,7 +2557,13 @@ async def signup_face(
     # person has templates - and templates are written below this line and
     # nowhere else. Refusing here therefore keeps a capture that did not show
     # the requested movements out of every queue, not just out of the gallery.
-    pose = _verify_enrol_poses(data, detector)
+    pose = (_verify_snapshot_poses(shots, detector) if from_snapshots
+            else _verify_enrol_poses(data, detector))
+    if not from_snapshots and not pose["ok"] and shots:
+        # The video's frames can miss a turn that the step photo caught.
+        shot_pose = _verify_snapshot_poses(shots, detector)
+        if shot_pose["ok"]:
+            pose = shot_pose
     if not pose["ok"]:
         log.info("Signup face refused for person %s: poses missing %s (seen %s)",
                  student_id, pose["missing"], pose["poses_seen"])

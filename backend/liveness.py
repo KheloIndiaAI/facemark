@@ -196,10 +196,66 @@ def _largest_face(frame: np.ndarray, detector):
     # config, not a literal, so this cannot drift away from the framing guide
     # that tells people whether they are in shot - they were different, and the
     # guide was the more permissive of the two.
-    faces = detector.detect(frame, mode=config.CLIP_DETECTION_MODE)
+    faces = detector.detect_robust(frame, mode=config.CLIP_DETECTION_MODE)
     if not faces:
         return None
     return max(faces, key=lambda f: f.width * f.height)
+
+
+_ROTATIONS = ((cv2.ROTATE_90_CLOCKWISE, "90 clockwise"),
+              (cv2.ROTATE_90_COUNTERCLOCKWISE, "90 anticlockwise"),
+              (cv2.ROTATE_180, "180"))
+
+
+def upright(frames: List[np.ndarray], detector) -> Tuple[List[np.ndarray], Optional[str]]:
+    """The clip's frames, turned upright if the video came through sideways.
+
+    Some phones write a portrait recording as landscape plus a rotation flag
+    the decoder does not apply, and a face lying on its side is invisible to
+    YuNet in every frame. Cheap when nothing is wrong: it stops at the first
+    probe frame holding an upright face. It only turns the clip when no probe
+    frame has an upright face AND a rotation finds one in at least two of them,
+    so a single chance detection cannot turn a good clip on its side.
+    """
+    if not frames:
+        return frames, None
+    step = max(1, len(frames) // 4)
+    probe = frames[::step][:4]
+    need = min(2, len(probe))
+
+    # Orientation is decided on the STRICT detector first. The lenient search
+    # (detect_robust) is good enough to find a face lying on its side at low
+    # confidence - measured: it did, on every frame of a sideways clip - and
+    # letting that count as "upright" left the clip sideways, where tracking
+    # failed ("moved too fast") and every head turn was misread.
+    def strict(img):
+        return bool(detector.detect(img, mode=config.CLIP_DETECTION_MODE))
+
+    if any(strict(f) for f in probe):
+        return frames, None
+
+    def pick(found):
+        # The rotation that finds the MOST faces, not the first that finds any:
+        # a quarter turn the wrong way leaves the face upside down.
+        best, best_hits = None, 0
+        for code, name in _ROTATIONS:
+            hits = sum(found(cv2.rotate(f, code)) for f in probe)
+            if hits > best_hits:
+                best, best_hits = (code, name), hits
+        return best, best_hits
+
+    best, hits = pick(strict)
+    if best is None or hits < need:
+        # A clip that is hard to read AND sideways: fall back to the lenient
+        # search, and turn only if a rotation beats upright under it too.
+        lenient = lambda img: _largest_face(img, detector) is not None  # noqa: E731
+        upright_hits = sum(lenient(f) for f in probe)
+        best, hits = pick(lenient)
+        if best is None or hits < need or hits <= upright_hits:
+            return frames, None
+    code, name = best
+    log.warning("Clip frames were %s off upright - turned before judging", name)
+    return [cv2.rotate(f, code) for f in frames], name
 
 
 _LK = dict(
@@ -371,6 +427,7 @@ def analyse(data: bytes, detector) -> LivenessResult:
     # region with no depth reads as flat: a real person, refused as a
     # photograph. That is the failure this whole check was rewritten to stop,
     # surviving in the one branch nobody measured.
+    frames, turned = upright(frames, detector)
     # Every frame is a candidate, not just the first and the middle. The guided
     # recording now finishes in about five seconds, so its middle frame is
     # usually mid-turn - a face side-on to the lens - and a clip whose first
@@ -386,7 +443,13 @@ def analyse(data: bytes, detector) -> LivenessResult:
             start = i
             break
     if face is None:
-        return LivenessResult("no_face", "No face was found in the clip",
+        h, w = frames[0].shape[:2]
+        log.warning("No face in any of %d clip frames (%dx%d, %s bytes, decoded %s)",
+                    len(frames), w, h, info.get("bytes"), info.get("decoded"))
+        return LivenessResult("no_face",
+                              "Your face could not be seen clearly in the recording. "
+                              "Hold the phone at eye level, face a light, keep your "
+                              "whole face in the frame, and record again.",
                               code="no_face", frames_used=len(frames), frames=frames)
     # Track from the frame the face is actually in, to the end of the clip.
     track_frames = frames[start:]
