@@ -1929,7 +1929,8 @@ async def scan_attendance(
 ):
     """Take Attendance: one athlete in front of the coach's camera.
 
-    Recognised only among THIS coach's active athletes, and marked on this
+    Recognised among this coach's athletes and every active athlete at the
+    coach's centre (never another centre's), and marked on this
     coach's register for today: a draft while the register is open (confirmed
     when the coach submits), or a late addition once it is submitted. A clip
     that looks like a photograph or a screen is refused.
@@ -1948,13 +1949,13 @@ async def scan_attendance(
     if not frames:
         return {"ok": False, "reason": "no_face",
                 "message": "No face found - hold the camera on one athlete and try again"}
-    match = sessions_mod.recognise_on_roster(frames, coach_id)
-    if not match:
-        return {"ok": False, "reason": "unknown",
-                "message": "Not recognised as one of your athletes"}
-
     coach = database.get_student(coach_id)
     centre_id = (coach or {}).get("centre_id")
+    match = sessions_mod.recognise_on_roster(frames, coach_id, centre_id)
+    if not match:
+        return {"ok": False, "reason": "unknown",
+                "message": "Not recognised - make sure this athlete is registered and "
+                           "approved at your centre, then scan again a little closer"}
     day = config.today_str()
     sess = sessions_mod.get_or_create(centre_id, coach_id, int(user["id"]), day)
     sid, name = match["student_id"], match["name"]

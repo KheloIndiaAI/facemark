@@ -413,22 +413,33 @@ def set_late_present(session_id: int, student_id: int, present: bool, day: str,
         return "removed"
 
 
-def recognise_on_roster(frames, coach_id: int) -> Optional[dict]:
-    """Which of this coach's athletes is in these frames?
+def recognise_on_roster(frames, coach_id: int, centre_id: Optional[int] = None) -> Optional[dict]:
+    """Which athlete is in these frames?
 
     For Take Attendance. The best match over the given frames, at the
     register's MATCH_THRESHOLD, against a gallery narrowed to the coach's
-    ACTIVE athletes - so it can only ever mark somebody on this coach's own
-    register. None when nobody clears the threshold.
+    active athletes PLUS every active athlete at the coach's centre - never
+    anyone from another centre. None when nobody clears the threshold.
     """
     from . import database
     roster = {int(a["id"]): a for a in athletes_of(coach_id)
               if (a.get("status") or "active") == "active"}
-    if not roster:
+    # The centre's athletes as well as the linked roster. A coach's roster is
+    # often empty - athletes enrolled by an admin are linked to nobody - and a
+    # scan that could only match that list refused every real athlete in front
+    # of the camera as "not one of your athletes".
+    candidates = dict(roster)
+    if centre_id is not None:
+        with connect() as conn:
+            for r in conn.execute(
+                    "SELECT id, name FROM students WHERE role = 'athlete' "
+                    "AND status = 'active' AND centre_id = ?", (int(centre_id),)).fetchall():
+                candidates.setdefault(int(r["id"]), dict(r))
+    if not candidates:
         return None
     narrowed = {}
     for model, (tids, sids, mat) in database.load_gallery().items():
-        keep = np.isin(np.asarray(sids).astype(int), list(roster))
+        keep = np.isin(np.asarray(sids).astype(int), list(candidates))
         if keep.any():
             narrowed[model] = (np.asarray(tids)[keep], np.asarray(sids)[keep], mat[keep])
     if not narrowed:
@@ -441,7 +452,8 @@ def recognise_on_roster(frames, coach_id: int) -> Optional[dict]:
     if best is None:
         return None
     sid = int(best["student_id"])
-    return {"student_id": sid, "name": roster[sid]["name"], "score": float(best["score"])}
+    return {"student_id": sid, "name": candidates[sid]["name"], "score": float(best["score"]),
+            "on_roster": sid in roster}
 
 
 def late_additions(day: str) -> dict:
@@ -503,6 +515,18 @@ def absent_today(coach_id: int, day: str) -> dict:
         "present": int(a["id"]) in marked,
         "last_attended": last.get(int(a["id"])),
     } for a in athletes]
+    # On today's register but not linked to this coach - scanned in by Take
+    # Attendance from the centre's athletes. Shown as present, not lost.
+    extra = marked - {int(a["id"]) for a in athletes}
+    if extra:
+        marks = ",".join("?" for _ in extra)
+        with connect() as conn:
+            for s in conn.execute(
+                    f"SELECT id, name, roll_no, sport FROM students WHERE id IN ({marks}) "
+                    "ORDER BY name", list(extra)).fetchall():
+                rows.append({"student_id": int(s["id"]), "name": s["name"],
+                             "roll_no": s["roll_no"], "sport": s["sport"], "centre_name": None,
+                             "present": True, "last_attended": None, "off_roster": True})
     absent = [r for r in rows if not r["present"]]
     return {"date": day, "register_status": sess["status"] if sess else None,
             "roster_count": len(rows), "present_count": len(rows) - len(absent),

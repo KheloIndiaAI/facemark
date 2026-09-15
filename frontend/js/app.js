@@ -1485,6 +1485,7 @@ function taScan() {
         guided: false,
         facingMode: 'environment',
         rearmOnNoFace: true,
+        frameWidth: 960,
         intro: 'Point the camera at one athlete. Recording starts by itself once their '
              + 'face is found - move the phone slightly while it records.',
         onClip: async (file, ui) => {
@@ -2571,6 +2572,11 @@ async function openClipCapture(opts) {
     const shutter = document.getElementById('clip-cap-shutter');
     const ring    = document.getElementById('clip-cap-ring');
     const status  = document.getElementById('clip-cap-status');
+    // Width of the frames the framing guide sends to the server. 480 suits a
+    // selfie at arm's length; scanning somebody a metre or two from the rear
+    // camera shrinks their face below what the detector can see at 480, so
+    // the guide said "No face detected" over a face the dots were tracking.
+    const FRAME_W = opts.frameWidth || 480;
 
     // Painted here rather than in the stylesheet so the swatches and the dots
     // cannot disagree; see POSE_ACCENT_WAIT / POSE_ACCENT_GOOD.
@@ -2673,7 +2679,7 @@ async function openClipCapture(opts) {
         const scale = Math.max(overlay.width / sw, overlay.height / sh);
         const dx = (overlay.width - sw * scale) / 2;
         const dy = (overlay.height - sh * scale) / 2;
-        const k = sw / 480;
+        const k = sw / Math.min(FRAME_W, sw);     // the width the frame was sent at
         let [x1, y1, x2, y2] = state.box.map(v => v * k);
         // The preview is mirrored for the front camera, so the box must be too,
         // or it tracks the opposite way as the head moves.
@@ -2805,7 +2811,7 @@ async function openClipCapture(opts) {
 
     async function tick() {
         if (!state.alive || state.busy) return;
-        const c = grab(480);
+        const c = grab(FRAME_W);
         if (!c) return;
         state.busy = true;
         try {
