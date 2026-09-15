@@ -416,10 +416,10 @@ function suFace() {
                 ((extra && extra.snapshots) || []).forEach((s, i) => {
                     fd.append('snapshots', s.blob, `${i}_${s.step}.jpg`);
                 });
-                // The proxy in front of the app refuses uploads over 12MB with a
-                // plain-text page, which used to surface as "Could not reach the
-                // server". Stop before sending instead, and say why.
-                if (file.size > 11 * 1024 * 1024) {
+                // The app refuses clips over 25MB and the proxy in front of it
+                // over 30MB, the proxy with an empty page that used to surface as
+                // "Could not reach the server". Stop before sending instead.
+                if (file.size > 24 * 1024 * 1024) {
                     ui.status('That recording was too long to upload. Record again - '
                               + 'it only needs a few seconds.');
                     await ui.resume();

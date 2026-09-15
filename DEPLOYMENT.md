@@ -571,8 +571,12 @@ at.ccki.in, 13-235-123-249.sslip.io {
     # The app has no upload limit of its own. A 24 MP JPEG decodes to ~72 MB
     # and utils.annotate() allocates several more full-size buffers; on a 2 GB
     # box shared with Postgres that is enough to invite the OOM killer.
+    # 30MB, raised from 12MB: guided registration clips plus their step
+    # photos went past 12MB and were refused with an empty 413 the app could
+    # only report as "Could not reach the server". Above the app's own 25MB
+    # clip limit, so a 25-30MB video gets the app's readable refusal instead.
     request_body {
-        max_size 12MB
+        max_size 30MB
     }
 
     reverse_proxy app:8000 {

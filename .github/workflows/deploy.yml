@@ -124,6 +124,9 @@ jobs:
               \"git reset --hard ${GITHUB_SHA}\",
               \"docker compose build app\",
               \"docker compose up -d app\",
+              \"grep -n max_size Caddyfile || true\",
+              \"if grep -q 'max_size 12MB' Caddyfile; then sed -i 's/max_size 12MB/max_size 30MB/' Caddyfile && docker compose restart caddy; fi\",
+              \"grep -n max_size Caddyfile || true\",
               \"docker image prune -f\"
             ]" \
             --query 'Command.CommandId' --output text)

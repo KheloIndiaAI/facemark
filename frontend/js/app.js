@@ -296,10 +296,11 @@ class CameraCapture {
         const mime = CameraCapture.pickMimeType();
         let rec;
         try {
-            // An explicit bitrate, sized against the 12MB upload cap at the
-            // proxy: 2Mbps keeps even the 40s longest guided clip near 10MB.
-            // 4Mbps was tried and pushed long clips past the cap.
-            const bits = { videoBitsPerSecond: 2000000 };
+            // An explicit bitrate. Left to itself a phone encoder drops quality
+            // hard indoors while the head moves, exactly when the server must
+            // find the face. 4Mbps keeps even the 40s longest guided clip near
+            // 20MB, inside the app's 25MB and the proxy's 30MB upload caps.
+            const bits = { videoBitsPerSecond: 4000000 };
             rec = mime ? new MediaRecorder(this.stream, { mimeType: mime, ...bits })
                        : new MediaRecorder(this.stream, bits);
         } catch (err) {
@@ -2319,7 +2320,7 @@ const CLIP_MS_PLAIN = 3000;
 // stuck attempt still ends rather than recording forever. The server's own
 // liveness check on the finished clip remains the real gate either way; this
 // sequence exists to elicit good motion, not to replace it.
-// 40s, not 90s: the proxy in front of the app refuses uploads over 12MB, and at
+// 40s, not 90s: uploads are capped (25MB by the app, 30MB at the proxy), and at
 // the recording bitrate below a 90s clip was far past it - refused with a
 // plain page the app could only report as "Could not reach the server".
 const GUIDED_CAPTURE_MAX_MS = 40000;
