@@ -83,6 +83,8 @@ class LivenessResult:
     face_px: int = 0                 # width of the face judged, in pixels
     frames: List[np.ndarray] = field(default_factory=list)   # sampled, for storage
     best_frame: Optional[np.ndarray] = None                  # sharpest face frame
+    rotation: Optional[str] = None                           # how the clip was turned upright
+    blink: dict = field(default_factory=dict)                # see blink.detect
 
     @property
     def is_live(self) -> bool:
@@ -103,6 +105,7 @@ class LivenessResult:
             "frames_used": self.frames_used,
             "tracked_points": self.tracked_points,
             "face_px": self.face_px,
+            "blink": self.blink,
         }
 
 
@@ -360,8 +363,8 @@ def _depth_from_parallax(
     return float(np.median(residuals)), float(np.max(motions)), len(origin), True
 
 
-def analyse(data: bytes, detector) -> LivenessResult:
-    """Judge a short clip. Never raises for bad input - it returns a verdict."""
+def _analyse_parallax(data: bytes, detector) -> LivenessResult:
+    """Depth from parallax alone. analyse() adds the blink."""
     if not config.LIVENESS_ENABLED:
         # Disabled means "skip the judgement", NOT "skip the decoding". Every
         # caller goes on to use result.frames and result.best_frame - the
@@ -461,7 +464,7 @@ def analyse(data: bytes, detector) -> LivenessResult:
     face_px = int(face.box[2] - face.box[0])
     result = LivenessResult(
         verdict="inconclusive", reason="", frames_used=len(frames),
-        face_px=face_px, frames=frames,
+        face_px=face_px, frames=frames, rotation=turned,
     )
     # The sharpest frame carries the most identity signal, so recognition should
     # run on that rather than on whichever frame happened to be first.
@@ -523,4 +526,49 @@ def analyse(data: bytes, detector) -> LivenessResult:
     result.verdict = "live"
     result.code = "ok"
     result.reason = "Depth consistent with a real face"
+    return result
+
+
+# Depth verdicts a blink may settle: a face was found, but its depth could not
+# be judged - too far, too little to track, or no movement. Never "flat": that
+# is positive evidence of a photograph or screen, and a video replayed on a
+# screen can blink.
+BLINK_CAN_DECIDE = ("too_far", "no_detail", "no_motion")
+
+
+def analyse(data: bytes, detector, blink_at_ms: Optional[float] = None,
+            check_blink: bool = True) -> LivenessResult:
+    """Judge a short clip. Never raises for bad input - it returns a verdict.
+
+    Either kind of evidence proves a live face:
+      depth   parallax, when the phone or the head moved enough to measure it;
+      blink   the eyes closing and opening again (blink.detect).
+
+    People are asked to blink rather than move the phone, so most clips carry
+    no measurable depth and the blink decides. Depth still runs first: a clip
+    that DID move and came out flat is refused, whatever its eyes did.
+
+    THE TRADE. A video of the person replayed on a screen held perfectly still
+    blinks and shows no movement to judge, and passes. Depth alone refused it
+    (as "move the phone"), at the cost of refusing real people who did not move
+    enough. Asking for a blink accepts that gap in exchange.
+
+    `check_blink=False` skips the blink for callers that do not refuse on
+    liveness anyway (Take Attendance refuses only a flat clip), so it does not
+    cost them the time.
+    """
+    result = _analyse_parallax(data, detector)
+    if (not check_blink or not getattr(config, "BLINK_LIVENESS_ENABLED", True)
+            or result.verdict != "inconclusive" or result.code not in BLINK_CAN_DECIDE):
+        return result
+    from . import blink as blink_mod        # blink imports this module
+    b = blink_mod.detect(data, detector, blink_at_ms=blink_at_ms, rotation=result.rotation)
+    result.blink = b
+    if b.get("blinked"):
+        result.verdict = "live"
+        result.code = "blink"
+        result.reason = "Eyes blinked - a live face"
+    elif b.get("checked"):
+        result.reason = ("No blink was seen - look at the camera and blink once "
+                         "while it records")
     return result

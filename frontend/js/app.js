@@ -1405,6 +1405,13 @@ function appendStepPhotos(fd, extra) {
     });
 }
 
+/* When the phone saw the blink, from the start of the recording. Only tells the
+   server where to look - backend/blink.py still has to find the blink in the
+   video itself. */
+function appendBlinkTime(fd, extra) {
+    if (extra && Number.isFinite(extra.blinkAtMs)) fd.append('blink_at_ms', String(Math.round(extra.blinkAtMs)));
+}
+
 // The app refuses clips over 25MB and the proxy over 30MB, the proxy with an
 // empty page the app can only call "Could not reach the server".
 const CLIP_UPLOAD_MAX_BYTES = 24 * 1024 * 1024;
@@ -1556,14 +1563,14 @@ function taScan() {
         facingMode: 'environment',
         rearmOnNoFace: true,
         frameWidth: 960,
-        // Recognition does not need the phone to move, so a clip that did not
-        // fill the movement meter is still sent - it just is not depth-checked.
-        uploadWithoutMovement: true,
+        // Recognition does not need a blink, so a clip without one is still
+        // sent - it is simply not proven live.
+        uploadWithoutBlink: true,
         intro: 'Hold the phone close to one athlete - about an arm\'s length. Recording '
-             + 'starts by itself once their face is close enough; move the phone slowly '
-             + 'side to side until the bar fills.',
+             + 'starts by itself once their face is close enough; ask them to blink.',
         onClip: async (file, ui) => {
             ui.status('Checking…');
+            let scanned = false;
             try {
                 const fd = new FormData();
                 fd.append('clip', file);
@@ -1584,6 +1591,7 @@ function taScan() {
                     speak(r.already ? `${r.name}, already present` : `${r.name}, present`);
                     ui.status(`✓ ${msg}. Next athlete, please.`);
                     if (last) last.textContent = `Last scanned: ${msg}`;
+                    scanned = true;
                     renderDashboardRoleCard('ta-table');
                 }
             } catch (err) {
@@ -1591,7 +1599,9 @@ function taScan() {
             }
             // A moment to read the result before the next athlete steps up.
             await new Promise(res => setTimeout(res, 1800));
-            await ui.resume();
+            // A marked athlete must leave the frame before the next scan (or
+            // they are scanned on a loop); a refused one is scanned again now.
+            await ui.resume({ rearm: !scanned });
         },
     });
 }
@@ -2072,14 +2082,15 @@ function regSubmit() {
         // here, and the prompts contradicted this screen's own instruction.
         guided: false,
         title: 'Confirm it is you',
-        intro: 'Record a few seconds of your own face to sign this register. '
-             + 'Move the phone slowly from side to side while recording.',
-        onClip: async (file, ui) => {
+        intro: 'Look at the camera to sign this register. Recording starts by itself - '
+             + 'blink when asked.',
+        onClip: async (file, ui, extra) => {
             ui.status('Checking\u2026');
             try {
                 const fd = new FormData();
                 fd.append('clip', file);
                 fd.append('attempt', String(regAttempt));
+                appendBlinkTime(fd, extra);
                 const r = await api.postForm(`/api/sessions/${regSession.id}/submit`, fd);
 
                 if (r.submitted === false) {
@@ -2215,21 +2226,21 @@ function meMark(coachId, coachName) {
             // One face against one enrolled record - the same 1:1 check as
             // signing the register, and it wants one view, not four.
             //
-            // Without this the intro below ("move the phone slowly from side
-            // to side") ran the four-turn head-turning sequence instead, so
+            // Without this the intro below ran the four-turn head-turning
+            // sequence instead, so
             // the written instruction and the on-screen prompts asked for
             // different things at the same time, and a mark that should take
             // three seconds took up to thirty-four. The register-signing
             // capture was fixed for exactly this and its twin here was missed.
             guided: false,
-            intro: 'Record a few seconds of your own face, moving the phone slowly '
-                 + 'from side to side.',
-            onClip: async (file, ui) => {
+            intro: 'Look at the camera. Recording starts by itself - blink when asked.',
+            onClip: async (file, ui, extra) => {
                 ui.status('Checking\u2026');
                 try {
                     const fd = new FormData();
                     fd.append('clip', file);
                     fd.append('coach_id', String(coachId));
+                    appendBlinkTime(fd, extra);
                     if (pos) {
                         fd.append('latitude', pos.coords.latitude);
                         fd.append('longitude', pos.coords.longitude);
@@ -2467,18 +2478,67 @@ const CLIP_MS_PLAIN = 3000;
  * was 1.034 at the median and 1.090 at the 95th percentile. 164px of mesh puts
  * the server's box at 150px or more on 95% of frames.
  *
- * MOVEMENT. The server's `motion` is the largest median shift of the tracked
- * face points from the first frame, in face widths, and it needs 0.05. The
- * phone measures the same quantity on the mesh. Of the 277 test clips the
- * server could measure, every one whose phone reading reached 0.08 also
- * cleared 0.05 on the server (photographs read about 1:1; real faces lower,
- * when the tracker drops points on a turning head). The target is 0.15 -
- * nearly double - so a normal slow sweep is enough and the margin is not thin.
- * The recording ends as soon as it is reached, not on a timer. */
+ * BLINK. Proof of a live face is an eye blink, not moving the phone: a photo
+ * cannot close its eyes. Eye openness is the eye aspect ratio (EAR) of the
+ * landmark mesh - eyelid gap over eye width, averaged over both eyes - which
+ * does not depend on distance or head tilt. Judged against the person's OWN
+ * open-eye reading, not a fixed number, because resting eye shape differs
+ * between people: closed below BLINK_CLOSED_RATIO of it, open again above
+ * BLINK_OPEN_RATIO. The server re-checks the uploaded clip with the same
+ * landmark model and the same rule (backend/blink.py) - a browser's "blinked"
+ * is not evidence. The recording ends a moment after the blink, so the clip
+ * holds the eyes opening again. */
 const LIVE_MIN_MESH_PX = 164;
-const CLIP_MOVE_TARGET = 0.15;
-const CLIP_MS_MIN = 1500;       // enough frames for the server's sampler to spread over
-const CLIP_MS_MAX = 8000;       // then stop regardless - see opts.uploadWithoutMovement
+const BLINK_CLOSED_RATIO = 0.60;
+const BLINK_OPEN_RATIO = 0.80;
+const BLINK_MAX_CLOSED_MS = 2000;   // longer than this is not a blink but eyes shut
+const BLINK_TAIL_MS = 500;          // keep recording after the eyes reopen
+const CLIP_MS_MIN = 1500;           // enough frames for the server's sampler to spread over
+const CLIP_MS_MAX = 8000;           // then stop regardless - see opts.uploadWithoutBlink
+
+/* Eye aspect ratio from the 478-point mesh, both eyes averaged; null if the
+   mesh is incomplete. Indices are MediaPipe's: for each eye the two corners,
+   and two upper/lower eyelid pairs. The same indices as backend/blink.py. */
+const EAR_EYES = [[33, 160, 158, 133, 153, 144], [362, 385, 387, 263, 373, 380]];
+function eyeAspect(pts, W = 1, H = 1) {
+    if (!pts || pts.length < 478) return null;
+    const d = (a, b) => Math.hypot((pts[a].x - pts[b].x) * W, (pts[a].y - pts[b].y) * H);
+    let sum = 0;
+    for (const [p1, p2, p3, p4, p5, p6] of EAR_EYES) {
+        const width = d(p1, p4);
+        if (width <= 0) return null;
+        sum += (d(p2, p6) + d(p3, p5)) / (2 * width);
+    }
+    return sum / EAR_EYES.length;
+}
+
+/* Blink = eyes measured open, then closed, then open again - within
+   BLINK_MAX_CLOSED_MS. The open reference is the median of recent open
+   readings, so it follows the person rather than a constant. */
+function makeBlinkDetector() {
+    const open = [];
+    let closedAt = 0;
+    const median = a => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+    return {
+        push(ear, t) {
+            if (ear === null || ear === undefined) return false;
+            if (open.length < 5) { open.push(ear); return false; }
+            const base = median(open);
+            if (ear < base * BLINK_CLOSED_RATIO) {
+                if (!closedAt) closedAt = t;
+                return false;
+            }
+            if (ear > base * BLINK_OPEN_RATIO) {
+                const blinked = closedAt && t - closedAt <= BLINK_MAX_CLOSED_MS;
+                closedAt = 0;
+                open.push(ear);
+                if (open.length > 30) open.shift();
+                return !!blinked;
+            }
+            return false;
+        },
+    };
+}
 
 // Registration does NOT record for a fixed duration. A clock was tried first -
 // ten seconds, on the reasoning that more elapsed time gives a person more
@@ -2696,8 +2756,8 @@ async function openClipCapture(opts) {
                      only feedback was a prompt that changed on a timer. -->
                 <div class="rec-prompt-live" id="clip-cap-prompt-live"></div>
             </div>
-            <!-- Unguided recording: how much the phone has moved, measured on
-                 the phone. See CLIP_MOVE_TARGET. -->
+            <!-- Unguided recording: the blink prompt and the time left for it,
+                 watched on the phone. See watchBlink. -->
             <div class="rec-move hidden" id="clip-cap-move" aria-live="polite">
                 <div id="clip-cap-move-text"></div>
                 <div class="rec-move-bar"><div class="rec-move-fill" id="clip-cap-move-fill"></div></div>
@@ -2713,8 +2773,11 @@ async function openClipCapture(opts) {
                         <circle cx="12" cy="12" r="2.5"/>
                     </svg>
                 </button>
+                <!-- Never shown: recording starts by itself once the face is
+                     framed, on every attempt, so there is nothing to press. Kept
+                     for the progress ring's markup and nothing else. -->
                 <button type="button" class="camera-shutter" id="clip-cap-shutter"
-                        aria-label="Record - follow the on-screen prompts" disabled>
+                        aria-label="Recording starts automatically" disabled hidden>
                     <svg class="rec-ring" viewBox="0 0 44 44" aria-hidden="true">
                         <circle class="rec-ring-track" cx="22" cy="22" r="20"></circle>
                         <circle class="rec-ring-fill" id="clip-cap-ring" cx="22" cy="22" r="20"></circle>
@@ -3074,65 +3137,64 @@ async function openClipCapture(opts) {
         return Math.max(0, hi - lo) * (video.videoWidth || 0);
     }
 
-    // Median shift of the mesh points between two readings, in face widths of
-    // the first - the same measure as the server's `motion`.
-    function meshShift(a, b, aw) {
-        const W = video.videoWidth || 1, H = video.videoHeight || 1;
-        const n = Math.min(a.length, b.length);
-        const d = [];
-        for (let i = 0; i < n; i += 3) d.push(Math.hypot((b[i].x - a[i].x) * W, (b[i].y - a[i].y) * H));
-        d.sort((x, y) => x - y);
-        return d.length && aw > 0 ? d[d.length >> 1] / aw : 0;
-    }
-
     // Only the unguided clip is gated on this. Registration's guided capture
     // is a selfie at arm's length, already far past it.
     const tooFar = () => opts.guided === false && !!meshFresh() && state.meshW < LIVE_MIN_MESH_PX;
 
-    /* Keeps the recording going until the phone has moved enough for the
-     * depth check - see CLIP_MOVE_TARGET - with a meter that fills as it does.
-     * Resolves { ok } or { ok: false, reason }. */
-    async function watchMovement(control) {
+    /* Keeps the recording going until the person blinks - see BLINK_* - then a
+     * moment longer so the eyes are seen opening again. The bar is the time
+     * left; it turns green on the blink. Resolves { ok } or { ok: false, reason }. */
+    async function watchBlink(control) {
         const t0 = Date.now();
-        let base = null, baseW = 0, best = 0, lastSpoken = '';
+        const detector = makeBlinkDetector();
+        let seen = false, blinkAt = 0, lastSpoken = '';
         const say = (text, voice) => {
             if (moveText && moveText.textContent !== text) moveText.textContent = text;
             if (voice && lastSpoken !== text) { lastSpoken = text; speak(text); }
         };
+        state.onMesh = (pts, t) => {
+            const W = video.videoWidth || 1, H = video.videoHeight || 1;
+            if (detector.push(eyeAspect(pts, W, H), t) && !blinkAt) blinkAt = Date.now();
+        };
         if (moveBox) moveBox.classList.remove('hidden');
         if (moveFill) { moveFill.style.width = '0%'; moveFill.classList.remove('ok'); }
-        say('Move the phone slowly from side to side', true);
+        say('Look at the camera and blink', true);
         try {
             while (!state.closed && !control.done) {
-                const m = meshFresh();
-                if (!m) {
-                    say('Keep the face in view');
-                } else {
-                    if (!base) { base = m; baseW = state.meshW; }
-                    best = Math.max(best, meshShift(base, m, baseW));
-                    if (state.meshW < LIVE_MIN_MESH_PX) say('Too far - move closer', true);
-                    else if (best < CLIP_MOVE_TARGET) say('Move the phone slowly from side to side');
-                }
-                const p = Math.min(1, best / CLIP_MOVE_TARGET);
-                if (moveFill) moveFill.style.width = `${Math.round(p * 100)}%`;
-                setRing(p);
                 const elapsed = Date.now() - t0;
-                if (p >= 1 && elapsed >= CLIP_MS_MIN) {
-                    if (moveFill) moveFill.classList.add('ok');
+                if (blinkAt) {
+                    if (moveFill) { moveFill.style.width = '100%'; moveFill.classList.add('ok'); }
                     say('Got it', true);
-                    control.done = true;
-                    return { ok: true };
+                    setRing(1);
+                    if (Date.now() - blinkAt >= BLINK_TAIL_MS && elapsed >= CLIP_MS_MIN) {
+                        control.done = true;
+                        // When, from the start of the recording - the server
+                        // looks for the blink around this moment.
+                        return { ok: true, blinkAtMs: blinkAt - t0 };
+                    }
+                } else {
+                    const m = meshFresh();
+                    if (!m) say('Keep the face in view');
+                    else {
+                        seen = true;
+                        if (state.meshW < LIVE_MIN_MESH_PX) say('Too far - move closer', true);
+                        else say('Look at the camera and blink');
+                    }
+                    const p = Math.min(1, elapsed / CLIP_MS_MAX);
+                    if (moveFill) moveFill.style.width = `${Math.round(p * 100)}%`;
+                    setRing(p);
                 }
                 if (elapsed >= CLIP_MS_MAX) {
                     control.done = true;
-                    return { ok: false, reason: base
-                        ? 'The phone did not move enough - record again, moving it slowly from side to side.'
-                        : 'The face was not seen while recording - keep it in view and record again.' };
+                    return { ok: false, reason: seen
+                        ? 'No blink was seen - look at the camera and blink. Recording again.'
+                        : 'The face was not seen while recording - keep it in view. Recording again.' };
                 }
                 await new Promise(res => setTimeout(res, 50));
             }
-            return { ok: false, reason: 'Recording did not complete. Try again.' };
+            return { ok: false, reason: 'Recording did not complete. Trying again.' };
         } finally {
+            state.onMesh = null;
             if (moveBox) moveBox.classList.add('hidden');
         }
     }
@@ -3204,9 +3266,9 @@ async function openClipCapture(opts) {
             // before recording again, or the same athlete is recorded on a loop.
             if (!rawGood && opts.rearmOnNoFace) state.autoFired = false;
             // AUTO-RECORD. The green dots are the go signal - nobody taps.
-            if (state.good && !state.recording && !state.autoFired && opts.autoRecord !== false) {
+            if (state.good && !state.recording && !state.autoFired && !state.flipping) {
                 state.autoFired = true;
-                shutter.click();
+                startRecording();
             }
             // Recovered. Anything the last failure put on screen has just been
             // overwritten by a real answer, so drop back to the fast poll.
@@ -3254,7 +3316,7 @@ async function openClipCapture(opts) {
         status(text, isHtml) {
             if (isHtml) status.innerHTML = text; else status.textContent = text;
         },
-        async resume() {
+        async resume({ rearm = false } = {}) {
             // Refuse once the modal has been closed. onClip callbacks await a
             // server round trip and then call this on a refusal, so the close
             // can land WHILE that request is in flight - and by then teardown
@@ -3270,7 +3332,10 @@ async function openClipCapture(opts) {
             // Back to looking for a face: analyzing banner on, processing off,
             // and auto-record armed again (or armed once the face has left, when
             // scanning one person after another).
-            state.autoFired = !!opts.rearmOnNoFace;
+            // `rearm`: record again straight away. After a refusal the same
+            // person is still in front of the camera, and making them step out
+            // of frame and back before anything happened read as a hang.
+            state.autoFired = !!opts.rearmOnNoFace && !rearm;
             showProcessing(false);
             hint.classList.remove('hidden');
             showAnalyzing(true);
@@ -3314,6 +3379,9 @@ async function openClipCapture(opts) {
                 // Face size in the recorded video's pixels - see LIVE_MIN_MESH_PX.
                 state.meshW = meshWidthPx(r.points);
                 state.meshT = state.pose.t;
+                // Every mesh reading, at video rate, while a blink is being
+                // watched for - a 50ms poll can step straight over one.
+                if (state.onMesh) state.onMesh(r.points, state.meshT);
             }
             // Only the mesh path redraws here; the server path redraws on its
             // own poll, so a dropped mesh frame never blanks the overlay.
@@ -3698,15 +3766,17 @@ async function openClipCapture(opts) {
         control.done = true;
     }
 
-    shutter.addEventListener('click', async () => {
-        if (state.recording || state.flipping) return;
+    // Called by the framing loop the moment the face is framed - on the first
+    // attempt and on every retry. There is no button for it.
+    async function startRecording() {
+        if (state.recording || state.flipping || state.closed) return;
         state.recording = true;
         shutter.disabled = true;
         shutter.classList.add('recording');
         setFlipVisible(false);
         showAnalyzing(false);
         ui.status(opts.guided === false
-            ? 'Recording - move the phone slowly side to side.'
+            ? 'Recording - look at the camera and blink.'
             : 'Recording - follow the on-screen prompts.');
 
         // The pre-recording framing poll and the guided sequence's own poll
@@ -3725,38 +3795,41 @@ async function openClipCapture(opts) {
         // camera except closing and reopening the whole modal.
         let file = null;
         let snapshots = [];
+        let blinkAtMs = null;
         // What the retry path below tells the person, when it fires. Default
         // covers the outer catch and a genuinely empty capture; the guided
         // branch overwrites it with something specific when IT is the reason.
         let retryReason = 'Recording did not complete. Try again.';
         try {
             if (opts.guided === false) {
-                // A group across a room, or one face being verified against one
-                // record. Neither wants "turn left": nobody in a hall is
-                // following prompts, and a 1:1 check needs one view. Parallax
-                // comes from moving the phone, which the copy asks for.
+                // One face, scanned or verified against one record. Neither
+                // wants "turn left": a 1:1 check needs one view. Proof of a
+                // live face is a blink - see watchBlink.
                 promptBox.classList.add('hidden');
-                ui.status('Recording - move the phone slowly side to side.');
+                ui.status('Recording - look at the camera and blink.');
                 if (meshFresh()) {
-                    // Measured on the phone: ends once the phone has moved
-                    // enough, instead of after a fixed three seconds.
+                    // Watched on the phone: ends a moment after a blink,
+                    // instead of after a fixed three seconds.
                     const control = { done: false };
-                    const [recorded, moved] = await Promise.all([
+                    const [recorded, blinked] = await Promise.all([
                         cam.recordClip(CLIP_MS_MAX + 1000, null, control)
                             .then(r => { control.done = true; return r; }),
-                        watchMovement(control),
+                        watchBlink(control),
                     ]);
-                    if (recorded && (moved.ok || opts.uploadWithoutMovement)) {
+                    if (recorded && (blinked.ok || opts.uploadWithoutBlink)) {
                         file = recorded;
+                        blinkAtMs = blinked.ok ? blinked.blinkAtMs : null;
                     } else if (recorded && !state.closed) {
-                        // Not sent: the server could only answer "barely moved"
-                        // or "too far", after the upload and the wait.
-                        retryReason = moved.reason;
-                        showToast('Record again', moved.reason, 'error');
+                        // Not sent - the server would only say "no blink" after
+                        // the upload. The retry below records again by itself.
+                        retryReason = blinked.reason;
+                        speak('No blink seen. Try again.');
                     }
                 } else {
-                    // No on-device mesh (old phone, blocked download): the timer.
-                    file = await cam.recordClip(opts.clipMs || CLIP_MS_PLAIN, setRing);
+                    // No on-device mesh (old phone, blocked download): record
+                    // for a fixed time and let the server look for the blink.
+                    speak('Look at the camera and blink');
+                    file = await cam.recordClip(opts.clipMs || CLIP_MS_PLAIN + 1000, setRing);
                 }
             } else {
                 const control = { done: false, measured: [], snapshots: [] };
@@ -3853,9 +3926,9 @@ async function openClipCapture(opts) {
         // frozen camera, not with a stale "recording" pill left on it.
         hint.classList.add('hidden');
         showProcessing(true);
-        await opts.onClip(file, ui, { snapshots });
+        await opts.onClip(file, ui, { snapshots, blinkAtMs });
         showProcessing(false);
-    });
+    }
 }
 
 /** Attach one more photograph to an existing person.

@@ -421,6 +421,9 @@ LIVENESS_FB_MAX_PX = 4.0
 # a coach of holding up a phone on the strength of a measurement that cannot
 # see that far is the one answer certainly not supported by the evidence.
 LIVENESS_MIN_FACE_PX = 150
+# A blink proves a live face when depth could not be judged - see
+# liveness.analyse and backend/blink.py. Off means depth only, as before.
+BLINK_LIVENESS_ENABLED = os.environ.get("FACEMARK_BLINK_LIVENESS", "1") != "0"
 LIVENESS_MAX_BYTES = 25 * 1024 * 1024
 # Registration records for 10s (config below); attendance stays at 2s. The
 # ceiling needs headroom above the longer of the two, not to equal it exactly -

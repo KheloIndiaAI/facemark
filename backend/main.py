@@ -1934,6 +1934,7 @@ async def submit_session(
     session_id: int,
     clip: UploadFile = File(...),
     attempt: int = Form(1),
+    blink_at_ms: Optional[float] = Form(None),
     user: dict = Depends(auth.require_staff),
 ):
     """Close the register under the submitter's own face.
@@ -1982,7 +1983,7 @@ async def submit_session(
         raise HTTPException(400, "Empty upload")
 
     detector = get_detector()
-    result = liveness.analyse(data, detector)
+    result = liveness.analyse(data, detector, blink_at_ms=blink_at_ms)
     img = result.best_frame
 
     verified, score, reason = False, 0.0, ""
@@ -2066,7 +2067,9 @@ async def scan_attendance(
     if not data:
         raise HTTPException(400, "Empty upload")
     detector = get_detector()
-    result = liveness.analyse(data, detector)
+    # No blink check: this route refuses only a flat clip, so looking for a
+    # blink would cost every scan time without changing any answer.
+    result = liveness.analyse(data, detector, check_blink=False)
     if result.verdict == "screen":
         return {"ok": False, "reason": "screen", "message": result.reason}
     frames = portrait_mod.ranked(result.frames or [], detector)[:3]
@@ -2280,6 +2283,7 @@ def my_attendance(user: dict = Depends(auth.current_user)):
 async def mark_myself(
     clip: UploadFile = File(...),
     coach_id: int = Form(...),
+    blink_at_ms: Optional[float] = Form(None),
     latitude: Optional[float] = Form(None),
     longitude: Optional[float] = Form(None),
     accuracy_m: Optional[float] = Form(None),
@@ -2321,7 +2325,7 @@ async def mark_myself(
         raise HTTPException(400, "Empty upload")
 
     detector = get_detector()
-    result = liveness.analyse(data, detector)
+    result = liveness.analyse(data, detector, blink_at_ms=blink_at_ms)
     if result.verdict != "live" or result.best_frame is None:
         # Only a clip judged FLAT starts the cooldown. Too far, too little
         # movement, no face: the check could not look, the face was never

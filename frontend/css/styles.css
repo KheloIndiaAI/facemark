@@ -382,6 +382,8 @@ a:hover { color: var(--accent-hover); }
 .camera-flip:active { transform: translateY(-50%) scale(0.92); }
 .camera-flip:disabled { opacity: 0.5; cursor: default; }
 .camera-flip[hidden] { display: none; }
+/* Recording is automatic - the shutter is never shown (same [hidden] reason). */
+.camera-shutter[hidden] { display: none; }
 .shutter-inner { transition: background var(--transition-fast), border-radius var(--transition-fast), transform var(--transition-fast); }
 
 .rec-hint { position: absolute; bottom: 96px; left: 50%; transform: translateX(-50%);
