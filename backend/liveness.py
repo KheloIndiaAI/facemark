@@ -371,13 +371,20 @@ def analyse(data: bytes, detector) -> LivenessResult:
     # region with no depth reads as flat: a real person, refused as a
     # photograph. That is the failure this whole check was rewritten to stop,
     # surviving in the one branch nobody measured.
+    # Every frame is a candidate, not just the first and the middle. The guided
+    # recording now finishes in about five seconds, so its middle frame is
+    # usually mid-turn - a face side-on to the lens - and a clip whose first
+    # frame was blurred or had a thumb over the lens was refused as "No face"
+    # while nearly every other frame held one. First frame, then middle, then
+    # the rest in order, so the usual case costs what it did before.
     start = 0
-    face = _largest_face(frames[0], detector)
-    if face is None:
-        # The first frame is often the worst - caught before the camera has
-        # settled or the subject is in position.
-        start = len(frames) // 2
-        face = _largest_face(frames[start], detector)
+    face = None
+    mid = len(frames) // 2
+    for i in [0, mid] + [k for k in range(1, len(frames)) if k != mid]:
+        face = _largest_face(frames[i], detector)
+        if face is not None:
+            start = i
+            break
     if face is None:
         return LivenessResult("no_face", "No face was found in the clip",
                               code="no_face", frames_used=len(frames), frames=frames)

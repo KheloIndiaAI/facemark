@@ -865,7 +865,34 @@ def load_gallery(centre_id: Optional[int] = None) -> Dict[str, Tuple[np.ndarray,
     }
 
 
-def load_gallery_with_quality() -> Tuple[Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]], Dict[str, np.ndarray]]:
+def load_pending_gallery(exclude_student_id: int) -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Templates of people whose OWN application is still pending, in
+    load_gallery's shape - for refusing a second application from the same
+    face. The applicant asking is excluded, so they never match themselves.
+    Pending people are deliberately outside the normal gallery, which is why a
+    duplicate application was invisible to the existing check."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT t.id, t.student_id, t.model, t.vector FROM templates t "
+            "WHERE t.student_id <> ? AND EXISTS (SELECT 1 FROM users u "
+            "      WHERE u.student_id = t.student_id AND u.status = 'pending')",
+            (int(exclude_student_id),)).fetchall()
+    gallery: Dict[str, list] = {}
+    for r in rows:
+        gallery.setdefault(r["model"], []).append(
+            (int(r["id"]), int(r["student_id"]), np.frombuffer(r["vector"], dtype=np.float32))
+        )
+    return {
+        model: (
+            np.array([tid for tid, _, _ in items]),
+            np.array([sid for _, sid, _ in items]),
+            np.stack([v for _, _, v in items]),
+        )
+        for model, items in gallery.items()
+    }
+
+
+def load_gallery_with_quality() ->Tuple[Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]], Dict[str, np.ndarray]]:
     """Like load_gallery() but also returns {model: quality_scores_array}.
 
     Shares MATCHABLE with load_gallery. It had no exclusion of its own, which

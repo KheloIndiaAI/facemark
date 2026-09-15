@@ -542,7 +542,7 @@ def verify_face(img, student_id: int) -> dict:
     return {"ok": True, "score": score, "reason": ""}
 
 
-def find_existing_person(img) -> dict:
+def find_existing_person(img, gallery=None) -> dict:
     """The best open-set match for this face among people already enrolled.
 
     The same fuse_scores path and the same MATCH_THRESHOLD the register uses,
@@ -568,7 +568,10 @@ def find_existing_person(img) -> dict:
         return {"student_id": None, "score": 0.0}
     face = max(faces, key=lambda f: f.width * f.height)
 
-    gallery = database.load_gallery()
+    # `gallery` lets the same match run against another set of people - the
+    # still-pending applications, which the default gallery excludes.
+    if gallery is None:
+        gallery = database.load_gallery()
     if not gallery:
         return {"student_id": None, "score": 0.0}
     queries = recognizer.embed_faces(img, [face])

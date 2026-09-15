@@ -2427,21 +2427,37 @@ async def signup_face(
                 "message": "No usable face in that clip - try again in better light",
                 "liveness": result.to_dict()}
 
-    # Asked BEFORE this face joins the gallery, and answered against people
-    # who are already approved - so an applicant can never be flagged as their
-    # own duplicate. Recorded, never acted on: the merge is a human's call, and
-    # it is put in front of them at approval time.
+    # NO DUPLICATE REGISTRATIONS. Asked before this face joins anything, at the
+    # register's own MATCH_THRESHOLD: first against everyone already approved -
+    # athletes AND coaches, so a coach cannot also sign up as an athlete - and
+    # then against applications still waiting, which the normal gallery leaves
+    # out and which is how one person used to apply twice. This used to only
+    # flag the approver; a person is now refused outright and the unfinished
+    # application is removed, since it can never legitimately complete.
+    #
+    # The reply names nobody. The caller is unauthenticated, and saying WHO the
+    # face matched would turn this into a lookup of registered minors.
     dup = sessions_mod.find_existing_person(best)
+    dup_kind = "registered"
+    if not dup.get("student_id"):
+        dup = sessions_mod.find_existing_person(
+            best, database.load_pending_gallery(student_id))
+        dup_kind = "pending"
     if dup.get("student_id"):
-        with pgdb.connect() as conn:
-            conn.execute(
-                "UPDATE users SET duplicate_of = ?, duplicate_score = ? "
-                "WHERE student_id = ?",
-                (int(dup["student_id"]), float(dup["score"]), student_id),
-            )
-        log.info("Signup for person %s resembles enrolled person %s (%.3f) - "
-                 "flagged for the approver", student_id, dup["student_id"],
-                 dup["score"])
+        log.warning("Signup for person %s refused: face matches %s person %s (%.3f)",
+                    student_id, dup_kind, dup["student_id"], dup["score"])
+        try:
+            signup_mod.withdraw(token)
+        except ValueError:
+            pass
+        return {"ok": False, "duplicate": True, "message": (
+            "This face is already registered. Sign in with that account "
+            "instead - if you do not have a login, ask your coach or centre "
+            "administrator."
+            if dup_kind == "registered" else
+            "An application with this face is already waiting for approval. "
+            "You can only apply once - ask your coach or centre administrator "
+            "to approve or remove the earlier one.")}
 
     ts = utils.timestamp()
     photo_name = f"signup_{student_id}_{ts}.jpg"

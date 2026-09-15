@@ -413,6 +413,16 @@ function suFace() {
                 fd.append('video', file);
                 const res = await fetch('/api/signup/face', { method: 'POST', body: fd });
                 const j = await res.json();
+                if (j.duplicate) {
+                    // Already registered or already applied. The server has
+                    // removed this application, so the camera cannot help -
+                    // close it, say why, and stop another attempt.
+                    ui.close();
+                    suMsg(j.message);
+                    const btn = document.getElementById('su-face');
+                    if (btn) btn.disabled = true;
+                    return;
+                }
                 if (!res.ok || j.ok === false) {
                     ui.status(j.message || j.detail || 'Could not use that clip');
                     await ui.resume();

@@ -254,9 +254,15 @@ def start(username: str, password: str, full_name: str,
 # the table. Every place that offers "the coaches at this centre" has to say so,
 # or the first thing self-registration buys an impostor is a queue of athletes
 # choosing them - and, on approval, a signed register.
+#
+# A coach must also HAVE a working login. Deleting a coach's account keeps the
+# person record (and their face and attendance), and disabling one only flips
+# is_active - so both used to stay in the picker, and an admin who removed
+# every coach still saw all of them. An application attached to a coach with
+# no working login also waits in a queue nobody can open.
 _APPROVED_COACH = (
-    " AND NOT EXISTS (SELECT 1 FROM users u "
-    "WHERE u.student_id = s.id AND u.status <> 'active')"
+    " AND EXISTS (SELECT 1 FROM users u WHERE u.student_id = s.id"
+    "             AND u.role = 'coach' AND u.status = 'active' AND u.is_active = 1)"
 )
 
 
@@ -283,10 +289,10 @@ def centre_of(token: str) -> int:
 def coaches_at(centre_id: int) -> List[dict]:
     """Coaches a new athlete may choose, with their enrolment photo.
 
-    Pending, rejected and suspended coaches are excluded. Coaches with no
-    account at all are included: most were enrolled by an admin and never
-    needed one, and dropping them would empty this list at every existing
-    centre.
+    Only coaches with an active, enabled coach login - see _APPROVED_COACH. A
+    centre with none gets an empty list, and the picker then offers to
+    continue without a coach, which puts the application in front of a super
+    admin instead.
     """
     with connect() as conn:
         rows = conn.execute(
@@ -379,16 +385,36 @@ def choose_coach(token: str, coach_id: int) -> None:
         ).fetchone()
         if not row:
             raise ValueError("That coach is not available to choose")
-        # A coach with no ACCOUNT cannot open an approval queue, so an
-        # application attached to one waits for somebody who will never be
-        # shown it. It is NOT refused here: coaches_at lists those coaches
-        # deliberately - most were enrolled by an admin and never needed a
-        # login - and refusing would empty the picker at every existing centre
-        # and block registration entirely. Instead admin_overview counts these
-        # as orphaned, which is the screen that exists to catch exactly the
-        # applications nobody else will see.
         conn.execute("UPDATE users SET chosen_coach_id = ? WHERE id = ?",
                      (int(coach_id), rec["user_id"]))
+
+
+def withdraw(token: str) -> None:
+    """Remove an unfinished application that can never be completed.
+
+    Used when the face turns out to be somebody already registered. Only a
+    still-pending application with no templates is removed - never an account
+    that has been decided or a person whose face is on file - so this cannot
+    reach anybody but the applicant holding this token. The signup token goes
+    with the account (ON DELETE CASCADE).
+    """
+    rec = resolve_signup(token)
+    with connect() as conn:
+        row = conn.execute("SELECT student_id, status FROM users WHERE id = ?",
+                           (rec["user_id"],)).fetchone()
+        if not row or row["status"] != "pending":
+            return
+        sid = row["student_id"]
+        if sid is not None and conn.execute(
+                "SELECT 1 FROM templates WHERE student_id = ? LIMIT 1",
+                (int(sid),)).fetchone():
+            return
+        conn.execute("DELETE FROM users WHERE id = ?", (rec["user_id"],))
+        if sid is not None:
+            conn.execute("DELETE FROM photos WHERE student_id = ?", (int(sid),))
+            conn.execute("DELETE FROM students WHERE id = ? AND status = 'pending'",
+                         (int(sid),))
+    log.info("Signup %s withdrawn: face already registered", rec["user_id"])
 
 
 def role_for(token: str) -> str:
