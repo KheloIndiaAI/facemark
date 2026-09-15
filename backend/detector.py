@@ -264,7 +264,13 @@ class FaceDetector:
                 f"YuNet model missing: {self._model_path}. "
                 "Run: python -m scripts.download_models"
             )
-        self._detector = None      # created per image; input size is baked in
+        # One YuNet instance per (width, height, score), reused. Building one
+        # costs ~10 ms of the ~60 ms a pose-check frame takes, and the guided
+        # capture sends several frames a second from every phone at once, all
+        # queued on the lock below - so rebuilding per call was a sixth of the
+        # latency for no benefit. Callers send a handful of fixed frame sizes,
+        # so this stays small; it is cleared rather than grown if that changes.
+        self._dets: dict = {}
         log.info("Detector ready: YuNet (%s)", config.YUNET_MODEL)
 
     @property
@@ -286,11 +292,16 @@ class FaceDetector:
         score = self._score_for(mode)
 
         with self._lock:
-            det = cv2.FaceDetectorYN.create(
-                str(self._model_path), "", (w, h), score, config.YUNET_NMS,
-                config.MAX_FACES_PER_IMAGE,
-            )
-            det.setInputSize((w, h))
+            key = (w, h, score)
+            det = self._dets.get(key)
+            if det is None:
+                if len(self._dets) >= 16:
+                    self._dets.clear()
+                det = cv2.FaceDetectorYN.create(
+                    str(self._model_path), "", (w, h), score, config.YUNET_NMS,
+                    config.MAX_FACES_PER_IMAGE,
+                )
+                self._dets[key] = det
             _, rows = det.detect(img_bgr)
 
         faces: List[Face] = []

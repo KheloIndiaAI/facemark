@@ -48,7 +48,42 @@ const FaceMesh = (() => {
             // Blendshapes are not needed to draw dots and cost extra compute
             // every frame. They are what a blink challenge would use later.
             outputFaceBlendshapes: false,
+            // The head's fitted 3D rotation - see pose() for why yaw comes
+            // from here rather than from landmark geometry.
+            outputFacialTransformationMatrixes: true,
         });
+    }
+
+    const DEG = 180 / Math.PI;
+
+    /* Head angles, in the SERVER's sign convention and close to its scale,
+     * because the server's check on the finished clip is the one that decides.
+     *
+     * Measured on 303 frames the server had already labelled (left, right,
+     * centre, down), comparing each source against the server's own 5-point
+     * estimate on identical pixels:
+     *
+     *   yaw   - the transformation matrix. On a still face it wobbles a median
+     *           2.1 deg between frames (worst tenth 3.7) against the server's
+     *           6.3 (10.1); it gives the same left/centre/right answer on 96.5%
+     *           of frames, same sign, reading about 0.8x the server's value.
+     *           Landmark geometry agreed more closely on average but threw
+     *           15-degree spikes on one frame in ten - a false "turned" read.
+     *   pitch - the transformation matrix, NEGATED. Its raw sign runs opposite
+     *           to the server's (down frames read -20 deg from centre where
+     *           the server reads +14), and its absolute value carries a large
+     *           per-person bias (centre frames 13.6 +/- 10.7), so it is only
+     *           meaningful RELATIVE to that person's own straight-ahead -
+     *           which is the only way the guided sequence uses it. Landmark
+     *           geometry with the server's own pitch formula was tried and
+     *           does not track the server at all (correlation 0.07). */
+    function pose(matrix) {
+        if (!matrix || !matrix.data) return { yaw: null, pitch: null };
+        const d = matrix.data;
+        return {
+            yaw: Math.atan2(-d[2], Math.hypot(d[0], d[1])) * DEG,
+            pitch: -Math.atan2(d[6], d[10]) * DEG,
+        };
     }
 
     /** Load once. Returns the landmarker, or null if unavailable. */
@@ -81,7 +116,10 @@ const FaceMesh = (() => {
         return loadPromise;
     }
 
-    /** Landmarks for one video frame, as [{x, y}] normalised 0..1, or null.
+    /** One video frame: `{ points, yaw, pitch }`, or null when no face.
+     *
+     *  `points` are [{x, y}] normalised 0..1. `yaw`/`pitch` are degrees (see
+     *  pose()) and either may be null if that frame could not supply it.
      *
      *  `tsMs` must increase between calls - detectForVideo rejects a timestamp
      *  that goes backwards, which happens if two callers share one landmarker.
@@ -94,7 +132,9 @@ const FaceMesh = (() => {
         try {
             const res = landmarker.detectForVideo(video, t);
             const face = res && res.faceLandmarks && res.faceLandmarks[0];
-            return face && face.length ? face : null;
+            if (!face || !face.length) return null;
+            const matrix = res.facialTransformationMatrixes && res.facialTransformationMatrixes[0];
+            return { points: face, ...pose(matrix) };
         } catch {
             return null;                 // a dropped frame, not a failure
         }

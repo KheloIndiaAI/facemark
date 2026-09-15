@@ -2321,6 +2321,43 @@ function _arrowSvg(direction) {
  * Read by the canvas AND by the on-screen legend, because the legend's whole
  * job is to say what these colours mean - a swatch that has drifted from the
  * dots it describes teaches the wrong thing, and nothing would catch it. */
+/* On-device turn detection, used during the guided recording whenever the
+ * face landmarker is running (see facemesh.js pose() for how its angles were
+ * checked against the server's on 303 labelled frames).
+ *
+ * WHY NOT THE SERVER. Each server judgement was a JPEG encoded, uploaded,
+ * decoded and run through detection - ~50 ms of compute behind a lock every
+ * phone shares, plus the round trip - so a turn was confirmed a beat after it
+ * happened. And its yaw comes from five landmarks: a still face wobbled a
+ * median 6.3 deg between frames, against a 12 deg threshold. The landmarker
+ * is already running for the dots, at video rate, and wobbles 2.1.
+ *
+ * NOTHING IS TRUSTED FROM HERE. The server still re-checks the uploaded clip
+ * itself (_verify_enrol_poses) and refuses one that does not show the turns.
+ * These numbers exist so that what this says "Got it" to, the server agrees
+ * with:
+ *   - REL: a turn is measured from the person's own straight-ahead, like the
+ *     server's live check, so a head that rests slightly turned is not
+ *     counted as turned.
+ *   - ABS: and it must ALSO be past this in absolute terms, because the clip
+ *     check is absolute (12 deg on the server's scale). The landmarker reads
+ *     ~0.8x the server; the server called 95% of its left/right frames at 18
+ *     deg or more here, while resting faces stayed under 3.1.
+ *   - HOLD: the clip check looks at ~60 frames spread across the whole clip,
+ *     so a turn has to last a couple of those gaps or it can fall between
+ *     them. The gap grows with the clip, so the hold does too.
+ * Pitch (the optional up/down) has no absolute bar: its absolute value is
+ * dominated by where the phone is held, so only the change means anything. */
+const LOCAL_TURN_REL = 12;
+const LOCAL_TURN_ABS = 18;
+const LOCAL_TILT_REL = 15;
+const LOCAL_CENTRE_MAX_YAW = 12;
+const LOCAL_CENTRE_SAMPLES = 10;      // ~0.5 s of steady straight-ahead readings
+const LOCAL_HOLD_MIN_MS = 600;
+const ENROL_CLIP_SAMPLE_FRAMES = 60;  // config.ENROL_POSE_SAMPLE_FRAMES
+const LOCAL_POSE_STALE_MS = 400;      // older than this is not a live reading
+const LOCAL_POSE_GIVEUP_MS = 2500;    // this long with none: hand back to the server
+
 const POSE_ACCENT_WAIT = '#f59e0b';   // amber: a face, but not usable yet
 const POSE_ACCENT_GOOD = '#22c55e';   // green: framed, and the shutter is live
 
@@ -2405,7 +2442,7 @@ async function openClipCapture(opts) {
 
     const state = { busy: false, timer: null, box: null, landmarks: null, good: false,
                     goodStreak: 0, recording: false, alive: true, fails: 0, closed: false,
-                    mesh: null, raf: 0 };
+                    mesh: null, pose: null, raf: 0 };
     // A single good poll used to be enough to turn the dots green AND arm the
     // shutter - the same instant. At close range a detector reading can
     // flicker frame to frame (a second face candidate appearing and vanishing
@@ -2427,6 +2464,7 @@ async function openClipCapture(opts) {
         if (state.raf) cancelAnimationFrame(state.raf);
         state.raf = 0;
         state.mesh = null;
+        state.pose = null;
         try { cam.stop(); } catch { /* already stopped */ }
     };
     const modal = document.getElementById('modal-container');
@@ -2749,8 +2787,13 @@ async function openClipCapture(opts) {
         if (!ok || state.closed) return;
         const loop = () => {
             if (state.closed) return;
-            const pts = FaceMesh.detect(video, performance.now());
-            if (pts) state.mesh = pts;
+            const r = FaceMesh.detect(video, performance.now());
+            if (r) {
+                state.mesh = r.points;
+                // Stamped, so the guided sequence can tell a live reading from
+                // the last one left behind when the face leaves the frame.
+                state.pose = { yaw: r.yaw, pitch: r.pitch, t: Date.now() };
+            }
             // Only the mesh path redraws here; the server path redraws on its
             // own poll, so a dropped mesh frame never blanks the overlay.
             if (state.mesh) draw();
@@ -2853,6 +2896,97 @@ async function openClipCapture(opts) {
         return null;
     }
 
+    const sleep = ms => new Promise(res => setTimeout(res, ms));
+    const median = a => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+    const livePose = () => {
+        const p = state.pose;
+        return p && p.yaw !== null && Date.now() - p.t <= LOCAL_POSE_STALE_MS ? p : null;
+    };
+
+    /** Is this on-device reading the pose `stepKey` asks for? See LOCAL_TURN_*. */
+    function judgeLocal(stepKey, p, base) {
+        const dy = p.yaw - base.yaw;
+        const dp = (p.pitch ?? base.pitch) - base.pitch;
+        switch (stepKey) {
+        case 'left':
+            return dy <= -LOCAL_TURN_REL && p.yaw <= -LOCAL_TURN_ABS
+                ? { ok: true }
+                : { ok: false, message: dy >= LOCAL_TURN_REL / 2
+                    ? 'Other way - turn to your left' : 'Turn further to your left' };
+        case 'right':
+            return dy >= LOCAL_TURN_REL && p.yaw >= LOCAL_TURN_ABS
+                ? { ok: true }
+                : { ok: false, message: dy <= -LOCAL_TURN_REL / 2
+                    ? 'Other way - turn to your right' : 'Turn further to your right' };
+        case 'up':
+            return dp <= -LOCAL_TILT_REL ? { ok: true }
+                : { ok: false, message: 'Tilt your chin up a little more' };
+        case 'down':
+            return dp >= LOCAL_TILT_REL ? { ok: true }
+                : { ok: false, message: 'Tilt your chin down a little more' };
+        }
+        return { ok: false, message: '' };
+    }
+
+    /** The straight-ahead baseline, from ~half a second of steady on-device
+     *  readings. Null if none arrived in time - the caller falls back to the
+     *  server's version rather than guessing. */
+    async function captureBaselineLocal(timeoutMs) {
+        const start = Date.now();
+        const ys = [], ps = [];
+        let lastT = 0;
+        while (!state.closed && Date.now() - start < timeoutMs) {
+            const p = livePose();
+            if (!p) {
+                setPromptLive('Keep your face in view');
+            } else if (p.t !== lastT) {
+                lastT = p.t;
+                if (Math.abs(p.yaw) < LOCAL_CENTRE_MAX_YAW) {
+                    ys.push(p.yaw); ps.push(p.pitch ?? 0);
+                    setPromptLive('Hold it…');
+                    if (ys.length >= LOCAL_CENTRE_SAMPLES) return { yaw: median(ys), pitch: median(ps) };
+                } else {
+                    ys.length = 0; ps.length = 0;
+                    setPromptLive('Look straight at the camera');
+                }
+            }
+            await sleep(40);
+        }
+        return null;
+    }
+
+    /** waitForStep's on-device twin. Resolves {ok:true} once the pose has been
+     *  HELD long enough for the clip check to land on it (see LOCAL_TURN_*),
+     *  null on timeout, or {stale:true} when the landmarker has stopped
+     *  producing readings - then the caller hands the rest of the sequence to
+     *  the server path instead of timing out step after step on a dead feed. */
+    async function waitForStepLocal(stepKey, base, timeoutMs, recStart) {
+        const start = Date.now();
+        let heldSince = 0;
+        while (!state.closed && Date.now() - start < timeoutMs) {
+            const p = livePose();
+            if (!p) {
+                heldSince = 0;
+                const last = state.pose ? state.pose.t : 0;
+                if (Date.now() - Math.max(last, start) > LOCAL_POSE_GIVEUP_MS) return { stale: true };
+                setPromptLive('Keep your face in view');
+            } else {
+                const v = judgeLocal(stepKey, p, base);
+                if (!v.ok) {
+                    heldSince = 0;
+                    setPromptLive(v.message);
+                } else {
+                    if (!heldSince) heldSince = Date.now();
+                    const gap = (Date.now() - recStart) / ENROL_CLIP_SAMPLE_FRAMES;
+                    if (Date.now() - heldSince >= Math.max(LOCAL_HOLD_MIN_MS, 2.5 * gap)) return { ok: true };
+                    setPromptLive('Hold it…');
+                }
+            }
+            await sleep(40);
+        }
+        return null;
+    }
+
     /** Drive the person through hold-still, then four verified turns, setting
      *  control.done = true only once that is genuinely complete (or a step's
      *  own timeout gives up on it - see the constant's comment for why that
@@ -2871,6 +3005,13 @@ async function openClipCapture(opts) {
         setPromptStep({ text: 'Hold still, looking at the camera', arrow: null });
         setRing(0);
         let baseYaw = null, basePitch = null, hold = 0;
+        // On-device when the landmarker is live - see LOCAL_TURN_REL. The
+        // server loop below only runs if this did not produce a baseline.
+        let useLocal = !!(FaceMesh.ready && livePose());
+        if (useLocal) {
+            const base = await captureBaselineLocal(CENTRE_TIMEOUT_MS);
+            if (base) { baseYaw = base.yaw; basePitch = base.pitch; } else useLocal = false;
+        }
         const centreStart = Date.now();
         while (!state.closed && baseYaw === null && Date.now() - centreStart < CENTRE_TIMEOUT_MS) {
             // Same reasoning as waitForStep: the whole attempt is one
@@ -2919,6 +3060,20 @@ async function openClipCapture(opts) {
         const OPTIONAL_BUDGET_MS = STEP_TIMEOUT_MS * (GUIDED_DIRECTIONS.length - GUIDED_REQUIRED.length);
         const requiredDeadline = t0 + GUIDED_CAPTURE_MAX_MS - OPTIONAL_BUDGET_MS - MIN_TOTAL_MS;
 
+        // One step's wait, on-device while that works, otherwise the server.
+        // A feed that dies mid-sequence switches for good, and resets the
+        // baseline to 0 - the server's angles are on a different scale, and 0
+        // is what its own path falls back to.
+        const waitFor = async (key, failFlag) => {
+            if (useLocal) {
+                const r = await waitForStepLocal(key, { yaw: baseYaw, pitch: basePitch },
+                                                 STEP_TIMEOUT_MS, t0);
+                if (!r || !r.stale) return r;
+                useLocal = false; baseYaw = 0; basePitch = 0;
+            }
+            return waitForStep(key, baseYaw, basePitch, STEP_TIMEOUT_MS, POLL_MS, failFlag);
+        };
+
         const measured = [];
         for (let i = 0; i < GUIDED_DIRECTIONS.length && !state.closed; i++) {
             const step = GUIDED_DIRECTIONS[i];
@@ -2933,8 +3088,7 @@ async function openClipCapture(opts) {
                 // is a worse experience than staying here until it happens.
                 const failFlag = { fatal: false };
                 while (!state.closed && !got && !failFlag.fatal && Date.now() < requiredDeadline) {
-                    got = await waitForStep(step.key, baseYaw, basePitch,
-                                            STEP_TIMEOUT_MS, POLL_MS, failFlag);
+                    got = await waitFor(step.key, failFlag);
                     if (!got && !failFlag.fatal && !state.closed) {
                         // A held pause, not just a live-text update - the poll
                         // that resumes immediately after would otherwise stamp
@@ -2948,7 +3102,7 @@ async function openClipCapture(opts) {
                     }
                 }
             } else {
-                got = await waitForStep(step.key, baseYaw, basePitch, STEP_TIMEOUT_MS, POLL_MS);
+                got = await waitFor(step.key, null);
             }
 
             // Still advances either way - an optional step's single timeout,
