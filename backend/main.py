@@ -2229,9 +2229,14 @@ async def mark_myself(
     detector = get_detector()
     result = liveness.analyse(data, detector)
     if result.verdict != "live" or result.best_frame is None:
-        sessions_mod.note_self_failure(me, int(coach_id))
-        return {"ok": False, "reason": "liveness", "message": result.reason,
-                "liveness": result.to_dict()}
+        # Only a clip judged FLAT starts the cooldown. Too far, too little
+        # movement, no face: the check could not look, the face was never
+        # compared, so a retry reveals nothing about matching - and making an
+        # athlete wait 20s after "move closer" only punishes following advice.
+        if result.verdict == "screen":
+            sessions_mod.note_self_failure(me, int(coach_id))
+        return {"ok": False, "reason": "liveness", "code": result.code,
+                "message": result.reason, "liveness": result.to_dict()}
 
     v = sessions_mod.verify_face(result.best_frame, me)
     score = float(v.get("score") or 0.0)

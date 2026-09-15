@@ -408,6 +408,20 @@ a:hover { color: var(--accent-hover); }
 .rec-prompt.done { background: rgba(22, 163, 74, .92); }
 .rec-prompt.done .rec-prompt-arrow { color: #fff; }
 
+/* Movement meter for the unguided clip. The depth check needs the phone to
+   move; this shows how much it has, measured on the phone, and the recording
+   ends by itself once it is enough - instead of a fixed timer that uploads a
+   clip nobody moved and comes back minutes later with "barely moved". */
+.rec-move { position: absolute; bottom: 108px; left: 50%; transform: translateX(-50%);
+            width: min(280px, 84%); background: rgba(0,0,0,0.62); color: #fff;
+            padding: 8px 14px 10px; border-radius: 14px; backdrop-filter: blur(4px);
+            font-size: 12px; font-weight: 600; text-align: center; line-height: 1.3; }
+.rec-move.hidden { display: none; }
+.rec-move-bar { height: 6px; margin-top: 6px; border-radius: 999px; overflow: hidden;
+                background: rgba(255,255,255,0.25); }
+.rec-move-fill { height: 100%; width: 0; background: #f59e0b; transition: width 120ms linear; }
+.rec-move-fill.ok { background: #22c55e; }
+
 /* Liveness outcome, shown with the frames the decision was made from. */
 .liveness-banner { border-radius: var(--radius-md); padding: 14px 16px; margin-bottom: 16px; border: 1px solid; }
 .liveness-banner.bad  { background: var(--red-bg, #fef2f2); border-color: #fca5a5; }

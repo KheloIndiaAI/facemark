@@ -1530,8 +1530,12 @@ function taScan() {
         facingMode: 'environment',
         rearmOnNoFace: true,
         frameWidth: 960,
-        intro: 'Point the camera at one athlete. Recording starts by itself once their '
-             + 'face is found - move the phone slightly while it records.',
+        // Recognition does not need the phone to move, so a clip that did not
+        // fill the movement meter is still sent - it just is not depth-checked.
+        uploadWithoutMovement: true,
+        intro: 'Hold the phone close to one athlete - about an arm\'s length. Recording '
+             + 'starts by itself once their face is close enough; move the phone slowly '
+             + 'side to side until the bar fills.',
         onClip: async (file, ui) => {
             ui.status('Checking…');
             try {
@@ -2427,6 +2431,29 @@ document.addEventListener('click', (e) => {
 // all it gets is the hand holding the phone.
 const CLIP_MS_PLAIN = 3000;
 
+/* The unguided clip, checked ON THE PHONE while it is framed and recorded, so
+ * a clip the server's depth check cannot judge is not sent to be told so.
+ *
+ * DISTANCE. The server will not judge depth on a face under
+ * config.LIVENESS_MIN_FACE_PX (150) wide in the recorded video - "too far" -
+ * and that width is YuNet's box. The phone only has the landmark mesh, which
+ * runs a little wider: replayed over 1,218 frames of 317 test clips, mesh/box
+ * was 1.034 at the median and 1.090 at the 95th percentile. 164px of mesh puts
+ * the server's box at 150px or more on 95% of frames.
+ *
+ * MOVEMENT. The server's `motion` is the largest median shift of the tracked
+ * face points from the first frame, in face widths, and it needs 0.05. The
+ * phone measures the same quantity on the mesh. Of the 277 test clips the
+ * server could measure, every one whose phone reading reached 0.08 also
+ * cleared 0.05 on the server (photographs read about 1:1; real faces lower,
+ * when the tracker drops points on a turning head). The target is 0.15 -
+ * nearly double - so a normal slow sweep is enough and the margin is not thin.
+ * The recording ends as soon as it is reached, not on a timer. */
+const LIVE_MIN_MESH_PX = 164;
+const CLIP_MOVE_TARGET = 0.15;
+const CLIP_MS_MIN = 1500;       // enough frames for the server's sampler to spread over
+const CLIP_MS_MAX = 8000;       // then stop regardless - see opts.uploadWithoutMovement
+
 // Registration does NOT record for a fixed duration. A clock was tried first -
 // ten seconds, on the reasoning that more elapsed time gives a person more
 // chance to shift naturally. It was the wrong mechanism: a script tied to a
@@ -2603,6 +2630,12 @@ async function openClipCapture(opts) {
                      only feedback was a prompt that changed on a timer. -->
                 <div class="rec-prompt-live" id="clip-cap-prompt-live"></div>
             </div>
+            <!-- Unguided recording: how much the phone has moved, measured on
+                 the phone. See CLIP_MOVE_TARGET. -->
+            <div class="rec-move hidden" id="clip-cap-move" aria-live="polite">
+                <div id="clip-cap-move-text"></div>
+                <div class="rec-move-bar"><div class="rec-move-fill" id="clip-cap-move-fill"></div></div>
+            </div>
             <div class="camera-controls" style="justify-content:center">
                 <button type="button" class="camera-shutter" id="clip-cap-shutter"
                         aria-label="Record - follow the on-screen prompts" disabled>
@@ -2636,6 +2669,9 @@ async function openClipCapture(opts) {
     const hint    = document.getElementById('clip-cap-hint');
     const analyzing  = document.getElementById('clip-cap-analyzing');
     const processing = document.getElementById('clip-cap-processing');
+    const moveBox  = document.getElementById('clip-cap-move');
+    const moveText = document.getElementById('clip-cap-move-text');
+    const moveFill = document.getElementById('clip-cap-move-fill');
 
     // "Please hold - Analyzing", typed out letter by letter and looped, while
     // the camera looks for a usable face. Hidden once recording starts.
@@ -2900,6 +2936,82 @@ async function openClipCapture(opts) {
         return c;
     }
 
+    // The on-device mesh, only while its readings are live.
+    const meshFresh = () =>
+        (state.mesh && state.meshT && Date.now() - state.meshT <= LOCAL_POSE_STALE_MS) ? state.mesh : null;
+
+    // Mesh width in the RECORDED video's pixels, the unit the server's
+    // too-far rule is written in. Points are normalised to the raw frame, so
+    // the preview's mirror and cover crop do not enter into it.
+    function meshWidthPx(pts) {
+        let lo = 1, hi = 0;
+        for (const p of pts) { if (p.x < lo) lo = p.x; if (p.x > hi) hi = p.x; }
+        return Math.max(0, hi - lo) * (video.videoWidth || 0);
+    }
+
+    // Median shift of the mesh points between two readings, in face widths of
+    // the first - the same measure as the server's `motion`.
+    function meshShift(a, b, aw) {
+        const W = video.videoWidth || 1, H = video.videoHeight || 1;
+        const n = Math.min(a.length, b.length);
+        const d = [];
+        for (let i = 0; i < n; i += 3) d.push(Math.hypot((b[i].x - a[i].x) * W, (b[i].y - a[i].y) * H));
+        d.sort((x, y) => x - y);
+        return d.length && aw > 0 ? d[d.length >> 1] / aw : 0;
+    }
+
+    // Only the unguided clip is gated on this. Registration's guided capture
+    // is a selfie at arm's length, already far past it.
+    const tooFar = () => opts.guided === false && !!meshFresh() && state.meshW < LIVE_MIN_MESH_PX;
+
+    /* Keeps the recording going until the phone has moved enough for the
+     * depth check - see CLIP_MOVE_TARGET - with a meter that fills as it does.
+     * Resolves { ok } or { ok: false, reason }. */
+    async function watchMovement(control) {
+        const t0 = Date.now();
+        let base = null, baseW = 0, best = 0, lastSpoken = '';
+        const say = (text, voice) => {
+            if (moveText && moveText.textContent !== text) moveText.textContent = text;
+            if (voice && lastSpoken !== text) { lastSpoken = text; speak(text); }
+        };
+        if (moveBox) moveBox.classList.remove('hidden');
+        if (moveFill) { moveFill.style.width = '0%'; moveFill.classList.remove('ok'); }
+        say('Move the phone slowly from side to side', true);
+        try {
+            while (!state.closed && !control.done) {
+                const m = meshFresh();
+                if (!m) {
+                    say('Keep the face in view');
+                } else {
+                    if (!base) { base = m; baseW = state.meshW; }
+                    best = Math.max(best, meshShift(base, m, baseW));
+                    if (state.meshW < LIVE_MIN_MESH_PX) say('Too far - move closer', true);
+                    else if (best < CLIP_MOVE_TARGET) say('Move the phone slowly from side to side');
+                }
+                const p = Math.min(1, best / CLIP_MOVE_TARGET);
+                if (moveFill) moveFill.style.width = `${Math.round(p * 100)}%`;
+                setRing(p);
+                const elapsed = Date.now() - t0;
+                if (p >= 1 && elapsed >= CLIP_MS_MIN) {
+                    if (moveFill) moveFill.classList.add('ok');
+                    say('Got it', true);
+                    control.done = true;
+                    return { ok: true };
+                }
+                if (elapsed >= CLIP_MS_MAX) {
+                    control.done = true;
+                    return { ok: false, reason: base
+                        ? 'The phone did not move enough - record again, moving it slowly from side to side.'
+                        : 'The face was not seen while recording - keep it in view and record again.' };
+                }
+                await new Promise(res => setTimeout(res, 50));
+            }
+            return { ok: false, reason: 'Recording did not complete. Try again.' };
+        } finally {
+            if (moveBox) moveBox.classList.add('hidden');
+        }
+    }
+
     async function tick() {
         if (!state.alive || state.busy) return;
         const c = grab(FRAME_W);
@@ -2935,7 +3047,13 @@ async function openClipCapture(opts) {
             // per-face bias. The advice stays on screen; the portrait is picked
             // from the most frontal frame of the clip regardless.
             const angleOnly = r.reason === 'pitch';
-            const rawGood = !!r.box && (r.ok || r.reason === 'pose' || angleOnly);
+            // Close enough for the depth check, measured on the phone - see
+            // LIVE_MIN_MESH_PX. The server's own "Move closer" bar is lower: it
+            // judges a downscaled frame for framing, not for depth.
+            const far = tooFar();
+            if (far && !state.saidFar) { state.saidFar = true; speak('Move closer'); }
+            if (!far) state.saidFar = false;
+            const rawGood = !!r.box && !far && (r.ok || r.reason === 'pose' || angleOnly);
             // Two of the last three polls, not two in a row. On a phone one poll
             // in a pair often lands on a blink or a hand tremor, so "in a row"
             // left people parked on "Hold steady..." with a face clearly in shot.
@@ -2954,7 +3072,7 @@ async function openClipCapture(opts) {
                     : 'Face found - starting')
                 : rawGood
                     ? 'Hold steady…'
-                    : (r.message || 'No face detected');
+                    : far ? 'Too far - move closer' : (r.message || 'No face detected');
             if (!state.recording) shutter.disabled = !state.good;
             showAnalyzing(!state.good && !state.recording);
             // Scanning several people: wait for the last face to leave the frame
@@ -3068,6 +3186,9 @@ async function openClipCapture(opts) {
                 // Stamped, so the guided sequence can tell a live reading from
                 // the last one left behind when the face leaves the frame.
                 state.pose = { yaw: r.yaw, pitch: r.pitch, t: Date.now() };
+                // Face size in the recorded video's pixels - see LIVE_MIN_MESH_PX.
+                state.meshW = meshWidthPx(r.points);
+                state.meshT = state.pose.t;
             }
             // Only the mesh path redraws here; the server path redraws on its
             // own poll, so a dropped mesh frame never blanks the overlay.
@@ -3490,7 +3611,27 @@ async function openClipCapture(opts) {
                 // comes from moving the phone, which the copy asks for.
                 promptBox.classList.add('hidden');
                 ui.status('Recording - move the phone slowly side to side.');
-                file = await cam.recordClip(opts.clipMs || CLIP_MS_PLAIN, setRing);
+                if (meshFresh()) {
+                    // Measured on the phone: ends once the phone has moved
+                    // enough, instead of after a fixed three seconds.
+                    const control = { done: false };
+                    const [recorded, moved] = await Promise.all([
+                        cam.recordClip(CLIP_MS_MAX + 1000, null, control)
+                            .then(r => { control.done = true; return r; }),
+                        watchMovement(control),
+                    ]);
+                    if (recorded && (moved.ok || opts.uploadWithoutMovement)) {
+                        file = recorded;
+                    } else if (recorded && !state.closed) {
+                        // Not sent: the server could only answer "barely moved"
+                        // or "too far", after the upload and the wait.
+                        retryReason = moved.reason;
+                        showToast('Record again', moved.reason, 'error');
+                    }
+                } else {
+                    // No on-device mesh (old phone, blocked download): the timer.
+                    file = await cam.recordClip(opts.clipMs || CLIP_MS_PLAIN, setRing);
+                }
             } else {
                 const control = { done: false, measured: [], snapshots: [] };
                 const [recorded] = await Promise.all([
