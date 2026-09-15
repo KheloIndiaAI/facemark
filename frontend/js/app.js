@@ -2295,14 +2295,20 @@ const GUIDED_CAPTURE_MAX_MS = 90000;
 // "centre" is the hold-still baseline this sequence always starts from.
 const GUIDED_REQUIRED = ['left', 'right'];
 
-// The four directions, named exactly as pose-check expects. Order matters
-// only for how it reads to a person - left/right/up/down, not because the
-// depth measurement needs a particular sequence.
+// KEYS ARE CAMERA-IMAGE DIRECTIONS, WORDS ARE THE PERSON'S. The frames the
+// server judges are not mirrored, so turning to your own RIGHT moves your nose
+// toward the image's LEFT - which is what pose-check and the clip check call
+// 'left'. The text used to say "your LEFT" for key 'left', so everyone was
+// told the opposite of what was being measured, and "Other way" fired at
+// people doing exactly as asked. The arrows point in the mirrored preview,
+// where your own right is on the screen's right.
+//
+// Only the two turns the server requires. Up/down were optional, unchecked by
+// the server, and cost up to seven seconds each for anyone whose tilt did not
+// register.
 const GUIDED_DIRECTIONS = [
-    { key: 'left',  text: 'Slowly turn your head to your LEFT',  arrow: 'left'  },
-    { key: 'right', text: 'Slowly turn your head to your RIGHT', arrow: 'right' },
-    { key: 'up',    text: 'Tilt your head UP a little',          arrow: 'up'    },
-    { key: 'down',  text: 'Tilt your head DOWN a little',        arrow: 'down'  },
+    { key: 'right', text: 'Slowly turn your head to your LEFT',  arrow: 'left'  },
+    { key: 'left',  text: 'Slowly turn your head to your RIGHT', arrow: 'right' },
 ];
 
 function _arrowSvg(direction) {
@@ -2348,8 +2354,12 @@ function _arrowSvg(direction) {
  *     them. The gap grows with the clip, so the hold does too.
  * Pitch (the optional up/down) has no absolute bar: its absolute value is
  * dominated by where the phone is held, so only the change means anything. */
-const LOCAL_TURN_REL = 12;
-const LOCAL_TURN_ABS = 18;
+// Lowered from 12/18, which asked for a bigger turn than the clip check needs.
+// 14 on this scale is ~17.5 on the server's, still clear of its 12; on the
+// labelled frames 95% of real turns read 17.9 or more, so a genuine turn clears
+// it at once instead of after "turn further" prompts.
+const LOCAL_TURN_REL = 10;
+const LOCAL_TURN_ABS = 14;
 const LOCAL_TILT_REL = 15;
 const LOCAL_CENTRE_MAX_YAW = 12;
 const LOCAL_CENTRE_SAMPLES = 10;      // ~0.5 s of steady straight-ahead readings
@@ -2920,15 +2930,17 @@ async function openClipCapture(opts) {
         const dp = (p.pitch ?? base.pitch) - base.pitch;
         switch (stepKey) {
         case 'left':
+            // Camera-image directions: see GUIDED_DIRECTIONS for why 'left'
+            // is the person's own RIGHT.
             return dy <= -LOCAL_TURN_REL && p.yaw <= -LOCAL_TURN_ABS
                 ? { ok: true }
                 : { ok: false, message: dy >= LOCAL_TURN_REL / 2
-                    ? 'Other way - turn to your left' : 'Turn further to your left' };
+                    ? 'Other way - turn to your right' : 'Turn further to your right' };
         case 'right':
             return dy >= LOCAL_TURN_REL && p.yaw >= LOCAL_TURN_ABS
                 ? { ok: true }
                 : { ok: false, message: dy <= -LOCAL_TURN_REL / 2
-                    ? 'Other way - turn to your right' : 'Turn further to your right' };
+                    ? 'Other way - turn to your left' : 'Turn further to your left' };
         case 'up':
             return dp <= -LOCAL_TILT_REL ? { ok: true }
                 : { ok: false, message: 'Tilt your chin up a little more' };
@@ -3128,7 +3140,7 @@ async function openClipCapture(opts) {
                 setPromptLive('Did not see that turn - carrying on');
                 await new Promise(res => setTimeout(res, 350));
             }
-            setRing(0.2 + 0.2 * (i + 1));
+            setRing(0.2 + 0.8 * (i + 1) / GUIDED_DIRECTIONS.length);
         }
         control.measured = measured;
 
@@ -3190,7 +3202,8 @@ async function openClipCapture(opts) {
                     // no account is touched; the person records again.
                     file = null;
                     retryReason = `Your head was not seen turning `
-                        + missing.map(k => k.toUpperCase()).join(' or ')
+                        // Camera-image keys, the person's words - see GUIDED_DIRECTIONS.
+                        + missing.map(k => ({ left: 'RIGHT', right: 'LEFT' }[k] || k.toUpperCase())).join(' or ')
                         + ' - record again and follow each prompt.';
                     // The status line sits under a camera the person is
                     // watching, not their eyes - a toast is what is actually

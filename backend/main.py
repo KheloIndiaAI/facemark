@@ -1030,7 +1030,7 @@ def _pose_label(face, requested: str) -> str:
 
 
 _POSE_WORDS = {"centre": "looking straight at the camera",
-               "left": "turned LEFT", "right": "turned RIGHT",
+               "left": "turned RIGHT", "right": "turned LEFT",   # image-left = your right
                "up": "tilted UP", "down": "tilted DOWN"}
 
 
@@ -1222,8 +1222,11 @@ async def enroll_pose_check(
     else:
         checks = {
             "centre": (abs(yaw) < YT and abs(pitch) < PT * 1.5, "Look straight at the camera"),
-            "left":   (dy <= -YT, "Turn further to your left"),
-            "right":  (dy >= YT,  "Turn further to your right"),
+            # Keys name the direction in the CAMERA IMAGE, which is not mirrored:
+            # a person turning to their own right moves their nose toward the
+            # image's left. The words are the person's own left/right.
+            "left":   (dy <= -YT, "Turn further to your right"),
+            "right":  (dy >= YT,  "Turn further to your left"),
             "up":     (dp <= -PT, "Tilt your chin up a little more"),
             "down":   (dp >= PT,  "Tilt your chin down a little more"),
         }
