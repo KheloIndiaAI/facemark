@@ -14,6 +14,7 @@ appearance. Everything runs on CPU; a group clip takes well under a second.
 - **[DEVELOPMENT.md](DEVELOPMENT.md)** — local setup, and the traps to know before changing code
 - **[DATA-HANDLING.md](DATA-HANDLING.md)** — what is stored, and the obligations that come with it
 - **[IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md)** — the next version: athletes attached to coaches, attendance as a reviewed register, athlete self-marking
+- **[PERFORMANCE.md](PERFORMANCE.md)** — where the time actually goes, and why a GPU is the wrong purchase
 
 ---
 
