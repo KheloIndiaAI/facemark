@@ -1416,6 +1416,31 @@ function appendBlinkTime(fd, extra) {
 // empty page the app can only call "Could not reach the server".
 const CLIP_UPLOAD_MAX_BYTES = 24 * 1024 * 1024;
 
+/* The end of a successful registration: the camera is already closed, and this
+   takes its place in the same dialog. A toast was the only sign before - small,
+   gone in a few seconds, and easy to miss for a coach looking at the athlete
+   rather than the phone - so people kept recording again to be sure.
+
+   Only ever called once the server has accepted the recording. `warning` is the
+   server's own note when too few views were captured: registered, but worth
+   redoing now rather than after the first missed attendance. */
+function showRegistrationDone(name, detail, warning) {
+    const tick = `<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="10"></circle><path d="M7.5 12.5l3 3 6-6.5"></path></svg>`;
+    openModal('Registration done', `
+        <div style="text-align:center;padding:12px 4px 4px">
+            <div style="color:var(--green);display:flex;justify-content:center">${tick}</div>
+            <div style="font-size:20px;font-weight:700;margin-top:10px">Registration done</div>
+            <div style="margin-top:6px">${Charts.esc(name)} has been registered.</div>
+            ${detail ? `<div class="text-sm text-muted" style="margin-top:4px">${Charts.esc(detail)}</div>` : ''}
+            ${warning ? `<div class="notice notice-amber" style="margin-top:14px;text-align:left">
+                <strong>Check the recording.</strong> ${Charts.esc(warning)}</div>` : ''}
+        </div>`,
+        '<button type="button" class="btn btn-primary" onclick="closeModal()">Done</button>');
+    speak('Registration done');
+}
+
 async function enrolSubmit(file, ui, extra) {
     ui.status('Checking the clip and registering...');
     if (file.size > CLIP_UPLOAD_MAX_BYTES) {
@@ -1469,17 +1494,10 @@ async function enrolSubmit(file, ui, extra) {
         // one angle is a person who may not be recognised from across a room
         // tomorrow, and the only chance to redo it is now, not after the first
         // missed attendance.
-        if (pc.sufficient === false) {
-            showToast('Registered - but check the recording',
-                      `${regDetails.name} enrolled with ${n} template${n === 1 ? '' : 's'}. `
-                      + (pc.message || 'Only one view of the face was captured.'),
-                      'info');
-        } else {
-            showToast('Registered',
-                      `${regDetails.name} enrolled with ${n} template${n === 1 ? '' : 's'}`
-                      + (poses ? ` (${poses})` : ''),
-                      'success');
-        }
+        showRegistrationDone(
+            regDetails.name,
+            `Enrolled with ${n} template${n === 1 ? '' : 's'}${poses ? ` (${poses})` : ''}.`,
+            pc.sufficient === false ? (pc.message || 'Only one view of the face was captured.') : null);
         if (state.currentRoute === '/students') renderStudents();
     } catch (err) {
         // A duplicate NSRS ID is a 409 the person can act on, so it must not
@@ -4015,15 +4033,11 @@ async function openClipEnrol(studentId, studentName) {
                 // unqualified success toast, indistinguishable from a real
                 // multi-angle capture unless somebody happened to read the
                 // word "one".
-                if (r.sufficient === false) {
-                    showToast('Registered - but check the recording',
-                              `${r.templates_added} template(s) from ${poses}. `
-                              + (r.message || 'Only one view of the face was captured.'),
-                              'info');
-                } else {
-                    showToast('Face registered', `${r.templates_added} template(s) from ${poses}`, 'success');
-                }
                 ui.close();
+                showRegistrationDone(
+                    studentName,
+                    `${r.templates_added} template(s) from ${poses}.`,
+                    r.sufficient === false ? (r.message || 'Only one view of the face was captured.') : null);
                 renderStudents();
             } catch {
                 ui.status('Could not reach the server. Try again.');

@@ -186,14 +186,14 @@ const SU_COPY = {
     athlete: {
         title: 'Create your account',
         sub: 'Your coach approves it before it works.',
-        doneTitle: 'Sent to your coach.',
+        doneTitle: 'Registration done - sent to your coach.',
         doneBody: 'You can sign in once they approve you. Until then you will not '
             + 'be recognised in a capture, so keep signing the register the usual way.',
     },
     coach: {
         title: 'Register as a coach',
         sub: 'A super admin approves coach accounts.',
-        doneTitle: 'Sent to a super admin.',
+        doneTitle: 'Registration done - sent to a super admin.',
         doneBody: 'Coach access is approved centrally, so this is not instant. '
             + 'You will be able to sign in once it is approved.',
     },
@@ -456,6 +456,7 @@ function suFace() {
                     return;
                 }
                 ui.close();
+                speak('Registration done');
                 // Reaching here means the server verified the turns itself
                 // (ENROL_REQUIRED_POSES) - a clip missing them comes back
                 // ok:false above and never reaches "sent for approval".
