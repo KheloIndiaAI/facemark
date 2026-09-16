@@ -55,6 +55,7 @@ backend/
   routes.py        auth, users, centres, people
   sessions.py      registers: sessions, captures, drafts, approvals, rosters
   signup.py        self-registration: pending accounts, coach choice, face
+  password_reset.py forgotten-password requests, approved by a super admin
   maintenance.py   expiry and retention sweeps
   database.py      schema, migrations, gallery, attendance
   db.py            Postgres layer and the `?` -> `%s` shim
@@ -62,6 +63,8 @@ backend/
   detector.py      YuNet face detection
   recognizer.py    SFace embeddings and score fusion
   liveness.py      video parallax check
+  blink.py         blink liveness from a short clip's landmark track
+  portrait.py      ranks a clip's frames to pick the best one to match on
   centres.py       centre registry and geo-fencing
 frontend/          vanilla JS, no build step. Edit and reload.
 scripts/           tooling and evaluation harnesses
@@ -201,24 +204,23 @@ alongside photographs of real athletes.
 
 ---
 
-## No phone verification, and no self-service password reset
+## No phone verification
 
-Both were removed. They depended on sending an SMS, and sending SMS to Indian
-numbers requires DLT registration with a TRAI-approved platform — entity, sender
-ID and every template approved in advance. That is procurement and it is not
+Removed. It depended on sending an SMS, and sending SMS to Indian numbers
+requires DLT registration with a TRAI-approved platform — entity, sender ID
+and every template approved in advance. That is procurement and it is not
 done, so a code could never reach anybody: signup reached "we sent a code to
 your phone", nothing arrived, and the registration died there.
 
-They were briefly kept behind a switch. That was worse than removing them: a
+It was briefly kept behind a switch. That was worse than removing it: a
 dormant feature still has endpoints that answer, a table that exists, a config
 flag to reason about and a UI branch to keep working, and none of it earns
 anything.
 
-**What replaced them.** Nothing. A signup is: details → choose a coach → record
-your face. A forgotten password goes to an administrator, via
-`POST /api/users/{id}/password` on the Accounts page.
+**What replaced it.** Nothing. A signup is: details → choose a coach → record
+your face.
 
-The phone field went with them — it existed to receive the code, and once
+The phone field went with it — it existed to receive the code, and once
 nothing read it, it was asking every applicant for a string nobody checked. The
 centre code went too, at the pilot's request: a coach application no longer has
 to prove the centre issued anything, so **super-admin approval is now the whole
@@ -227,18 +229,53 @@ rotate endpoint all remain, so restoring the field is one form control and one
 call.
 
 **The consequence, stated plainly.** The phone number is an unverified claim —
-useful for a coach ringing an athlete, worth nothing as identity. And a user
-locked out has to find somebody with admin access.
+useful for a coach ringing an athlete, worth nothing as identity.
 
 **Bringing it back.** It is in git, working and tested. `git log -S require_phone_otp`
 finds every piece: hashed codes salted per number, attempt counting, expiry,
-per-number and per-address throttling, the `otp_challenges` table, an SMS webhook
-with DLT fields, and a password reset that could not be used to discover which
-usernames exist. Restore that commit rather than writing it again.
+per-number and per-address throttling, the `otp_challenges` table, an SMS
+webhook with DLT fields. Restore that commit rather than writing it again.
 
-If self-service reset is wanted sooner than DLT allows, the cheaper route is a
-reset **request** that appears in the coach's approvals queue — the coach knows
-the athlete by sight, which is a stronger check than a text message anyway.
+## Self-service password reset
+
+This section used to say there was none, and end by suggesting the cheapest
+way to add one would be a reset **request** that a coach or admin approves,
+since someone who knows the applicant by sight is a stronger check than a text
+message anyway. That is what `backend/password_reset.py` now does.
+
+Anyone who cannot sign in asks from the login screen for the password they
+want; nothing changes until a super admin approves the request under Accounts.
+The design follows from the request being unauthenticated:
+
+- The reply is identical whether the username exists, is active, or already
+  has a request pending — the endpoint must not become a way to probe which
+  accounts are real.
+- The address is throttled (`PASSWORD_RESET_IP_MAX` per
+  `PASSWORD_RESET_IP_WINDOW_SECONDS`) **before** the password is hashed — same
+  reasoning as the login throttle above: 600k PBKDF2 rounds with unlimited
+  attempts is a way to saturate a worker.
+- The chosen password is stored hashed, never shown to the admin, and cleared
+  from the request row once it is decided either way.
+- The old password keeps working until approved, so asking on someone else's
+  behalf cannot lock them out.
+- Approving signs the account out everywhere and clears any login lock, the
+  same as the direct admin reset below.
+- A request older than `PASSWORD_RESET_TTL_DAYS` cannot be approved — by then
+  nobody can confirm with the person that they still want it.
+
+**The direct admin reset still exists too**, unchanged:
+`POST /api/users/{id}/password` lets a super admin set a password outright
+from Accounts, no request or approval step, for when an admin already knows it
+is the right person — in front of them, on the phone — and wants to skip the
+queue.
+
+**What this does not solve.** Anyone can fill in the form for any username —
+the account goes to whoever's request gets approved, not necessarily whoever
+actually asked. The approve dialog says to confirm with the person first,
+approving a coach or super-admin account requires typing `APPROVE`, and the
+queue flags an account with several requests in a week, but none of that is
+identity verification. It trades the same thing an SMS code would have: proof
+that somebody asked, not proof that it was the right somebody.
 
 ---
 
