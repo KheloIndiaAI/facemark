@@ -196,6 +196,24 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON auth_sessions(user_id);
 
+-- "Forgot password" requests, decided by a super admin. The new password is
+-- chosen by whoever asks, so it is stored HASHED and does nothing until a
+-- person who can check the requester's identity approves it. The old password
+-- keeps working until then. See password_reset.py.
+CREATE TABLE IF NOT EXISTS password_reset_requests (
+    id                SERIAL PRIMARY KEY,
+    user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    new_password_hash TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending','approved','rejected','superseded','expired')),
+    note              TEXT,
+    requested_at      TEXT NOT NULL,
+    requested_ip      TEXT,
+    decided_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    decided_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_password_resets_status ON password_reset_requests(status, user_id);
+
 """
 
 # Sources: id (raw ID-card crop), restored (GFPGAN), live (recent photo),

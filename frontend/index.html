@@ -50,7 +50,7 @@
           &middot; <a href="#" id="signup-open-coach">Register as a coach</a>
         </div>
         <div class="login-foot" style="margin-top:6px">
-          Forgotten your password? Ask your coach or an administrator to reset it.
+          <a href="#" id="reset-open">Forgot your password?</a>
         </div>
       </div>
     </div>
@@ -96,6 +96,41 @@
             <div id="su-msg" class="login-foot" style="color:var(--red);min-height:18px"></div>
             <p class="login-foot" style="margin-top:8px">
                 <a href="#" id="signup-cancel">Back to sign in</a></p>
+        </div>
+    </div>
+
+    <div id="reset-gate" class="login-gate hidden">
+        <div class="login-card" style="max-width:460px">
+            <div class="login-head">
+                <div class="login-logo"></div>
+                <div>
+                    <h1 class="login-title">Forgot your password?</h1>
+                    <p class="login-sub">Choose a new one. A super admin approves it before it works.</p>
+                </div>
+            </div>
+
+            <form id="reset-form" autocomplete="off">
+                <div class="form-group"><label class="form-label" for="rp-user">Username</label>
+                    <input type="text" id="rp-user" class="form-input" autocapitalize="none"
+                           spellcheck="false" autocomplete="username" required></div>
+                <div class="form-group"><label class="form-label" for="rp-pw">New password</label>
+                    <input type="password" id="rp-pw" class="form-input" autocomplete="new-password" required></div>
+                <div class="form-group"><label class="form-label" for="rp-pw2">Type it again</label>
+                    <input type="password" id="rp-pw2" class="form-input" autocomplete="new-password" required></div>
+                <div class="form-group"><label class="form-label" for="rp-note">How can the admin reach you? <span class="text-muted">(optional)</span></label>
+                    <input type="text" id="rp-note" class="form-input" maxlength="200"
+                           placeholder="e.g. your phone number, or your coach's name"></div>
+                <button type="submit" class="btn btn-primary w-full" id="rp-submit">Send for approval</button>
+            </form>
+
+            <div id="rp-done" class="hidden">
+                <div class="notice notice-blue"><strong>Request sent.</strong>
+                    <span id="rp-done-body"></span></div>
+            </div>
+
+            <div id="rp-msg" class="login-foot" style="color:var(--red);min-height:18px"></div>
+            <p class="login-foot" style="margin-top:8px">
+                <a href="#" id="reset-cancel">Back to sign in</a></p>
         </div>
     </div>
 

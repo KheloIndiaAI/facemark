@@ -363,19 +363,96 @@ async function deleteUserAccount(id, name, role) {
     }
 }
 
+/* Forgotten-password requests, above the accounts table so they are seen: the
+   person asking is locked out until somebody acts. The new password is never
+   sent here - the admin approves a PERSON, having checked it is them. */
+function passwordResetCard(data) {
+    const list = (data && data.requests) || [];
+    if (!list.length) return '';
+    const btn = 'min-height:30px;padding:0 10px;font-size:12px';
+    return `
+      <div class="card" style="margin-bottom:16px;border-left:4px solid var(--amber, #d97706)">
+        <div class="card-body">
+          <h3 style="margin:0 0 4px">Password reset requests (${list.length})</h3>
+          <div class="text-xs text-muted" style="margin-bottom:10px">
+            Anyone can ask for a new password for any username. Before approving, contact the
+            person - by phone, or through their coach - and confirm they asked. Until you approve,
+            their old password still works.</div>
+          <div class="chart-scroll"><table class="data-table"><thead><tr>
+            <th>Name</th><th>Username</th><th>Role</th><th>Centre</th><th>Asked</th><th>Contact note</th><th></th>
+          </tr></thead><tbody>${list.map(x => `<tr>
+            <td class="cell-primary" data-label="Name">${E(x.full_name)}${x.is_active ? ''
+                : ' <span class="badge badge-red">disabled</span>'}</td>
+            <td class="font-mono text-sm" data-label="Username">${E(x.username)}</td>
+            <td data-label="Role">${E(roleShort(x.role))}</td>
+            <td data-label="Centre">${E(x.centre_name || '-')}</td>
+            <td class="text-sm text-muted" data-label="Asked">${E((x.requested_at || '').replace('T', ' '))}
+              ${Number(x.recent_requests) > 1 ? `<div class="text-xs" style="color:var(--red)">
+                ${Number(x.recent_requests)} requests this week</div>` : ''}</td>
+            <td class="text-sm" data-label="Contact">${E(x.note || '-')}
+              ${x.phone ? `<div class="text-xs text-muted">On file: ${E(x.phone)}</div>` : ''}</td>
+            <td style="white-space:nowrap" data-label="">
+              <button class="btn btn-primary" style="${btn}" data-decide-reset="approve"
+                data-request-id="${x.id}" data-user-role="${E(x.role)}"
+                data-username="${E(x.full_name || x.username)}">Approve</button>
+              <button class="btn btn-secondary" style="${btn}" data-decide-reset="reject"
+                data-request-id="${x.id}" data-user-role="${E(x.role)}"
+                data-username="${E(x.full_name || x.username)}">Reject</button>
+            </td></tr>`).join('')}</tbody></table></div>
+        </div>
+      </div>`;
+}
+
+async function decidePasswordReset(id, approve, name, role) {
+    if (approve) {
+        const warning = `Approve the new password for ${name}?\n\nOnly approve if you have `
+            + `confirmed with ${name} that they asked for it. Whoever made this request chose `
+            + `the password, so approving a request somebody else made hands them the account.`
+            + `\n\n${name} will be signed out everywhere and must sign in with the new password.`;
+        // A coach or super admin account reaches far more people than an
+        // athlete's, so it takes a typed confirmation - the same rule as
+        // approving a coach registration.
+        if (role === 'coach' || role === 'super_admin') {
+            const typed = window.prompt(`${warning}\n\nType APPROVE to confirm.`, '');
+            if ((typed || '').trim().toUpperCase() !== 'APPROVE') return;
+        } else if (!window.confirm(warning)) {
+            return;
+        }
+    } else if (!window.confirm(`Reject this request for ${name}? Their password stays as it is.`)) {
+        return;
+    }
+    try {
+        const fd = new FormData();
+        fd.append('approve', approve ? 'true' : 'false');
+        await api.postForm(`/api/password-resets/${id}`, fd, 'POST', true);
+        showToast(approve ? 'New password approved' : 'Request rejected',
+                  approve ? `${name} can now sign in with the password they chose.`
+                          : `${name}'s password was not changed.`,
+                  approve ? 'success' : 'info');
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+    renderUsersPage();
+}
+
 async function renderUsersPage() {
     const root = document.getElementById('users-root');
     root.innerHTML = '<div class="empty-state py-12">Loading accounts...</div>';
-    let u, c;
+    let u, c, r;
     try {
-        [u, c] = await Promise.all([api.get('/api/users'), api.get('/api/centres')]);
+        [u, c, r] = await Promise.all([
+            api.get('/api/users'), api.get('/api/centres'),
+            // Fetched directly, not through api.get: the accounts table should
+            // still render, without an error toast, if only this part fails.
+            fetch('/api/password-resets').then(x => (x.ok ? x.json() : null)).catch(() => null),
+        ]);
     } catch (err) {
         root.innerHTML = `<div class="empty-state py-12">Could not load accounts. `
             + `${E((err && err.message) || 'The server did not answer.')}</div>`;
         return;
     }
     pageState.centres = c.centres;
-    root.innerHTML = `
+    root.innerHTML = passwordResetCard(r) + `
       <div class="card"><div class="card-body p-0">
         <table class="data-table"><thead><tr>
           <th>Name</th><th>Username</th><th>Role</th><th>Centre</th><th>Last sign-in</th><th>Status</th><th></th>
@@ -515,6 +592,14 @@ document.addEventListener('click', (e) => {
                                  del.dataset.userRole || 'athlete');
     }
 
+    const resetDecision = e.target.closest('[data-decide-reset]');
+    if (resetDecision) {
+        e.preventDefault();
+        return decidePasswordReset(resetDecision.dataset.requestId,
+                                   resetDecision.dataset.decideReset === 'approve',
+                                   resetDecision.dataset.username || '',
+                                   resetDecision.dataset.userRole || 'athlete');
+    }
     const decide = e.target.closest('[data-decide-user]');
     if (decide) {
         e.preventDefault();

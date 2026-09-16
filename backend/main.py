@@ -33,7 +33,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (auth, centres as centres_mod, config, database, db as pgdb,
                sessions as sessions_mod, signup as signup_mod,
-               maintenance as maintenance_mod, portrait as portrait_mod,
+               maintenance as maintenance_mod, password_reset as password_reset_mod,
+               portrait as portrait_mod,
                liveness, metaheuristics, routes, storage, utils)
 from .detector import Face, estimate_landmarks, get_detector
 from .enhancer import get_enhancer, sharpness_quality
@@ -2389,7 +2390,9 @@ def admin_overview(
     # it is a good moment to make that state true: expire yesterday's abandoned
     # registers and forget registrations nobody decided. Rate-limited inside.
     maintenance_mod.run_due()
-    return {"ok": True, **sessions_mod.admin_overview(date_str, centre_id)}
+    return {"ok": True, **sessions_mod.admin_overview(date_str, centre_id),
+            # Not per centre or per day: a locked-out person is waiting now.
+            "pending_password_resets": password_reset_mod.pending_count()}
 
 
 

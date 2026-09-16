@@ -730,5 +730,13 @@ LOGIN_LOCKOUT_SECONDS = 900      # 15 minutes, then the count resets on success
 LOGIN_IP_MAX_ATTEMPTS = 30       # per address within the window below
 LOGIN_IP_WINDOW_SECONDS = 300
 
+# "Forgot password" requests (password_reset.py). Anyone can ask, so asking is
+# throttled per address before the new password is hashed, and a request left
+# undecided stops being approvable - a super admin approving a week-old request
+# can no longer ask the person whether they still want it.
+PASSWORD_RESET_IP_MAX = 5          # requests per address within the window below
+PASSWORD_RESET_IP_WINDOW_SECONDS = 3600
+PASSWORD_RESET_TTL_DAYS = 7
+
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") in ("1", "true", "True")
 COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax")

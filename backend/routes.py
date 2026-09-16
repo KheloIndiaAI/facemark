@@ -17,6 +17,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 
 from . import auth, centres as centres_mod, config, database, maintenance as maintenance_mod
+from . import password_reset as password_reset_mod
 
 log = logging.getLogger("routes")
 router = APIRouter(prefix="/api")
@@ -92,6 +93,62 @@ def change_own_password(
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "message": "Password changed - sign in again"}
+
+
+# --- forgotten passwords -----------------------------------------------------
+# Asked for by somebody who cannot sign in; decided by a super admin. See
+# password_reset.py for why the reply never depends on the username.
+
+_RESET_SENT = ("If that username belongs to an account, a super admin will be asked to "
+               "approve your new password. Until they do, your old password still works. "
+               "Tell your coach or centre administrator you have asked, so they can confirm "
+               "it is you.")
+
+
+@router.post("/auth/password-reset")
+def request_password_reset(
+    request: Request,
+    username: str = Form(...),
+    new_password: str = Form(...),
+    note: Optional[str] = Form(None),
+):
+    try:
+        password_reset_mod.request_reset(username, new_password,
+                                         ip=auth.client_ip(request), note=note)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except password_reset_mod.ResetThrottled:
+        raise HTTPException(
+            429, "Too many password requests from this device. Try again in an hour.",
+            headers={"Retry-After": str(config.PASSWORD_RESET_IP_WINDOW_SECONDS)},
+        )
+    return {"ok": True, "message": _RESET_SENT}
+
+
+@router.get("/password-resets")
+def list_password_resets(user: dict = Depends(auth.require_super_admin)):
+    return {"requests": password_reset_mod.list_pending()}
+
+
+@router.post("/password-resets/{request_id}")
+def decide_password_reset(
+    request_id: int,
+    approve: bool = Form(...),
+    user: dict = Depends(auth.require_super_admin),
+):
+    try:
+        done = password_reset_mod.decide(request_id, approve, int(user["id"]))
+    except password_reset_mod.ResetNotFound:
+        raise HTTPException(404, "That request no longer exists")
+    except password_reset_mod.ResetNotPending as e:
+        raise HTTPException(409, {
+            "approved": "That request was already approved.",
+            "rejected": "That request was already rejected.",
+            "superseded": "The person asked again since - decide the newer request instead.",
+            "expired": f"That request is older than {config.PASSWORD_RESET_TTL_DAYS} days. "
+                       "Ask the person to request a new password again.",
+        }.get(str(e), "That request has already been decided."))
+    return {"ok": True, **done}
 
 
 # --- user management (super admin only) --------------------------------------

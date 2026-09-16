@@ -2330,7 +2330,11 @@ async function ovLoad(day) {
             // applications no coach can see, so they are the ones that sit
             // there until somebody comes looking - which is what this page is.
             + ovTile('No coach assigned', o.orphaned_approvals,
-                     o.orphaned_approvals ? 'bad' : null);
+                     o.orphaned_approvals ? 'bad' : null)
+            // Somebody is locked out until this reaches zero. Decided under
+            // Accounts.
+            + ovTile('Password resets', o.pending_password_resets || 0,
+                     o.pending_password_resets ? 'warn' : null);
 
         const row = (main, sub) => `
             <div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border-subtle)">

@@ -468,9 +468,77 @@ function suFace() {
     });
 }
 
+/* ---------------------------------------------------------------------------
+   Forgotten password
+
+   The person chooses the new password here; a super admin approves it under
+   Accounts. The server's reply is the same whether or not the username exists
+   (see backend/password_reset.py), so this screen never says "no such user".
+--------------------------------------------------------------------------- */
+
+function rpMsg(text) {
+    const el = document.getElementById('rp-msg');
+    if (el) el.textContent = text || '';
+}
+
+function openReset() {
+    document.getElementById('login-gate')?.classList.add('hidden');
+    document.getElementById('reset-gate')?.classList.remove('hidden');
+    document.getElementById('reset-form')?.classList.remove('hidden');
+    document.getElementById('rp-done')?.classList.add('hidden');
+    rpMsg('');
+    // Carry over what was typed on the sign-in screen - the person who just
+    // failed to sign in is the one most likely to be here.
+    const typed = (document.getElementById('login-username')?.value || '').trim();
+    const u = document.getElementById('rp-user');
+    if (u && typed && !u.value) u.value = typed;
+    (u && u.value ? document.getElementById('rp-pw') : u)?.focus();
+}
+
+function closeReset() {
+    document.getElementById('reset-gate')?.classList.add('hidden');
+    document.getElementById('login-gate')?.classList.remove('hidden');
+    ['rp-pw', 'rp-pw2'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+}
+
+async function submitReset() {
+    const v = id => (document.getElementById(id)?.value || '');
+    const username = v('rp-user').trim();
+    if (!username) return rpMsg('Type your username.');
+    if (v('rp-pw').length < 6) return rpMsg('The new password must be at least 6 characters.');
+    if (v('rp-pw') !== v('rp-pw2')) return rpMsg('The two passwords do not match.');
+    rpMsg('');
+    const btn = document.getElementById('rp-submit');
+    if (btn) btn.disabled = true;
+    try {
+        const fd = new FormData();
+        fd.append('username', username);
+        fd.append('new_password', v('rp-pw'));
+        if (v('rp-note').trim()) fd.append('note', v('rp-note').trim());
+        const res = await fetch('/api/auth/password-reset', { method: 'POST', body: fd });
+        let j = {};
+        try { j = await res.json(); } catch { /* not JSON */ }
+        if (!res.ok) return rpMsg((res.status < 500 && j.detail) || 'Could not send the request. Try again.');
+        ['rp-pw', 'rp-pw2'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+        document.getElementById('reset-form')?.classList.add('hidden');
+        const body = document.getElementById('rp-done-body');
+        if (body) body.textContent = ' ' + (j.message || '');
+        document.getElementById('rp-done')?.classList.remove('hidden');
+    } catch {
+        rpMsg('Could not reach the server. Check your connection and try again.');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const on = (id, fn) => document.getElementById(id)?.addEventListener('click', (e) => {
         e.preventDefault(); fn();
+    });
+    on('reset-open', openReset);
+    on('reset-cancel', closeReset);
+    document.getElementById('reset-form')?.addEventListener('submit', (e) => {
+        e.preventDefault(); submitReset();
     });
     on('signup-open', () => openSignup('athlete'));
     on('signup-open-coach', () => openSignup('coach'));
