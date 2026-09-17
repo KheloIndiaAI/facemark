@@ -107,6 +107,89 @@ def looks_printed(img_bgr: np.ndarray, box) -> bool:
     )
 
 
+def moire_peakiness(gray: np.ndarray) -> float:
+    """How spiky the mid-band spectrum is - the signature of a photographed screen.
+
+    Skin, hair and fabric are broadband: their Fourier magnitude falls off
+    smoothly, so the strongest mid-frequency component sits close to the average
+    one. Photographing a screen adds interference between two pixel grids, which
+    is near-periodic and therefore concentrates into isolated spikes. The
+    max-to-mean ratio over an annulus separates the two without needing to know
+    the pattern's orientation or period.
+
+    Returns 0.0 when the crop is too small to have a meaningful spectrum.
+    """
+    if gray.size == 0 or min(gray.shape[:2]) < 16:
+        return 0.0
+    g = cv2.resize(gray, (128, 128)).astype(np.float32)
+    g -= g.mean()
+    # Without a window the crop's own straight edges leak a bright cross through
+    # the spectrum and every face looks periodic.
+    w = np.outer(np.hanning(128), np.hanning(128))
+    spec = np.abs(np.fft.fftshift(np.fft.fft2(g * w)))
+    yy, xx = np.mgrid[0:128, 0:128]
+    radius = np.hypot(yy - 64, xx - 64) / 64.0
+    # Below 0.30 is face structure; above 0.85 is sensor noise near Nyquist.
+    band = spec[(radius > 0.30) & (radius < 0.85)]
+    if band.size == 0:
+        return 0.0
+    mean = float(band.mean())
+    return float(band.max() / mean) if mean > 1e-6 else 0.0
+
+
+def bezel_ratio(img_bgr: np.ndarray, box) -> float:
+    """Face brightness divided by the brightness of the ring around it.
+
+    A screen held up in a room is a bright rectangle inside a dark bezel, so the
+    surround is much darker than the face. Returns 1.0 when there is no room
+    around the box to measure, which cannot trigger a rejection.
+    """
+    h, w = img_bgr.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in box]
+    fw, fh = x2 - x1, y2 - y1
+    if fw <= 0 or fh <= 0:
+        return 1.0
+    # A half-face-width margin: wide enough to clear the screen edge when a
+    # phone is held at arm's length, narrow enough to stay inside the frame.
+    mx, my = int(fw * 0.5), int(fh * 0.5)
+    ox1, oy1 = max(0, x1 - mx), max(0, y1 - my)
+    ox2, oy2 = min(w, x2 + mx), min(h, y2 + my)
+    outer = img_bgr[oy1:oy2, ox1:ox2]
+    inner = img_bgr[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+    if outer.size == 0 or inner.size == 0 or outer.size <= inner.size:
+        return 1.0
+    outer_sum = float(outer.sum())
+    inner_sum = float(inner.sum())
+    ring_px = outer.size - inner.size
+    ring_mean = (outer_sum - inner_sum) / ring_px
+    face_mean = inner_sum / inner.size
+    return float(face_mean / ring_mean) if ring_mean > 1.0 else 1.0
+
+
+def looks_like_screen(img_bgr: np.ndarray, box) -> bool:
+    """True when a detection looks like a face displayed on a screen.
+
+    Both conditions must agree - see the calibration note in config.py. This
+    blocks the simplest attendance fraud there is: holding up a phone showing an
+    absent athlete's photograph.
+    """
+    if not getattr(config, "REJECT_SCREEN_FACES", False):
+        return False
+    x1, y1, x2, y2 = [max(0, int(v)) for v in box]
+    if min(x2 - x1, y2 - y1) < config.SCREEN_MIN_FACE_PX:
+        # A small face carries too little spectrum to judge, and guessing here
+        # would reject distant athletes in a genuine group photo.
+        return False
+    crop = img_bgr[y1:y2, x1:x2]
+    if crop.size == 0:
+        return False
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    return bool(
+        moire_peakiness(gray) > config.SCREEN_MAX_MOIRE_PEAK
+        and bezel_ratio(img_bgr, box) > config.SCREEN_MIN_BEZEL_RATIO
+    )
+
+
 class FaceQualityAssessor:
     """Blur, exposure and pose for one detection."""
 
@@ -168,15 +251,26 @@ class FaceDetector:
 
     def __init__(self, mode: Optional[str] = None):
         self._lock = threading.Lock()
+        # Held across detect-and-read so the counts a caller gets are the ones
+        # its own call produced.
+        self._stats_lock = threading.Lock()
         self.mode = (mode or config.DETECTION_MODE).lower()
         self.last_filtered_printed = 0
+        self.last_filtered_screen = 0
+        self._last_stats = {"printed": 0, "screens": 0}
         self._model_path = config.MODELS_DIR / config.YUNET_MODEL
         if not self._model_path.exists():
             raise FileNotFoundError(
                 f"YuNet model missing: {self._model_path}. "
                 "Run: python -m scripts.download_models"
             )
-        self._detector = None      # created per image; input size is baked in
+        # One YuNet instance per (width, height, score), reused. Building one
+        # costs ~10 ms of the ~60 ms a pose-check frame takes, and the guided
+        # capture sends several frames a second from every phone at once, all
+        # queued on the lock below - so rebuilding per call was a sixth of the
+        # latency for no benefit. Callers send a handful of fixed frame sizes,
+        # so this stays small; it is cleared rather than grown if that changes.
+        self._dets: dict = {}
         log.info("Detector ready: YuNet (%s)", config.YUNET_MODEL)
 
     @property
@@ -198,15 +292,21 @@ class FaceDetector:
         score = self._score_for(mode)
 
         with self._lock:
-            det = cv2.FaceDetectorYN.create(
-                str(self._model_path), "", (w, h), score, config.YUNET_NMS,
-                config.MAX_FACES_PER_IMAGE,
-            )
-            det.setInputSize((w, h))
+            key = (w, h, score)
+            det = self._dets.get(key)
+            if det is None:
+                if len(self._dets) >= 16:
+                    self._dets.clear()
+                det = cv2.FaceDetectorYN.create(
+                    str(self._model_path), "", (w, h), score, config.YUNET_NMS,
+                    config.MAX_FACES_PER_IMAGE,
+                )
+                self._dets[key] = det
             _, rows = det.detect(img_bgr)
 
         faces: List[Face] = []
         printed = 0
+        screens = 0
         for row in (rows if rows is not None else []):
             x, y, bw, bh = float(row[0]), float(row[1]), float(row[2]), float(row[3])
             if min(bw, bh) < config.MIN_FACE_SIZE:
@@ -217,6 +317,9 @@ class FaceDetector:
             box = (x, y, x + bw, y + bh)
             if looks_printed(img_bgr, box):
                 printed += 1
+                continue
+            if looks_like_screen(img_bgr, box):
+                screens += 1
                 continue
             f = Face(
                 box=box,
@@ -230,9 +333,89 @@ class FaceDetector:
 
         if printed:
             log.info("Filtered %d printed/poster face(s) from the photo.", printed)
+        if screens:
+            # Logged at warning level, unlike the poster filter: a poster in
+            # frame is an accident, but a screen held up to the camera is
+            # someone attempting to mark an absent athlete present.
+            log.warning(
+                "Rejected %d face(s) that look like a photograph shown on a screen.",
+                screens,
+            )
+        # PER-REQUEST NUMBERS ON A SHARED OBJECT. get_detector() returns one
+        # instance for the whole process and FastAPI runs these endpoints in a
+        # thread pool, so these two attributes were written here by every
+        # concurrent request and read a whole pipeline later by whichever one
+        # got there first - a coach could be shown another centre's spoof count,
+        # or a zero for the screen that was just held up in front of them.
+        # Kept for compatibility, but the response should use the return value
+        # of detect_with_stats instead.
         self.last_filtered_printed = printed
+        self.last_filtered_screen = screens
+        self._last_stats = {"printed": printed, "screens": screens}
         faces.sort(key=lambda f: f.box[0])
         return faces
+
+    def detect_with_stats(self, img_bgr: np.ndarray, mode: Optional[str] = None):
+        """(faces, {printed, screens}) - the counts for THIS call.
+
+        The only safe way to report them: they travel back with the result
+        rather than being left on an object every other request also writes to.
+        """
+        with self._stats_lock:
+            faces = self.detect(img_bgr, mode)
+            stats = dict(getattr(self, "_last_stats", {"printed": 0, "screens": 0}))
+        return faces, stats
+
+    def detect_robust(self, img_bgr: np.ndarray, mode: Optional[str] = None) -> List[Face]:
+        """detect(), for frames of a RECORDED CLIP, where a real face can sit just
+        under the bar that a sharp camera snapshot clears.
+
+        The framing guide judges a 480px snapshot straight off the camera; the
+        clip is judged on full-size, video-compressed frames of somebody turning
+        their head, often from a phone held low. A face the guide called found
+        could then score just under the bar in every recorded frame, and the
+        person was refused with "No face was found in the clip" moments after
+        being told to tap record - over and over, with nothing they could change.
+
+        Same answer as detect() whenever that finds a face, so nothing that
+        passes today is judged differently. Only when it finds none: the
+        "accurate" bar (0.70 - still above the 0.632 a resting hand scored),
+        then 640px and 480px copies, since YuNet is not scale-invariant and the
+        guide's own 480px view is where the face was seen. Boxes and landmarks
+        come back in the ORIGINAL image's pixels.
+        """
+        mode = (mode or self.mode).lower()
+        faces = self.detect(img_bgr, mode)
+        if faces:
+            return faces
+        if mode != "accurate":
+            faces = self.detect(img_bgr, "accurate")
+            if faces:
+                return faces
+        h, w = img_bgr.shape[:2]
+        for target in (640, 480):
+            if w <= target:
+                continue
+            s = target / w
+            small = cv2.resize(img_bgr, (target, int(round(h * s))), interpolation=cv2.INTER_AREA)
+            found = self.detect(small, "accurate")
+            if found:
+                return [self._rescaled(f, 1.0 / s, img_bgr) for f in found]
+        return []
+
+    @staticmethod
+    def _rescaled(face: Face, k: float, img_bgr: np.ndarray) -> Face:
+        """A face found on a resized copy, in the original image's coordinates."""
+        x1, y1, x2, y2 = face.box
+        raw = None
+        if face.raw is not None:
+            raw = face.raw.copy()
+            raw[:14] = raw[:14] * k          # box + 5 landmark points; [14] is the score
+        f = Face(box=(x1 * k, y1 * k, x2 * k, y2 * k), conf=face.conf,
+                 landmarks=None if face.landmarks is None else face.landmarks * k,
+                 source=face.source, raw=raw)
+        f.quality = FaceQualityAssessor.assess(img_bgr, f)
+        return f
 
 
 _detector: Optional[FaceDetector] = None

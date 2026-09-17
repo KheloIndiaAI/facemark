@@ -4,14 +4,14 @@
     FaceMark - AI Attendance System startup script for Windows PowerShell
 
 .DESCRIPTION
-    Starts the FaceMark attendance system with YOLO11s-face detection
-    and ArcFace ensemble recognition on http://127.0.0.1:8000
+    Starts the FaceMark attendance system with YuNet face detection
+    and SFace recognition on http://127.0.0.1:8000
 #>
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  FaceMark - AI Attendance System" -ForegroundColor Green
-Write-Host "  YOLO11s-face detection + ArcFace ensemble recognition" -ForegroundColor Gray
+Write-Host "  YuNet detection (MIT) + SFace recognition (Apache-2.0)" -ForegroundColor Gray
 Write-Host "  Opening: http://127.0.0.1:8000" -ForegroundColor Gray
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""

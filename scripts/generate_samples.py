@@ -1,3 +1,12 @@
+"""Generate SYNTHETIC sample data for demos and smoke tests.
+
+Everything this writes is invented: faces are downloaded from randomuser.me and
+pasted into fabricated group photos. None of it is real Khelo India data and
+none of it should ever be presented as such.
+
+It writes to samples/ only. It previously wrote enrolment images into
+data/students/, alongside the photographs of real athletes.
+"""
 import json
 import os
 import random
@@ -72,7 +81,11 @@ def create_background(width, height):
 def generate_samples():
     print("Generating samples from real portrait photos...")
 
-    data_dir = ROOT / "data" / "students"
+    # NOT data/students. That directory holds the enrolment photographs of real
+    # athletes at a real centre, most of them minors; writing invented faces
+    # downloaded from the internet into it mixes fabricated records with
+    # genuine ones in the one place nobody should have to second-guess.
+    data_dir = ROOT / "samples" / "individuals"
     samples_ind_dir = ROOT / "samples" / "individuals"
     samples_group_dir = ROOT / "samples" / "groups"
 
@@ -128,7 +141,7 @@ def generate_samples():
             students.append({
                 "id": student_id,
                 "name": name,
-                "enrollment": f"data/students/enroll_{student_id}.jpg",
+                "enrollment": f"samples/individuals/enroll_{student_id}.jpg",
             })
             images.append({
                 "id": student_id,
