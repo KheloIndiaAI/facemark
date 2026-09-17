@@ -1993,6 +1993,8 @@ async def submit_session(
     verified, score, reason = False, 0.0, ""
     v = sessions_mod.verify_face(img, who)
     score = float(v.get("score") or 0.0)
+    if v.get("rotation"):
+        log.info("Register %s signing photo was turned %s", session_id, v["rotation"])
     if not v["ok"]:
         reason = v["reason"]
     elif score >= config.COACH_VERIFY_THRESHOLD:
@@ -2091,8 +2093,9 @@ async def scan_attendance(
                                              centre_id=centre_id, marked_by=int(user["id"]))
         marked.append({"student_id": sid, "name": m["name"],
                        "score": round(m["score"], 4), "already": already})
-    log.info("Take Attendance: coach %s photo - %d faces, %d recognised (%s)",
-             coach_id, found["faces"], len(marked), "late" if late else "drafted")
+    log.info("Take Attendance: coach %s photo - %d faces, %d recognised (%s)%s",
+             coach_id, found["faces"], len(marked), "late" if late else "drafted",
+             f" - photo was turned {found['rotation']}" if found.get("rotation") else "")
     return {"ok": True, "faces": found["faces"], "late": late, "marked": marked,
             "unknown": found["faces"] - len(marked)}
 
@@ -2323,6 +2326,8 @@ async def mark_myself(
 
     v = sessions_mod.verify_face(img, me)
     score = float(v.get("score") or 0.0)
+    # Kept the right way up: this is the photo the coach reviews.
+    img = sessions_mod.turn_photo(img, v.get("rotation"))
     if not v["ok"] or score < config.SELF_VERIFY_THRESHOLD:
         sessions_mod.note_self_failure(me, int(coach_id))
         return {"ok": False, "reason": "face",

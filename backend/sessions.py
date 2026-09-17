@@ -460,6 +460,34 @@ def register_roster(coach_id: int, centre_id: Optional[int]) -> List[dict]:
     return sorted(people.values(), key=lambda a: (a.get("name") or "").lower())
 
 
+# How a phone photo can arrive on its side. The app is installed locked to
+# portrait (manifest.webmanifest), so a phone held LANDSCAPE keeps its screen
+# upright to the holder while the camera frame comes through a quarter turn
+# off - the people in it lying on their side. YuNet still "finds" those faces,
+# so the photo is taken, but SFace cannot match them: measured on every
+# enrolled person, 35/35 matched upright and 0/35 either way sideways, scoring
+# 0.19 at most against their own record. Turned back, they match again.
+# Ordered by likelihood: the two landscape grips, then upside down.
+PHOTO_TURNS = (("90 clockwise", "ROTATE_90_CLOCKWISE"),
+               ("90 anticlockwise", "ROTATE_90_COUNTERCLOCKWISE"),
+               ("180", "ROTATE_180"))
+
+
+def turned_photos(img):
+    """Yield (image, name) for each turn in PHOTO_TURNS, built only as used."""
+    import cv2
+    for name, code in PHOTO_TURNS:
+        yield cv2.rotate(img, getattr(cv2, code)), name
+
+
+def turn_photo(img, rotation: Optional[str]):
+    """The photo turned the way a matcher reported it, or unchanged."""
+    if not rotation:
+        return img
+    import cv2
+    return cv2.rotate(img, getattr(cv2, dict(PHOTO_TURNS)[rotation]))
+
+
 def recognise_group_on_roster(img, coach_id: int, centre_id: Optional[int] = None) -> dict:
     """Which athletes are in this photo - one person or a whole group?
 
@@ -467,7 +495,11 @@ def recognise_group_on_roster(img, coach_id: int, centre_id: Optional[int] = Non
     is claimed by two faces) at the register's MATCH_THRESHOLD, raised for small
     faces, against a gallery narrowed to the coach's active athletes PLUS every
     active athlete at the coach's centre - never anyone from another centre.
-    Returns {"faces": n, "matches": [{student_id, name, score, on_roster}]}.
+    Returns {"faces": n, "matches": [{student_id, name, score, on_roster}],
+    "rotation": None or how far the photo had to be turned}.
+
+    A photo that matches nobody is tried again turned on its side - see
+    PHOTO_TURNS for why a phone sends one that way.
     """
     from . import database
     from .detector import get_detector
@@ -475,10 +507,6 @@ def recognise_group_on_roster(img, coach_id: int, centre_id: Optional[int] = Non
     from .recognizer import fuse_scores, get_recognizer
 
     detector, recognizer = get_detector(), get_recognizer()
-    faces = detector.detect_robust(img)
-    out = {"faces": len(faces), "matches": []}
-    if not faces:
-        return out
     roster = {int(a["id"]): a for a in athletes_of(coach_id)
               if (a.get("status") or "active") == "active"}
     # The centre's athletes as well as the linked roster. A coach's roster is
@@ -492,30 +520,52 @@ def recognise_group_on_roster(img, coach_id: int, centre_id: Optional[int] = Non
                     "SELECT id, name FROM students WHERE role = 'athlete' "
                     "AND status = 'active' AND centre_id = ?", (int(centre_id),)).fetchall():
                 candidates.setdefault(int(r["id"]), dict(r))
-    if not candidates:
-        return out
     narrowed = {}
-    for model, (tids, sids, mat) in database.load_gallery().items():
-        keep = np.isin(np.asarray(sids).astype(int), list(candidates))
-        if keep.any():
-            narrowed[model] = (np.asarray(tids)[keep], np.asarray(sids)[keep], mat[keep])
-    if not narrowed:
+    if candidates:
+        for model, (tids, sids, mat) in database.load_gallery().items():
+            keep = np.isin(np.asarray(sids).astype(int), list(candidates))
+            if keep.any():
+                narrowed[model] = (np.asarray(tids)[keep], np.asarray(sids)[keep], mat[keep])
+    weights = {m.name: m.weight for m in recognizer.models}
+
+    def match(image) -> dict:
+        faces = detector.detect_robust(image)
+        out = {"faces": len(faces), "matches": [], "rotation": None}
+        if not faces or not narrowed:
+            return out
+        queries = recognizer.embed_faces(image, faces)
+        fused, ids = fuse_scores(queries, narrowed, weights)
+        if fused is None or not len(ids):
+            return out
+        thr = np.full(fused.shape, float(config.MATCH_THRESHOLD))
+        for i, f in enumerate(faces):
+            if min(f.width, f.height) < config.SMALL_FACE_PX:
+                thr[i, :] += config.SMALL_FACE_THRESHOLD_BUMP
+        for _, sid, score in GlobalMatchOptimizer.optimize_assignments(fused, ids, threshold=thr):
+            sid = int(sid)
+            out["matches"].append({"student_id": sid, "name": candidates[sid]["name"],
+                                   "score": float(score), "on_roster": sid in roster})
+        out["matches"].sort(key=lambda m: m["name"])
         return out
 
-    queries = recognizer.embed_faces(img, faces)
-    fused, ids = fuse_scores(queries, narrowed, {m.name: m.weight for m in recognizer.models})
-    if fused is None or not len(ids):
-        return out
-    thr = np.full(fused.shape, float(config.MATCH_THRESHOLD))
-    for i, f in enumerate(faces):
-        if min(f.width, f.height) < config.SMALL_FACE_PX:
-            thr[i, :] += config.SMALL_FACE_THRESHOLD_BUMP
-    for _, sid, score in GlobalMatchOptimizer.optimize_assignments(fused, ids, threshold=thr):
-        sid = int(sid)
-        out["matches"].append({"student_id": sid, "name": candidates[sid]["name"],
-                               "score": float(score), "on_roster": sid in roster})
-    out["matches"].sort(key=lambda m: m["name"])
-    return out
+    best = match(img)
+    if best["matches"] or not narrowed:
+        return best
+    # Nobody as delivered. A sideways photo can only fail, never mis-match - a
+    # face on its side scored at most 0.19 against its own record, far under
+    # MATCH_THRESHOLD - so a turn that matches anyone is the right way up. The
+    # most matches wins, then the higher total score. The face count stays the
+    # delivered photo's unless a turn is kept, so "No face" still means that.
+    for image, name in turned_photos(img):
+        r = match(image)
+        gain = (len(r["matches"]), sum(m["score"] for m in r["matches"]))
+        have = (len(best["matches"]), sum(m["score"] for m in best["matches"]))
+        if r["matches"] and gain > have:
+            r["rotation"] = name
+            best = r
+            if len(r["matches"]) == r["faces"]:
+                break           # everyone in it matched: no turn can do better
+    return best
 
 
 def late_additions(day: str) -> dict:
@@ -763,38 +813,52 @@ def verify_face(img, student_id: int) -> dict:
     Scored through the SAME fuse_scores path as open-set recognition, on a
     gallery narrowed to one person, so the number means the same thing on both
     sides and the two thresholds are comparable. Returns the best similarity
-    over that person's templates.
+    over that person's templates, and "rotation": None or how far the photo had
+    to be turned to find it - see PHOTO_TURNS.
     """
     from .detector import get_detector
     from .recognizer import fuse_scores, get_recognizer
     from . import database
 
     detector, recognizer = get_detector(), get_recognizer()
-    faces = detector.detect_robust(img)
-    if not faces:
-        return {"ok": False, "score": 0.0, "reason": "No face found in that photo"}
-
-    # The largest face: the person holding the phone at arm's length is nearer
-    # the lens than anyone behind them.
-    face = max(faces, key=lambda f: f.width * f.height)
-
     gallery = database.load_gallery()
     narrowed = {}
     for model, (tids, sids, mat) in gallery.items():
         keep = np.asarray(sids).astype(int) == int(student_id)
         if keep.any():
             narrowed[model] = (np.asarray(tids)[keep], np.asarray(sids)[keep], mat[keep])
-    if not narrowed:
-        return {"ok": False, "score": 0.0,
-                "reason": "This person has no enrolled face to check against"}
-
-    queries = recognizer.embed_faces(img, [face])
     weights = {m.name: m.weight for m in recognizer.models}
-    fused, ids = fuse_scores(queries, narrowed, weights)
-    if fused is None or not len(ids):
-        return {"ok": False, "score": 0.0, "reason": "Could not read that face"}
-    score = float(np.max(fused[0]))
-    return {"ok": True, "score": score, "reason": ""}
+
+    def score_of(image) -> dict:
+        faces = detector.detect_robust(image)
+        if not faces:
+            return {"ok": False, "score": 0.0, "reason": "No face found in that photo", "rotation": None}
+        if not narrowed:
+            return {"ok": False, "score": 0.0, "rotation": None,
+                    "reason": "This person has no enrolled face to check against"}
+        # The largest face: the person holding the phone at arm's length is
+        # nearer the lens than anyone behind them.
+        face = max(faces, key=lambda f: f.width * f.height)
+        queries = recognizer.embed_faces(image, [face])
+        fused, ids = fuse_scores(queries, narrowed, weights)
+        if fused is None or not len(ids):
+            return {"ok": False, "score": 0.0, "reason": "Could not read that face", "rotation": None}
+        return {"ok": True, "score": float(np.max(fused[0])), "reason": "", "rotation": None}
+
+    best = score_of(img)
+    # The lower of the two bars callers hold this score to: below it the photo
+    # as delivered cannot pass either, so it is worth checking whether it came
+    # through on its side. A turn is kept only if it clears that bar - a wrong
+    # orientation scores near zero and must not replace an honest "no face".
+    bar = min(config.COACH_VERIFY_THRESHOLD, config.SELF_VERIFY_THRESHOLD)
+    if narrowed and best["score"] < bar:
+        for image, name in turned_photos(img):
+            r = score_of(image)
+            if r["ok"] and r["score"] >= bar and r["score"] > best["score"]:
+                r["rotation"] = name
+                best = r
+                break           # a wrong way up never clears the bar
+    return best
 
 
 def find_existing_person(img, gallery=None) -> dict:
