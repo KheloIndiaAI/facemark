@@ -1578,20 +1578,19 @@ function taScan() {
     openClipCapture({
         title: 'Take attendance',
         guided: false,
+        photo: true,
+        group: true,
         facingMode: 'environment',
         rearmOnNoFace: true,
         frameWidth: 960,
-        // Recognition does not need a blink, so a clip without one is still
-        // sent - it is simply not proven live.
-        uploadWithoutBlink: true,
-        intro: 'Hold the phone close to one athlete - about an arm\'s length. Recording '
-             + 'starts by itself once their face is close enough; ask them to blink.',
+        intro: 'Point the camera at one athlete or the whole group, faces towards the '
+             + 'camera. The photo is taken by itself once faces are in view.',
         onClip: async (file, ui) => {
             ui.status('Checking…');
             let scanned = false;
             try {
                 const fd = new FormData();
-                fd.append('clip', file);
+                fd.append('photo', file);
                 const r = await api.postForm('/api/attendance/scan', fd, 'POST', true);
                 if (!r.ok && r.reason === 'pending_register') {
                     // The server's own ordering check: send them to submit it.
@@ -1604,11 +1603,15 @@ function taScan() {
                     speak(r.message || 'Not recognised');
                     ui.status(r.message || 'Not recognised - try again.');
                 } else {
-                    const msg = r.already ? `${r.name} is already marked present`
-                        : r.late ? `${r.name} - added late` : `${r.name} - present`;
-                    speak(r.already ? `${r.name}, already present` : `${r.name}, present`);
-                    ui.status(`✓ ${msg}. Next athlete, please.`);
-                    if (last) last.textContent = `Last scanned: ${msg}`;
+                    const fresh = r.marked.filter(m => !m.already);
+                    const names = r.marked.map(m => m.name + (m.already ? ' (already)' : '')).join(', ');
+                    const msg = `${r.marked.length} recognised${r.late ? ' - added late' : ''}: ${names}`
+                        + (r.unknown ? `. ${r.unknown} not recognised` : '');
+                    speak(r.marked.length === 1
+                        ? `${r.marked[0].name}, ${r.marked[0].already ? 'already present' : 'present'}`
+                        : `${fresh.length} marked present`);
+                    ui.status(`✓ ${msg}. Next, please.`);
+                    if (last) last.textContent = `Last photo: ${msg}`;
                     scanned = true;
                     renderDashboardRoleCard('ta-table');
                 }
@@ -2099,16 +2102,15 @@ function regSubmit() {
         // One face against one enrolled record. Several views were never needed
         // here, and the prompts contradicted this screen's own instruction.
         guided: false,
+        photo: true,
         title: 'Confirm it is you',
-        intro: 'Look at the camera to sign this register. Recording starts by itself - '
-             + 'blink when asked.',
-        onClip: async (file, ui, extra) => {
+        intro: 'Look at the camera to sign this register. The photo is taken by itself.',
+        onClip: async (file, ui) => {
             ui.status('Checking\u2026');
             try {
                 const fd = new FormData();
-                fd.append('clip', file);
+                fd.append('photo', file);
                 fd.append('attempt', String(regAttempt));
-                appendBlinkTime(fd, extra);
                 const r = await api.postForm(`/api/sessions/${regSession.id}/submit`, fd);
 
                 if (r.submitted === false) {
@@ -2251,14 +2253,14 @@ function meMark(coachId, coachName) {
             // three seconds took up to thirty-four. The register-signing
             // capture was fixed for exactly this and its twin here was missed.
             guided: false,
-            intro: 'Look at the camera. Recording starts by itself - blink when asked.',
-            onClip: async (file, ui, extra) => {
+            photo: true,
+            intro: 'Look at the camera. The photo is taken by itself.',
+            onClip: async (file, ui) => {
                 ui.status('Checking\u2026');
                 try {
                     const fd = new FormData();
-                    fd.append('clip', file);
+                    fd.append('photo', file);
                     fd.append('coach_id', String(coachId));
-                    appendBlinkTime(fd, extra);
                     if (pos) {
                         fd.append('latitude', pos.coords.latitude);
                         fd.append('longitude', pos.coords.longitude);
@@ -2749,6 +2751,7 @@ async function openClipCapture(opts) {
      * somebody is standing in front of a camera that will not respond. */
     async function pollPose(fd) {
         if (opts.signupToken) fd.append('signup_token', opts.signupToken);
+        if (opts.group) fd.append('group', 'true');
         return api.postForm('/api/enroll/pose-check', fd, 'POST', true);
     }
 
@@ -2989,6 +2992,22 @@ async function openClipCapture(opts) {
             py * sc + oy,
         ];
 
+        if (opts.group) {
+            // Every face the server found, in the FRAME_W-wide frame it was sent.
+            const k = sw0 / Math.min(FRAME_W, sw0);
+            ctx.strokeStyle = state.good ? POSE_ACCENT_GOOD : POSE_ACCENT_WAIT;
+            ctx.lineWidth = 3;
+            for (const b of state.boxes || []) {
+                const [ax, ay] = toScreen(b[0] * k, b[1] * k);
+                const [bx, by] = toScreen(b[2] * k, b[3] * k);
+                ctx.beginPath();
+                const X = Math.min(ax, bx), W = Math.abs(bx - ax);
+                if (ctx.roundRect) ctx.roundRect(X, ay, W, by - ay, 8); else ctx.rect(X, ay, W, by - ay);
+                ctx.stroke();
+            }
+            return;
+        }
+
         // Preferred: the on-device mesh. 478 points at video rate.
         if (state.mesh) {
             const accentM = state.good ? POSE_ACCENT_GOOD : POSE_ACCENT_WAIT;
@@ -3161,7 +3180,8 @@ async function openClipCapture(opts) {
 
     // Only the unguided clip is gated on this. Registration's guided capture
     // is a selfie at arm's length, already far past it.
-    const tooFar = () => opts.guided === false && !!meshFresh() && state.meshW < LIVE_MIN_MESH_PX;
+    const tooFar = () => opts.guided === false && !opts.photo
+        && !!meshFresh() && state.meshW < LIVE_MIN_MESH_PX;
 
     /* Keeps the recording going until the person blinks - see BLINK_* - then a
      * moment longer so the eyes are seen opening again. The bar is the time
@@ -3221,6 +3241,38 @@ async function openClipCapture(opts) {
         }
     }
 
+    /* Group photo: shoot once the number of faces has stopped changing for
+       GROUP_STEADY_MS, so people still walking into frame are not left out.
+       The shutter takes it straight away. */
+    const GROUP_STEADY_MS = 2000;
+    function groupTick(r) {
+        const n = r.ok ? (r.faces || 0) : 0;
+        state.boxes = r.ok ? (r.boxes || []) : [];
+        if (n !== state.groupN) { state.groupN = n; state.groupSince = Date.now(); }
+        state.good = n > 0;
+        if (!n && opts.rearmOnNoFace) state.autoFired = false;
+        if (!state.recording) shutter.disabled = !n;
+        showAnalyzing(!n && !state.recording);
+        const faces = `${n} face${n === 1 ? '' : 's'} in frame`;
+        const left = GROUP_STEADY_MS - (Date.now() - state.groupSince);
+        hint.textContent = !n ? (r.message || 'No face detected')
+            : state.autoFired ? `${faces} - tap the button for another photo`
+            : left > 0 ? `${faces} - hold still…` : `${faces} - taking photo`;
+        if (n && left <= 0 && !state.recording && !state.autoFired && !state.flipping) {
+            state.autoFired = true;
+            startRecording();
+        }
+    }
+    if (opts.group) {
+        shutter.hidden = false;
+        shutter.setAttribute('aria-label', 'Take photo now');
+        shutter.addEventListener('click', () => {
+            if (state.recording || state.flipping || state.closed || !state.groupN) return;
+            state.autoFired = true;
+            startRecording();
+        });
+    }
+
     async function tick() {
         if (!state.alive || state.busy) return;
         const c = grab(FRAME_W);
@@ -3239,6 +3291,14 @@ async function openClipCapture(opts) {
             fd.append('step', 'centre');
             const r = await pollPose(fd);
             if (!state.alive) return;
+
+            if (opts.group) {
+                groupTick(r);
+                state.fails = 0;
+                setFramePoll(FAST_POLL_MS);
+                draw();
+                return;
+            }
 
             state.box = r.box || null;
             state.landmarks = r.landmarks || null;
@@ -3369,6 +3429,7 @@ async function openClipCapture(opts) {
             // GOOD_STREAK_TO_ARM) is what is allowed to arm it.
             state.good = false;
             state.goodStreak = 0; state.goodHist = [];
+            state.groupN = -1;           // a group waits to be steady again
             shutter.disabled = true;
             if (state.timer) clearInterval(state.timer);
             framePollMs = FAST_POLL_MS;
@@ -3389,7 +3450,8 @@ async function openClipCapture(opts) {
     // keeps using the five server points.
     (async () => {
         const ok = await FaceMesh.load();
-        if (!ok || state.closed) return;
+        // The mesh tracks one face; a group is drawn from the server's boxes.
+        if (!ok || state.closed || opts.group) return;
         const loop = () => {
             if (state.closed) return;
             const r = FaceMesh.detect(video, performance.now());
@@ -3797,8 +3859,8 @@ async function openClipCapture(opts) {
         shutter.classList.add('recording');
         setFlipVisible(false);
         showAnalyzing(false);
-        ui.status(opts.guided === false
-            ? 'Recording - look at the camera and blink.'
+        ui.status(opts.photo ? 'Taking photo…'
+            : opts.guided === false ? 'Recording - look at the camera and blink.'
             : 'Recording - follow the on-screen prompts.');
 
         // The pre-recording framing poll and the guided sequence's own poll
@@ -3823,7 +3885,17 @@ async function openClipCapture(opts) {
         // branch overwrites it with something specific when IT is the reason.
         let retryReason = 'Recording did not complete. Try again.';
         try {
-            if (opts.guided === false) {
+            if (opts.photo) {
+                // One still frame at full resolution, unmirrored, for a
+                // recognition-only check with no liveness.
+                promptBox.classList.add('hidden');
+                if (navigator.vibrate) navigator.vibrate(40);
+                // A group needs every pixel the camera gives: faces at the back are small.
+                const c = grab(opts.group ? 4096 : 1280);
+                const blob = c && await new Promise(res => c.toBlob(res, 'image/jpeg', 0.92));
+                if (blob) file = new File([blob], `photo_${Date.now()}.jpg`, { type: 'image/jpeg' });
+                else retryReason = 'Could not take the photo. Trying again.';
+            } else if (opts.guided === false) {
                 // One face, scanned or verified against one record. Neither
                 // wants "turn left": a 1:1 check needs one view. Proof of a
                 // live face is a blink - see watchBlink.

@@ -460,15 +460,25 @@ def register_roster(coach_id: int, centre_id: Optional[int]) -> List[dict]:
     return sorted(people.values(), key=lambda a: (a.get("name") or "").lower())
 
 
-def recognise_on_roster(frames, coach_id: int, centre_id: Optional[int] = None) -> Optional[dict]:
-    """Which athlete is in these frames?
+def recognise_group_on_roster(img, coach_id: int, centre_id: Optional[int] = None) -> dict:
+    """Which athletes are in this photo - one person or a whole group?
 
-    For Take Attendance. The best match over the given frames, at the
-    register's MATCH_THRESHOLD, against a gallery narrowed to the coach's
-    active athletes PLUS every active athlete at the coach's centre - never
-    anyone from another centre. None when nobody clears the threshold.
+    For Take Attendance. Every detected face is assigned at once (so no athlete
+    is claimed by two faces) at the register's MATCH_THRESHOLD, raised for small
+    faces, against a gallery narrowed to the coach's active athletes PLUS every
+    active athlete at the coach's centre - never anyone from another centre.
+    Returns {"faces": n, "matches": [{student_id, name, score, on_roster}]}.
     """
     from . import database
+    from .detector import get_detector
+    from .metaheuristics import GlobalMatchOptimizer
+    from .recognizer import fuse_scores, get_recognizer
+
+    detector, recognizer = get_detector(), get_recognizer()
+    faces = detector.detect_robust(img)
+    out = {"faces": len(faces), "matches": []}
+    if not faces:
+        return out
     roster = {int(a["id"]): a for a in athletes_of(coach_id)
               if (a.get("status") or "active") == "active"}
     # The centre's athletes as well as the linked roster. A coach's roster is
@@ -483,24 +493,29 @@ def recognise_on_roster(frames, coach_id: int, centre_id: Optional[int] = None) 
                     "AND status = 'active' AND centre_id = ?", (int(centre_id),)).fetchall():
                 candidates.setdefault(int(r["id"]), dict(r))
     if not candidates:
-        return None
+        return out
     narrowed = {}
     for model, (tids, sids, mat) in database.load_gallery().items():
         keep = np.isin(np.asarray(sids).astype(int), list(candidates))
         if keep.any():
             narrowed[model] = (np.asarray(tids)[keep], np.asarray(sids)[keep], mat[keep])
     if not narrowed:
-        return None
-    best = None
-    for f in frames:
-        m = find_existing_person(f, narrowed)
-        if m.get("student_id") and (best is None or m["score"] > best["score"]):
-            best = m
-    if best is None:
-        return None
-    sid = int(best["student_id"])
-    return {"student_id": sid, "name": candidates[sid]["name"], "score": float(best["score"]),
-            "on_roster": sid in roster}
+        return out
+
+    queries = recognizer.embed_faces(img, faces)
+    fused, ids = fuse_scores(queries, narrowed, {m.name: m.weight for m in recognizer.models})
+    if fused is None or not len(ids):
+        return out
+    thr = np.full(fused.shape, float(config.MATCH_THRESHOLD))
+    for i, f in enumerate(faces):
+        if min(f.width, f.height) < config.SMALL_FACE_PX:
+            thr[i, :] += config.SMALL_FACE_THRESHOLD_BUMP
+    for _, sid, score in GlobalMatchOptimizer.optimize_assignments(fused, ids, threshold=thr):
+        sid = int(sid)
+        out["matches"].append({"student_id": sid, "name": candidates[sid]["name"],
+                               "score": float(score), "on_roster": sid in roster})
+    out["matches"].sort(key=lambda m: m["name"])
+    return out
 
 
 def late_additions(day: str) -> dict:
@@ -757,7 +772,7 @@ def verify_face(img, student_id: int) -> dict:
     detector, recognizer = get_detector(), get_recognizer()
     faces = detector.detect_robust(img)
     if not faces:
-        return {"ok": False, "score": 0.0, "reason": "No face found in that clip"}
+        return {"ok": False, "score": 0.0, "reason": "No face found in that photo"}
 
     # The largest face: the person holding the phone at arm's length is nearer
     # the lens than anyone behind them.

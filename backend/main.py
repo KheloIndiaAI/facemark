@@ -1195,6 +1195,7 @@ async def enroll_pose_check(
     base_yaw: Optional[float] = Form(None),
     base_pitch: Optional[float] = Form(None),
     signup_token: Optional[str] = Form(None),
+    group: bool = Form(False),
 ):
     """Live guidance for one frame of guided enrolment.
 
@@ -1246,6 +1247,11 @@ async def enroll_pose_check(
     faces = get_detector().detect_robust(img, config.CLIP_DETECTION_MODE)
     if not faces:
         return {"ok": False, "reason": "no_face", "message": "No face detected"}
+    if group:
+        # Take Attendance photographs a whole group: any face is enough to shoot.
+        return {"ok": True, "faces": len(faces),
+                "message": f"{len(faces)} face{'s' if len(faces) != 1 else ''} in frame",
+                "boxes": [[round(v, 1) for v in f.box] for f in faces]}
     if len(faces) > 1:
         return {"ok": False, "reason": "many_faces",
                 "message": f"{len(faces)} faces in frame - only the athlete should be visible"}
@@ -1933,14 +1939,14 @@ async def add_session_capture(
 @app.post("/api/sessions/{session_id}/submit")
 async def submit_session(
     session_id: int,
-    clip: UploadFile = File(...),
+    photo: UploadFile = File(...),
     attempt: int = Form(1),
-    blink_at_ms: Optional[float] = Form(None),
     user: dict = Depends(auth.require_staff),
 ):
     """Close the register under the submitter's own face.
 
-    Liveness plus a 1:1 check against that person's own templates. On pass,
+    A 1:1 check of one photo against that person's own templates, with no
+    liveness check - a still image cannot carry one. On pass,
     every draft is promoted in one transaction.
 
     On FAILURE the caller may retry. After config.VERIFY_MAX_RETRIES attempts
@@ -1979,50 +1985,43 @@ async def submit_session(
             **(out or {}),
         }
 
-    data = await clip.read()
-    if not data:
-        raise HTTPException(400, "Empty upload")
-
-    detector = get_detector()
-    result = liveness.analyse(data, detector, blink_at_ms=blink_at_ms)
-    img = result.best_frame
+    try:
+        img = utils.decode_image(await photo.read())
+    except ValueError:
+        raise HTTPException(400, "Uploaded file is not a valid image")
 
     verified, score, reason = False, 0.0, ""
-    if result.verdict != "live" or img is None:
-        reason = result.reason or "Could not confirm this was live"
+    v = sessions_mod.verify_face(img, who)
+    score = float(v.get("score") or 0.0)
+    if not v["ok"]:
+        reason = v["reason"]
+    elif score >= config.COACH_VERIFY_THRESHOLD:
+        verified = True
     else:
-        v = sessions_mod.verify_face(img, who)
-        score = float(v.get("score") or 0.0)
-        if not v["ok"]:
-            reason = v["reason"]
-        elif score >= config.COACH_VERIFY_THRESHOLD:
-            verified = True
-        else:
-            reason = "That face does not match your enrolled photo"
+        reason = "That face does not match your enrolled photo"
 
     last_attempt = int(attempt) >= config.VERIFY_MAX_RETRIES
     if not verified and not last_attempt:
         return {
             "ok": False, "verified": False, "submitted": False,
             "attempt": int(attempt), "retries_left": config.VERIFY_MAX_RETRIES - int(attempt),
-            "score": round(score, 4), "liveness": result.to_dict(),
+            "score": round(score, 4),
             "message": reason or "Verification failed - try again",
         }
 
     try:
-        out = sessions_mod.submit(session_id, verified, score, result.verdict)
+        out = sessions_mod.submit(session_id, verified, score, "photo")
     except ValueError as e:
         raise HTTPException(409, str(e))
 
     if not verified:
         log.warning(
-            "Register %s submitted UNVERIFIED by user %s (score %.4f, liveness %s)",
-            session_id, user["id"], score, result.verdict,
+            "Register %s submitted UNVERIFIED by user %s (score %.4f)",
+            session_id, user["id"], score,
         )
     return {
         "ok": True, "submitted": True, "verified": verified,
         "promoted": out["promoted"], "score": round(score, 4),
-        "liveness": result.to_dict(),
         "message": ("Register submitted" if verified else
                     "Register submitted, but your face could not be verified - "
                     "this has been flagged for an administrator"),
@@ -2042,16 +2041,16 @@ def pending_register(user: dict = Depends(auth.require_staff)):
 
 @app.post("/api/attendance/scan")
 async def scan_attendance(
-    clip: UploadFile = File(...),
+    photo: UploadFile = File(...),
     user: dict = Depends(auth.require_staff),
 ):
-    """Take Attendance: one athlete in front of the coach's camera.
+    """Take Attendance: one photo of one athlete or a whole group.
 
-    Recognised among this coach's athletes and every active athlete at the
+    Every face is recognised among this coach's athletes and every active athlete at the
     coach's centre (never another centre's), and marked on this
     coach's register for today: a draft while the register is open (confirmed
-    when the coach submits), or a late addition once it is submitted. A clip
-    that looks like a photograph or a screen is refused.
+    when the coach submits), or a late addition once it is submitted. No
+    liveness check - the coach is standing in front of the athlete.
     """
     if not user.get("student_id"):
         raise HTTPException(400, "Only a coach can take attendance - this account has no register")
@@ -2064,40 +2063,38 @@ async def scan_attendance(
         return {"ok": False, "reason": "pending_register", "pending": pend,
                 "message": f"Submit your register for {pend['date']} first, "
                            "then take today's attendance."}
-    data = await clip.read()
-    if not data:
-        raise HTTPException(400, "Empty upload")
-    detector = get_detector()
-    # No blink check: this route refuses only a flat clip, so looking for a
-    # blink would cost every scan time without changing any answer.
-    result = liveness.analyse(data, detector, check_blink=False)
-    if result.verdict == "screen":
-        return {"ok": False, "reason": "screen", "message": result.reason}
-    frames = portrait_mod.ranked(result.frames or [], detector)[:3]
-    if not frames:
-        return {"ok": False, "reason": "no_face",
-                "message": "No face found - hold the camera on one athlete and try again"}
+    try:
+        img = utils.decode_image(await photo.read())
+    except ValueError:
+        raise HTTPException(400, "Uploaded file is not a valid image")
     coach = database.get_student(coach_id)
     centre_id = (coach or {}).get("centre_id")
-    match = sessions_mod.recognise_on_roster(frames, coach_id, centre_id)
-    if not match:
-        return {"ok": False, "reason": "unknown",
-                "message": "Not recognised - make sure this athlete is registered and "
-                           "approved at your centre, then scan again a little closer"}
+    found = sessions_mod.recognise_group_on_roster(img, coach_id, centre_id)
+    if not found["faces"]:
+        return {"ok": False, "reason": "no_face",
+                "message": "No face found - point the camera at the athletes and try again"}
+    if not found["matches"]:
+        return {"ok": False, "reason": "unknown", "faces": found["faces"],
+                "message": "Nobody recognised - make sure these athletes are registered and "
+                           "approved at your centre, then try again a little closer"}
     day = config.today_str()
     sess = sessions_mod.get_or_create(centre_id, coach_id, int(user["id"]), day)
-    sid, name = match["student_id"], match["name"]
-    if sess["status"] == "submitted":
-        action = sessions_mod.set_late_present(sess["id"], sid, True, day, centre_id, int(user["id"]))
-        already, late = action == "noop", True
-    else:
-        added = sessions_mod.draft(sess["id"], sid, day, match["score"], origin="recognised",
-                                   centre_id=centre_id, marked_by=int(user["id"]))
-        already, late = not added, False
-    log.info("Take Attendance: coach %s scanned person %s (%.3f) - %s",
-             coach_id, sid, match["score"], "already present" if already else ("late" if late else "drafted"))
-    return {"ok": True, "student_id": sid, "name": name, "score": round(match["score"], 4),
-            "late": late, "already": already, "liveness": result.verdict}
+    late = sess["status"] == "submitted"
+    marked = []
+    for m in found["matches"]:
+        sid = m["student_id"]
+        if late:
+            action = sessions_mod.set_late_present(sess["id"], sid, True, day, centre_id, int(user["id"]))
+            already = action == "noop"
+        else:
+            already = not sessions_mod.draft(sess["id"], sid, day, m["score"], origin="recognised",
+                                             centre_id=centre_id, marked_by=int(user["id"]))
+        marked.append({"student_id": sid, "name": m["name"],
+                       "score": round(m["score"], 4), "already": already})
+    log.info("Take Attendance: coach %s photo - %d faces, %d recognised (%s)",
+             coach_id, found["faces"], len(marked), "late" if late else "drafted")
+    return {"ok": True, "faces": found["faces"], "late": late, "marked": marked,
+            "unknown": found["faces"] - len(marked)}
 
 
 @app.get("/api/late-additions")
@@ -2282,19 +2279,17 @@ def my_attendance(user: dict = Depends(auth.current_user)):
 
 @app.post("/api/me/attendance")
 async def mark_myself(
-    clip: UploadFile = File(...),
+    photo: UploadFile = File(...),
     coach_id: int = Form(...),
-    blink_at_ms: Optional[float] = Form(None),
     latitude: Optional[float] = Form(None),
     longitude: Optional[float] = Form(None),
     accuracy_m: Optional[float] = Form(None),
     user: dict = Depends(auth.current_user),
 ):
-    """Mark yourself present from a short clip.
+    """Mark yourself present from one photo, matched 1:1 against your record.
 
-    Liveness is MANDATORY here, with no photo path and no exceptions. A coach's
-    group capture may be a photo because a person reviews and signs for it; a
-    self-mark has no such witness, so the clip is the only evidence there is.
+    No liveness check, so the coach's confirmation of the draft is the only
+    guard against a held-up photograph.
 
     Geo-fencing carries real weight for the same reason - an athlete marking
     themselves from home is the obvious abuse. A bad or missing fix does NOT
@@ -2321,29 +2316,18 @@ async def mark_myself(
     if wait:
         raise HTTPException(429, f"Too many attempts - wait {wait}s and try again")
 
-    data = await clip.read()
-    if not data:
-        raise HTTPException(400, "Empty upload")
+    try:
+        img = utils.decode_image(await photo.read())
+    except ValueError:
+        raise HTTPException(400, "Uploaded file is not a valid image")
 
-    detector = get_detector()
-    result = liveness.analyse(data, detector, blink_at_ms=blink_at_ms)
-    if result.verdict != "live" or result.best_frame is None:
-        # Only a clip judged FLAT starts the cooldown. Too far, too little
-        # movement, no face: the check could not look, the face was never
-        # compared, so a retry reveals nothing about matching - and making an
-        # athlete wait 20s after "move closer" only punishes following advice.
-        if result.verdict == "screen":
-            sessions_mod.note_self_failure(me, int(coach_id))
-        return {"ok": False, "reason": "liveness", "code": result.code,
-                "message": result.reason, "liveness": result.to_dict()}
-
-    v = sessions_mod.verify_face(result.best_frame, me)
+    v = sessions_mod.verify_face(img, me)
     score = float(v.get("score") or 0.0)
     if not v["ok"] or score < config.SELF_VERIFY_THRESHOLD:
         sessions_mod.note_self_failure(me, int(coach_id))
         return {"ok": False, "reason": "face",
                 "message": v.get("reason") or "That face does not match your record",
-                "score": round(score, 4), "liveness": result.to_dict()}
+                "score": round(score, 4)}
 
     coach = database.get_student(int(coach_id))
     centre_id = (coach or {}).get("centre_id")
@@ -2357,7 +2341,7 @@ async def mark_myself(
 
     ts = utils.timestamp()
     frame_name = f"self_{me}_{ts}.jpg"
-    utils.save_image(result.best_frame, "uploads", frame_name)
+    utils.save_image(img, "uploads", frame_name)
 
     added = sessions_mod.draft(
         sess["id"], me, day, score, origin="self_marked", image_path=frame_name,
@@ -2369,7 +2353,6 @@ async def mark_myself(
         "ok": True, "added": added, "session_id": sess["id"],
         "status": "draft", "origin": "self_marked",
         "score": round(score, 4),
-        "liveness": result.to_dict(),
         "geo": {"status": geo["geo_status"], "distance_m": geo["distance_m"]},
         "message": ("Marked - your coach will confirm it."
                     if geo["geo_status"] == "inside" else
