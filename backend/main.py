@@ -965,16 +965,14 @@ async def process_attendance_video(
     This was the Mark Attendance page's only route: a coach's own clip drafted
     whoever it recognised into today's register, a super admin's wrote
     confirmed attendance directly. Attendance is now only an athlete marking
-    themselves (/api/me/attendance) or a coach adding people by hand on the
-    register, which the coach then signs (/api/sessions/{id}/submit) - both
-    already require a live face and neither depends on a room-sized capture
-    the liveness check was never calibrated to judge (see `too_far` in
-    liveness.py). Kept as an endpoint, not deleted outright, so a stale client
+    themselves (/api/me/attendance) or a coach scanning them on Take
+    Attendance (/api/attendance/scan), which the coach then signs
+    (/api/sessions/{id}/submit) - every one of them from a face. Kept as an endpoint, not deleted outright, so a stale client
     or bookmark gets an answer that says what happened instead of a bare 404.
     """
     raise HTTPException(
-        410, "Group capture has been removed. Mark yourself present from your "
-             "own camera, or ask your coach to add you to the register.")
+        410, "This capture has been replaced. Mark yourself present from your own "
+             "camera with a face check, or ask your coach to scan you on Take Attendance.")
 
 
 def _face_from_original(crop_name: str):
@@ -1925,14 +1923,14 @@ async def add_session_capture(
 ):
     """REMOVED. This was the Register page's "Capture group" button: a coach's
     phone pointed at a room, matched against the whole gallery. Attendance for
-    a register now comes from an athlete marking themselves, or a coach ticking
-    a name by hand - both then covered by the coach's own signature on submit.
+    a register now comes from an athlete marking themselves or a coach scanning
+    them on Take Attendance - both from a face, both then covered by the
+    coach's own signature on submit. Nobody is ticked present by hand.
     Kept as an endpoint, not deleted outright, so a stale client gets an answer
     that says what happened instead of a bare 404.
     """
     raise HTTPException(
-        410, "Group capture has been removed. Add people to the register by "
-             "hand, or ask them to mark themselves present.")
+        410, "This capture has been replaced. " + FACE_ONLY_MESSAGE)
 
 
 
@@ -2024,6 +2022,7 @@ async def submit_session(
     return {
         "ok": True, "submitted": True, "verified": verified,
         "promoted": out["promoted"], "score": round(score, 4),
+        "not_scanned": out.get("not_scanned", []),
         "message": ("Register submitted" if verified else
                     "Register submitted, but your face could not be verified - "
                     "this has been flagged for an administrator"),
@@ -2086,7 +2085,10 @@ async def scan_attendance(
     for m in found["matches"]:
         sid = m["student_id"]
         if late:
-            action = sessions_mod.set_late_present(sess["id"], sid, True, day, centre_id, int(user["id"]))
+            # The real score, not 0: a late joiner was scanned like everyone
+            # else, and a 0 here read as "0% Match" on the dashboard.
+            action = sessions_mod.set_late_present(sess["id"], sid, True, day, centre_id,
+                                                   int(user["id"]), confidence=m["score"])
             already = action == "noop"
         else:
             already = not sessions_mod.draft(sess["id"], sid, day, m["score"], origin="recognised",
@@ -2122,6 +2124,19 @@ def dashboard_absent(user: dict = Depends(auth.require_staff)):
     return {"ok": True, **sessions_mod.absent_today(int(who), day)}
 
 
+# Said wherever somebody tries to mark attendance without a face. It explains
+# the process rather than just refusing, because the person asking is usually
+# a coach who has not been shown it.
+FACE_ONLY_MESSAGE = (
+    "Athletes can only be marked present by scanning their face. "
+    "Open Take Attendance and scan the athlete, or the whole group - or the "
+    "athlete marks themselves from their own phone with a face check. "
+    "Then check the register and tap Submit register to verify your own face. "
+    "Anyone who arrives after the register is submitted is scanned the same "
+    "way and added as late."
+)
+
+
 @app.patch("/api/sessions/{session_id}/roster/{student_id}")
 def toggle_roster(
     session_id: int,
@@ -2129,10 +2144,20 @@ def toggle_roster(
     present: bool = Form(...),
     user: dict = Depends(auth.require_staff),
 ):
-    """Tick or untick one person by hand. Drafts only."""
+    """Take one person OFF the register. Nobody is put ON it by hand.
+
+    Present is only ever written from a face: Take Attendance (the coach scans
+    the athlete) or the athlete's own face-checked self-mark. Ticking a name
+    here marked people present with no face at all, which showed on the
+    dashboard as "0% Match" and let a register be filled for anybody. Removing
+    stays, because it is how a coach corrects a wrong recognition before
+    signing.
+    """
     sess = _session_or_404(session_id)
     _may_touch(user, sess)
     _person_in_scope(user, student_id)
+    if present:
+        raise HTTPException(403, FACE_ONLY_MESSAGE)
     if sess["status"] == "submitted":
         # Late joiners go straight onto a submitted register as confirmed
         # attendance, recorded as late so the super admin sees them centre by
@@ -2882,11 +2907,14 @@ async def assign_face_to_student(
     student_id: int = Form(...),
     date_str: Optional[str] = Form(None),
     learn: bool = Form(True),
-    user: dict = Depends(auth.require_staff),
+    user: dict = Depends(auth.require_super_admin),
 ):
     """Attribute a face the matcher missed to a known athlete, and learn from it.
 
-    Coaches and admins only. It writes confirmed attendance AND, with learn on,
+    SUPER ADMIN ONLY. It belongs to the super admin's group-photo route
+    (/api/attendance/process) and nothing a coach uses calls it; open to
+    coaches, it let one mark any athlete at their centre present from any
+    stored photo with no face match at all. It writes confirmed attendance AND, with learn on,
     adds an adapted template - so an athlete holding this could both mark people
     present and teach the recogniser a face of their choosing.
 
@@ -2957,6 +2985,19 @@ async def assign_face_to_student(
     }
 
 
+def _shown_confidence(raw) -> Optional[float]:
+    """The match percentage a screen shows for one attendance row, or None.
+
+    None when the row carries no face score - somebody ticked by hand before
+    that was removed, or a late joiner from before the score was kept. Those
+    were calibrated as a score of 0 and displayed as "0% Match" in a green
+    badge, which reads as "recognised, badly" rather than "not recognised".
+    """
+    if raw is None or float(raw) <= 0:
+        return None
+    return round(utils.similarity_to_confidence(float(raw), config.MATCH_THRESHOLD), 4)
+
+
 @app.get("/api/attendance")
 def get_attendance(
     day: Optional[str] = None,
@@ -2971,9 +3012,7 @@ def get_attendance(
         # Same calibration as /api/attendance/process and /api/stats, so one match
         # never shows three different percentages across the three screens.
         r["raw_similarity"] = round(float(r["confidence"]), 4)
-        r["confidence"] = round(
-            utils.similarity_to_confidence(r["confidence"], config.MATCH_THRESHOLD), 4
-        )
+        r["confidence"] = _shown_confidence(r["confidence"])
     return {"date": day, "records": records}
 
 
@@ -3040,7 +3079,8 @@ def export_attendance(
             _csv_safe(r["roll_no"]),
             _csv_safe(r["name"]),
             _csv_safe(r["date"]),
-            round(utils.similarity_to_confidence(r["confidence"], config.MATCH_THRESHOLD), 4),
+            # Blank, not 0, for a row with no face score - see _shown_confidence.
+            "" if _shown_confidence(r["confidence"]) is None else _shown_confidence(r["confidence"]),
             _csv_safe(r["marked_at"]),
         ])
     buf.seek(0)
@@ -3236,9 +3276,7 @@ def get_stats(user: dict = Depends(auth.require_staff)):
     # attendance result screen must show the SAME number for a given match, so
     # calibrate it here exactly as /api/attendance/process does.
     for r in s.get("recent", []):
-        r["confidence"] = round(
-            utils.similarity_to_confidence(r["confidence"], config.MATCH_THRESHOLD), 4
-        )
+        r["confidence"] = _shown_confidence(r["confidence"])
     try:
         s["photo_stats"] = database.photo_stats()
     except AttributeError:

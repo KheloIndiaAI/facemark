@@ -369,7 +369,8 @@ LATE_ORIGINS = ("late_added", "late_approved")
 
 
 def set_late_present(session_id: int, student_id: int, present: bool, day: str,
-                     centre_id: Optional[int], marked_by: Optional[int]) -> str:
+                     centre_id: Optional[int], marked_by: Optional[int],
+                     confidence: float = 0.0) -> str:
     """Add or remove a LATE JOINER on a register that is already submitted.
 
     Returns 'added' | 'removed' | 'noop'; raises ValueError with a sentence fit
@@ -395,7 +396,7 @@ def set_late_present(session_id: int, student_id: int, present: bool, day: str,
                 "  centre_id, marked_by, session_id, status, origin) "
                 "VALUES (?,?,?,?,?,?,?,?,'confirmed','late_added') "
                 "ON CONFLICT (student_id, session_id) DO NOTHING",
-                (int(student_id), day, 0.0, None, config.now_stamp(), centre_id,
+                (int(student_id), day, float(confidence), None, config.now_stamp(), centre_id,
                  marked_by, int(session_id)))
             added = cur.rowcount > 0
             if added:
@@ -922,6 +923,18 @@ def submit(session_id: int, verified: bool, score: float,
         if row["status"] != "draft":
             raise ValueError("This register has already been submitted")
 
+        # Only a face puts somebody on a register. Drafts ticked by hand before
+        # that rule (origin coach_added, no face score) are left off rather
+        # than confirmed - named back to the coach so they can scan them.
+        dropped = [r["name"] for r in conn.execute(
+            "DELETE FROM attendance a USING students s "
+            "WHERE a.session_id = ? AND a.status = 'draft' AND a.origin = 'coach_added' "
+            "  AND s.id = a.student_id RETURNING s.name",
+            (session_id,)).fetchall()]
+        if dropped:
+            log.info("Register %s: %d hand-ticked draft(s) left off at submit (no face scan)",
+                     session_id, len(dropped))
+
         promoted = conn.execute(
             "UPDATE attendance SET status = 'confirmed' "
             "WHERE session_id = ? AND status = 'draft'",
@@ -934,7 +947,8 @@ def submit(session_id: int, verified: bool, score: float,
             (config.now_stamp(), 1 if verified else 0, score, liveness_verdict,
              session_id),
         )
-    return {"promoted": promoted, "verified": verified, "score": score}
+    return {"promoted": promoted, "verified": verified, "score": score,
+            "not_scanned": dropped}
 
 
 # =============================================================================

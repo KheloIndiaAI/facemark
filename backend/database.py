@@ -1054,7 +1054,7 @@ def attendance_for_day(day: str, centre_id: Optional[int] = None) -> List[dict]:
             "SELECT DISTINCT ON (a.student_id) "
             "a.id, a.student_id, a.date, a.confidence, a.image_path, a.marked_at, "
             "a.latitude, a.longitude, a.accuracy_m, a.geo_status, a.distance_m, a.centre_id, "
-            "s.name, s.roll_no, s.photo_path, s.role, s.sport, c.name AS centre_name "
+            "a.origin, s.name, s.roll_no, s.photo_path, s.role, s.sport, c.name AS centre_name "
             "FROM attendance a JOIN students s ON s.id = a.student_id "
             "LEFT JOIN centres c ON c.id = a.centre_id "
             # Drafts belong to a register nobody has submitted yet, so they
@@ -1193,7 +1193,7 @@ def stats(centre_id: Optional[int] = None) -> dict:
             "SELECT COUNT(*) FROM attendance a WHERE a.status = 'confirmed'" + acs, cp
         ).fetchone()[0]
         recent = conn.execute(
-            "SELECT a.date, a.marked_at, a.confidence, s.name, s.roll_no "
+            "SELECT a.date, a.marked_at, a.confidence, a.origin, s.name, s.roll_no "
             "FROM attendance a JOIN students s ON s.id = a.student_id "
             "WHERE a.status = 'confirmed'"
             + (" AND a.centre_id = ?" if centre_id is not None else "") +

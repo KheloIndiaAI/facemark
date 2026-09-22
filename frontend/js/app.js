@@ -398,7 +398,7 @@ function initRouter() {
 
 function handleRoute() {
     // Register is the landing page: taking the register - an athlete marking
-    // themselves, or a coach adding one by hand - is the job the app exists
+    // themselves, or a coach scanning them - is the job the app exists
     // for and the one people open it to do. The dashboard reports on work
     // already done, which is a second question, not the first.
     // Role-aware default. An athlete has no business on the coach's register
@@ -903,7 +903,7 @@ async function renderDashboard() {
                         <div class="activity-sub">${Charts.esc(r.roll_no)}</div>
                     </div>
                     <div class="activity-meta">
-                        <div class="badge badge-green mb-1">${(r.confidence * 100).toFixed(0)}% Match</div>
+                        ${matchBadge(r)}
                         <div class="activity-time">${r.time}</div>
                     </div>
                 </div>
@@ -1256,7 +1256,9 @@ async function loadRecords(dateStr) {
                 <td class="font-mono" data-label="NSRS ID">${Charts.esc(r.roll_no)}</td>
                 <td data-label="Role">${r.role === 'coach' ? '<span class="badge badge-blue">Coach</span>'
                                          : '<span class="badge badge-green">Athlete</span>'}</td>
-                <td class="font-mono" data-label="Confidence">${(r.confidence * 100).toFixed(1)}%</td>
+                <td class="font-mono" data-label="Confidence">${r.confidence == null
+                    ? `<span class="text-muted" title="${Charts.esc(noScoreText(r.origin))}">-</span>`
+                    : (r.confidence * 100).toFixed(1) + '%'}</td>
                 <td data-label="Location">${geoCell(r)}</td>
                 <td class="text-muted" data-label="Centre">${Charts.esc(r.centre_name || '-')}</td>
                 <td class="text-muted" data-label="Time">${Charts.esc(r.time)}</td>
@@ -2006,12 +2008,14 @@ async function regLoad() {
             : e.origin === 'self_marked'
                 ? '<span class="badge badge-blue">Self-marked</span>'
                 : e.origin === 'coach_added'
-                    ? '<span class="badge badge-blue">Added by you</span>'
+                    ? '<span class="badge badge-amber" title="Ticked by hand before a face scan was required">No face scan</span>'
                     : `<span class="badge badge-green">Recognised${
                         e.confidence ? ' \u00b7 ' + Math.round(e.confidence * 100) + '%' : ''}</span>`;
-        // After submitting, a coach can still add LATE JOINERS (recorded as late
-        // and reported to the super admin by centre) or take a late addition
-        // off again. Who was on the register when it was signed stays as signed.
+        // Nobody is put ON the register from here: the button on an absent row
+        // explains how attendance is taken (a face scan) instead of marking.
+        // Taking someone OFF still works - a wrong recognition before signing,
+        // or a late addition after. Who was on the register when it was signed
+        // stays as signed.
         const locked = submitted && on && !lateOrigin;
         const label = on
             ? (submitted && lateOrigin ? 'Remove late' : 'Present')
@@ -2049,23 +2053,74 @@ function resetSessionState() {
 }
 
 async function regToggle(studentId, present, name) {
-    // On a submitted register this is a LATE change, visible to the super
-    // admin - say so before doing it.
+    // Marking present by hand is gone: attendance only comes from a face. The
+    // button is still there on an absent row, and pressing it explains how.
+    if (present) return showFaceOnlyNotice(name);
+    // On a submitted register taking someone off is a LATE change, visible to
+    // the super admin - say so before doing it.
     if (regSession && regSession.status === 'submitted') {
-        const who = name || 'this athlete';
-        if (!window.confirm(present
-                ? `Add ${who} as a late joiner?\n\nThe register is already submitted, so `
-                  + `this is recorded as late attendance and shown to the super admin.`
-                : `Remove ${who}'s late attendance?`)) return;
+        if (!window.confirm(`Remove ${name || 'this athlete'}'s late attendance?`)) return;
     }
     try {
         const fd = new FormData();
-        fd.append('present', present ? 'true' : 'false');
-        await api.postForm(`/api/sessions/${regSession.id}/roster/${studentId}`, fd, 'PATCH');
+        fd.append('present', 'false');
+        await api.postForm(`/api/sessions/${regSession.id}/roster/${studentId}`, fd, 'PATCH', true);
         await regLoad();
     } catch (err) {
         showToast('Could not change that', (err && err.message) || 'Try again.', 'error');
     }
+}
+
+/* Shown when somebody tries to mark attendance without a face scan. It
+   teaches the process rather than just refusing: the person pressing the
+   button is usually a coach nobody has shown it to. */
+function showFaceOnlyNotice(name, leftOff = false) {
+    const who = name ? Charts.esc(name) : 'An athlete';
+    const coach = !isSuperAdmin();
+    // leftOff: submit just dropped these people - they had been ticked by hand
+    // before the face-scan rule, so they were never scanned.
+    openModal(leftOff ? 'Not recorded - no face scan' : 'Attendance needs a face scan', `
+        <div class="notice notice-amber" style="margin:0 0 14px">
+            ${leftOff
+                ? `<strong>${who}</strong> ${name && name.includes(',') ? 'were' : 'was'} not recorded:
+                   ticked by hand without a face scan. If they are here, scan them on
+                   Take Attendance now - they are added as late.`
+                : `${who} can only be marked present by scanning their face.
+                   Nobody can be ticked present by hand.`}
+        </div>
+        <ol style="margin:0;padding-left:20px;line-height:1.6">
+            <li><strong>Scan the athlete.</strong> Open <strong>Take Attendance</strong> and
+                point the camera at them, or at the whole group. Everyone recognised is
+                added to today&rsquo;s register.<br>
+                <span class="text-sm text-muted">Or the athlete marks themselves from their own
+                phone - their face is checked the same way.</span></li>
+            <li><strong>Check the register</strong> on this page. Remove anyone who was
+                recognised by mistake.</li>
+            <li><strong>Submit the register</strong> and verify your own face.</li>
+            <li><strong>Late arrivals</strong> after submitting are scanned on Take Attendance
+                too, and added as late.</li>
+        </ol>
+        ${coach ? '' : `<div class="text-sm text-muted" style="margin-top:12px">Take Attendance
+            is on the coach's account - a super admin has no face on file to sign with.</div>`}`,
+        `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`
+        + (coach ? `<button class="btn btn-primary" onclick="closeModal(); window.location.hash = '#/take-attendance'">Open Take Attendance</button>` : ''));
+}
+
+/* How a row with no face score got there, for the places that used to show it
+   as "0% Match". Only rows from before the face-only rule can be like this. */
+function noScoreText(origin) {
+    return origin === 'coach_added' ? 'Ticked by hand - no face scan'
+         : (origin === 'late_added' || origin === 'late_approved') ? 'Added late - no face score kept'
+         : 'No face score';
+}
+
+function matchBadge(r) {
+    if (r.confidence == null) {
+        const late = r.origin === 'late_added' || r.origin === 'late_approved';
+        return `<div class="badge badge-amber mb-1" title="${Charts.esc(noScoreText(r.origin))}">${
+            late ? 'Added late' : 'No face scan'}</div>`;
+    }
+    return `<div class="badge badge-green mb-1">${(r.confidence * 100).toFixed(0)}% Match</div>`;
 }
 
 /* Submitting is what turns drafts into attendance, so it asks for the coach's
@@ -2134,6 +2189,11 @@ function regSubmit() {
                     showToast('Submitted, unverified',
                               'Your face could not be verified, so this has been '
                               + 'flagged for an administrator.', 'warning');
+                }
+                // Ticked by hand before the face-scan rule: not recorded.
+                // Said in a modal, not a toast - the coach has to act on it.
+                if (r.not_scanned && r.not_scanned.length) {
+                    showFaceOnlyNotice(r.not_scanned.join(', '), true);
                 }
                 await regLoad();
             } catch (err) {
