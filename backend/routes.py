@@ -311,17 +311,20 @@ def add_centre(
 
 @router.patch("/centres/{centre_id}")
 async def edit_centre(centre_id: int, request: Request, user: dict = Depends(auth.require_super_admin)):
-    form = dict(await request.form())
-    if "sports" in form and isinstance(form["sports"], str):
-        form["sports"] = [s.strip() for s in form["sports"].split(",") if s.strip()]
-    for k in ("latitude", "longitude"):
-        if form.get(k) not in (None, ""):
-            form[k] = float(form[k])
-    for k in ("capacity", "geofence_m"):
-        if form.get(k) not in (None, ""):
-            form[k] = int(form[k])
-    centres_mod.update_centre(centre_id, **form)
-    return {"ok": True}
+    """Change any of a centre's details. Fields not sent are left alone; a
+    field sent blank is cleared. See centres.update_centre for the rules."""
+    form = {k: v for k, v in (await request.form()).items() if isinstance(v, str)}
+    try:
+        saved = centres_mod.update_centre(centre_id, form)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except database.IntegrityError as e:
+        raise HTTPException(409, f"Another centre already uses the code "
+                                 f"'{form.get('code', '').strip().upper()}'") from e
+    if saved is None:
+        raise HTTPException(404, "Centre not found")
+    log.info("Centre %s edited by user %s: %s", centre_id, user["id"], sorted(form))
+    return {"ok": True, "centre": saved}
 
 
 @router.delete("/centres/{centre_id}")

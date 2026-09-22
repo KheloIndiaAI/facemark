@@ -95,7 +95,12 @@ async function openCentreDetail(id) {
 
     // openModal sets textContent (XSS-safe, since centre names are user input),
     // so the title must be plain text - the DEMO badge lives in the body instead.
+    // The footer's Edit button is below the rosters; this one is where the
+    // details are, so nobody scrolls past every athlete to find it.
     openModal(c.name, `
+        ${isSuperAdmin() ? `<div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+            <button class="btn btn-secondary" style="min-height:32px;padding:0 12px;font-size:13px"
+                onclick="openEditCentreModal(${c.id})">${Icon('edit', 14)} Edit details</button></div>` : ''}
         <div class="detail-grid">
             <div><span class="ck">Code</span><div>${E(c.code)}</div></div>
             <div><span class="ck">Type</span><div>${E(c.centre_type)}</div></div>
@@ -150,46 +155,105 @@ async function openCentreDetail(id) {
         </div>` : ''}
 
         `,
-        `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`);
+        `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`
+        + (isSuperAdmin() ? `<button class="btn btn-primary" onclick="openEditCentreModal(${c.id})">Edit details</button>` : ''));
+}
+
+/* Form field id -> API field. One list for Add and Edit, so a field added to
+   the form cannot reach one and silently miss the other. */
+const CENTRE_FIELDS = {
+    'c-code': 'code', 'c-name': 'name', 'c-type': 'centre_type',
+    'c-state': 'state', 'c-district': 'district', 'c-address': 'address',
+    'c-pincode': 'pincode', 'c-capacity': 'capacity', 'c-sports': 'sports',
+    'c-lat': 'latitude', 'c-lng': 'longitude', 'c-fence': 'geofence_m',
+    'c-incharge': 'incharge_name', 'c-phone': 'contact_phone',
+    'c-email': 'contact_email', 'c-established': 'established',
+};
+
+function centreFormHtml(c = {}) {
+    const v = (x) => x == null ? '' : E(String(x));
+    const input = (id, label, val, attrs = '') => `
+        <div class="form-group"><label class="form-label" for="${id}">${label}</label>
+            <input id="${id}" class="form-input" value="${v(val)}" ${attrs}></div>`;
+    return `
+        <div class="form-row">
+            ${input('c-code', 'Code *', c.code, 'placeholder="KIC-DL-014" autocapitalize="characters"')}
+            ${input('c-name', 'Name *', c.name, 'placeholder="Centre name"')}
+        </div>
+        <div class="form-row">
+            ${input('c-type', 'Type', c.centre_type || 'KIC', 'list="c-type-list" autocapitalize="characters"')}
+            ${input('c-established', 'Established', c.established, 'placeholder="2020"')}
+        </div>
+        <datalist id="c-type-list"><option value="KIC"><option value="KISCE"></datalist>
+        <div class="form-row">
+            ${input('c-state', 'State', c.state)}
+            ${input('c-district', 'District', c.district)}
+        </div>
+        ${input('c-address', 'Address', c.address)}
+        <div class="form-row">
+            ${input('c-pincode', 'Pincode', c.pincode, 'inputmode="numeric"')}
+            ${input('c-capacity', 'Capacity', c.capacity ?? 0, 'type="number" min="0"')}
+        </div>
+        ${input('c-sports', 'Sports (comma separated)', (c.sports || []).join(', '), 'placeholder="Athletics, Hockey, Boxing"')}
+        <div class="form-row">
+            ${input('c-lat', 'Latitude', c.latitude, 'type="number" step="any" placeholder="28.5921"')}
+            ${input('c-lng', 'Longitude', c.longitude, 'type="number" step="any" placeholder="77.1691"')}
+        </div>
+        <div class="form-row">
+            ${input('c-fence', 'Geo-fence radius (m)', c.geofence_m ?? 300, 'type="number" min="10" max="10000"')}
+            ${input('c-incharge', 'In-charge', c.incharge_name)}
+        </div>
+        <div class="form-row">
+            ${input('c-phone', 'Phone', c.contact_phone, 'type="tel"')}
+            ${input('c-email', 'Email', c.contact_email, 'type="email"')}
+        </div>
+        <button class="btn btn-secondary w-full" onclick="fillCentreFromDevice()">Use my current location</button>`;
 }
 
 function openAddCentreModal() {
-    openModal('Add centre', `
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">Code *</label>
-                <input id="c-code" class="form-input" placeholder="KIC-DL-014"></div>
-            <div class="form-group"><label class="form-label">Name *</label>
-                <input id="c-name" class="form-input" placeholder="Centre name"></div>
-        </div>
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">State</label><input id="c-state" class="form-input"></div>
-            <div class="form-group"><label class="form-label">District</label><input id="c-district" class="form-input"></div>
-        </div>
-        <div class="form-group"><label class="form-label">Address</label><input id="c-address" class="form-input"></div>
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">Pincode</label><input id="c-pincode" class="form-input"></div>
-            <div class="form-group"><label class="form-label">Capacity</label><input id="c-capacity" type="number" class="form-input" value="0"></div>
-        </div>
-        <div class="form-group"><label class="form-label">Sports (comma separated)</label>
-            <input id="c-sports" class="form-input" placeholder="Athletics, Hockey, Boxing"></div>
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">Latitude</label>
-                <input id="c-lat" type="number" step="any" class="form-input" placeholder="28.5921"></div>
-            <div class="form-group"><label class="form-label">Longitude</label>
-                <input id="c-lng" type="number" step="any" class="form-input" placeholder="77.1691"></div>
-        </div>
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">Geo-fence radius (m)</label>
-                <input id="c-fence" type="number" class="form-input" value="300"></div>
-            <div class="form-group"><label class="form-label">In-charge</label><input id="c-incharge" class="form-input"></div>
-        </div>
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">Phone</label><input id="c-phone" class="form-input"></div>
-            <div class="form-group"><label class="form-label">Email</label><input id="c-email" class="form-input"></div>
-        </div>
-        <button class="btn btn-secondary w-full" onclick="fillCentreFromDevice()">Use my current location</button>`,
+    openModal('Add centre', centreFormHtml(),
         `<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
          <button class="btn btn-primary" onclick="submitCentre()">Add centre</button>`);
+}
+
+async function openEditCentreModal(id) {
+    let c;
+    try { c = await api.get(`/api/centres/${id}`); } catch { return; }
+    openModal(`Edit ${c.name}`, centreFormHtml(c) + `
+        <div class="text-xs text-muted" style="margin-top:10px">
+            Leave a box empty to clear it. Changing the geo-fence or coordinates
+            applies to attendance taken from now on, not to records already saved.
+        </div>`,
+        `<button class="btn btn-secondary" onclick="openCentreDetail(${c.id})">Cancel</button>
+         <button class="btn btn-primary" id="c-save" data-old-code="${E(c.code)}"
+             onclick="saveCentreEdit(${c.id})">Save changes</button>`);
+}
+
+async function saveCentreEdit(id) {
+    const g = (fid) => document.getElementById(fid).value.trim();
+    const oldCode = document.getElementById('c-save').dataset.oldCode;
+    if (!g('c-code') || !g('c-name')) return showToast('Error', 'Code and name are required', 'error');
+    if (!!g('c-lat') !== !!g('c-lng')) {
+        return showToast('Error', 'Give both latitude and longitude, or clear both', 'error');
+    }
+    if (g('c-code').toUpperCase() !== oldCode && !window.confirm(
+        `Change the centre code from ${oldCode} to ${g('c-code').toUpperCase()}?\n\n`
+        + 'Anything outside the app that refers to the old code, such as a '
+        + 'spreadsheet or an import script, will need the new one.')) return;
+    // Every field is sent, blanks included: that is how a box emptied here
+    // clears the value on the server rather than being ignored.
+    const fd = new FormData();
+    Object.entries(CENTRE_FIELDS).forEach(([fid, key]) => fd.append(key, g(fid)));
+    const btn = document.getElementById('c-save');
+    if (btn) btn.disabled = true;
+    try {
+        const r = await api.postForm(`/api/centres/${id}`, fd, 'PATCH');
+        showToast('Centre updated', r.centre.name, 'success');
+        renderCentresPage();
+        openCentreDetail(id);
+    } catch {
+        if (btn) btn.disabled = false;     // reason already shown by the api layer
+    }
 }
 
 function fillCentreFromDevice() {
@@ -207,17 +271,10 @@ function fillCentreFromDevice() {
 async function submitCentre() {
     const g = id => document.getElementById(id).value.trim();
     if (!g('c-code') || !g('c-name')) return showToast('Error', 'Code and name are required', 'error');
+    // Blanks are left out so the server's defaults apply. A blank geo-fence
+    // used to be sent as "0" - a fence nobody could ever be inside.
     const fd = new FormData();
-    fd.append('code', g('c-code')); fd.append('name', g('c-name'));
-    ['state', 'district', 'address', 'pincode', 'sports', 'incharge_name', 'contact_phone', 'contact_email']
-        .forEach(k => {
-            const map = { incharge_name: 'c-incharge', contact_phone: 'c-phone', contact_email: 'c-email' };
-            const v = g(map[k] || 'c-' + k);
-            if (v) fd.append(k, v);
-        });
-    ['capacity', 'geofence_m'].forEach(k => fd.append(k, g(k === 'capacity' ? 'c-capacity' : 'c-fence') || '0'));
-    if (g('c-lat')) fd.append('latitude', g('c-lat'));
-    if (g('c-lng')) fd.append('longitude', g('c-lng'));
+    Object.entries(CENTRE_FIELDS).forEach(([fid, key]) => { if (g(fid)) fd.append(key, g(fid)); });
     try {
         await api.postForm('/api/centres', fd);
         closeModal();

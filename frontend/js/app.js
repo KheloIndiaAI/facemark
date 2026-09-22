@@ -1280,8 +1280,12 @@ function openModal(title, contentHTML, footerHTML) {
                ${footerHTML}
            </div>`
         : '';
-    document.getElementById('modal-body').innerHTML = `${contentHTML}${footer}`;
+    const body = document.getElementById('modal-body');
+    body.innerHTML = `${contentHTML}${footer}`;
     document.getElementById('modal-container').classList.remove('hidden');
+    // A modal opened from another (centre detail -> edit) kept the first one's
+    // scroll position and opened halfway down its own content.
+    for (let el = body; el && el.id !== 'modal-container'; el = el.parentElement) el.scrollTop = 0;
 }
 
 function closeModal() {

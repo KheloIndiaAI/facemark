@@ -118,25 +118,80 @@ def create_centre(
         )
 
 
-def update_centre(centre_id: int, **fields) -> None:
-    allowed = {
-        "code", "name", "centre_type", "state", "district", "address", "pincode",
-        "sports", "capacity", "latitude", "longitude", "geofence_m",
-        "incharge_name", "contact_phone", "contact_email", "established",
-    }
-    sets, params = [], []
-    for k, v in fields.items():
-        if k not in allowed or v is None:
-            continue
-        if k == "sports" and isinstance(v, list):
-            v = json.dumps(v)
-        sets.append(f"{k} = ?")
-        params.append(v)
-    if not sets:
-        return
-    params.append(centre_id)
-    with database.connect() as conn:
-        conn.execute(f"UPDATE centres SET {', '.join(sets)} WHERE id = ?", params)
+# Blank means "clear it" for these. Before, a field left empty in the form was
+# either skipped (so a wrong phone number could never be removed) or stored as
+# "" - and an empty latitude reached float() and came back as a 500.
+_CLEARABLE_TEXT = {"state", "district", "address", "pincode", "incharge_name",
+                   "contact_phone", "contact_email", "established"}
+GEOFENCE_MIN_M, GEOFENCE_MAX_M = 10, 10_000
+
+
+def update_centre(centre_id: int, fields: dict) -> Optional[dict]:
+    """Apply the fields a super admin sent, and return the centre as saved.
+
+    Only keys PRESENT in `fields` change; a present key with a blank value
+    clears it. Returns None when there is no such centre. Raises ValueError
+    with a sentence fit to show the admin when a value is not acceptable, and
+    lets database.IntegrityError through for a code another centre already has.
+    """
+    def text(k):
+        return str(fields[k]).strip()
+
+    sets: dict = {}
+    for k in ("code", "name", "centre_type"):
+        if k in fields:
+            if not text(k):
+                raise ValueError({"code": "Code", "name": "Name",
+                                  "centre_type": "Type"}[k] + " cannot be empty")
+            sets[k] = text(k).upper() if k != "name" else text(k)
+    for k in _CLEARABLE_TEXT & fields.keys():
+        sets[k] = text(k) or None
+    if "sports" in fields:
+        raw = fields["sports"]
+        items = raw if isinstance(raw, list) else str(raw).split(",")
+        seen, sports = set(), []
+        for s in (str(x).strip() for x in items):
+            if s and s.lower() not in seen:
+                seen.add(s.lower())
+                sports.append(s)
+        sets["sports"] = json.dumps(sports)
+    if "capacity" in fields:
+        cap = _i(text("capacity") or 0, -1)
+        if cap < 0:
+            raise ValueError("Capacity must be a whole number, 0 or more")
+        sets["capacity"] = cap
+    if "geofence_m" in fields:
+        fence = _i(text("geofence_m"), -1)
+        if not GEOFENCE_MIN_M <= fence <= GEOFENCE_MAX_M:
+            raise ValueError(f"Geo-fence must be between {GEOFENCE_MIN_M} and "
+                             f"{GEOFENCE_MAX_M:,} metres")
+        sets["geofence_m"] = fence
+    for k, limit, label in (("latitude", 90, "Latitude"), ("longitude", 180, "Longitude")):
+        if k in fields:
+            if not text(k):
+                sets[k] = None
+                continue
+            v = _f(text(k))
+            if v is None or not -limit <= v <= limit:
+                raise ValueError(f"{label} must be a number between -{limit} and {limit}")
+            sets[k] = v
+
+    current = get_centre(centre_id)
+    if not current:
+        return None
+    # One coordinate without the other is a fence around nowhere: the
+    # geo-check needs both, so a half-set pair would silently do nothing.
+    lat = sets.get("latitude", current.get("latitude"))
+    lng = sets.get("longitude", current.get("longitude"))
+    if (lat is None) != (lng is None):
+        raise ValueError("Give both latitude and longitude, or clear both")
+
+    if sets:
+        with database.connect() as conn:
+            conn.execute(
+                f"UPDATE centres SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?",
+                [*sets.values(), int(centre_id)])
+    return get_centre(centre_id)
 
 
 def delete_centre(centre_id: int) -> None:
