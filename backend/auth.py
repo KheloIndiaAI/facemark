@@ -166,15 +166,24 @@ def list_users(centre_id: Optional[int] = None) -> list:
 
 def set_user_active(user_id: int, active: bool) -> None:
     with database.connect() as conn:
-        conn.execute("UPDATE users SET is_active = ? WHERE id = ?", (int(active), user_id))
-        if not active:  # revoke live sessions immediately
-            conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+        if active:
+            # Enabling is an administrator vouching for the account, so it also
+            # lifts the failed-attempt lock. Before, disabling and re-enabling
+            # someone left them locked out for the rest of the lockout anyway.
+            conn.execute("UPDATE users SET is_active = 1, failed_attempts = 0, "
+                         "locked_until = NULL WHERE id = ?", (user_id,))
+        else:
+            conn.execute("UPDATE users SET is_active = 0 WHERE id = ?", (user_id,))
+            conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))  # revoke now
 
 
 def change_password(user_id: int, new_password: str) -> None:
+    # Clears the lock too: the lock message tells people to "ask an admin to
+    # reset it", and a new password that still could not sign in reset nothing.
     with database.connect() as conn:
         conn.execute(
-            "UPDATE users SET password_hash = ? WHERE id = ?",
+            "UPDATE users SET password_hash = ?, failed_attempts = 0, locked_until = NULL "
+            "WHERE id = ?",
             (hash_password(new_password), user_id),
         )
         conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
