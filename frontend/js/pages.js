@@ -95,18 +95,18 @@ async function openCentreDetail(id) {
 
     // openModal sets textContent (XSS-safe, since centre names are user input),
     // so the title must be plain text - the DEMO badge lives in the body instead.
+    // The footer's Edit button is below the rosters; this one is where the
+    // details are, so nobody scrolls past every athlete to find it.
     openModal(c.name, `
-        ${c.is_demo ? `<div class="notice notice-amber">
-            This is a <strong>placeholder record</strong>, not real Khelo India data. Replace it by
-            importing a CSV/JSON of real centres, or delete all demo rows, from the Centres page header.
-        </div>` : ''}
+        ${isSuperAdmin() ? `<div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+            <button class="btn btn-secondary" style="min-height:32px;padding:0 12px;font-size:13px"
+                onclick="openEditCentreModal(${c.id})">${Icon('edit', 14)} Edit details</button></div>` : ''}
         <div class="detail-grid">
             <div><span class="ck">Code</span><div>${E(c.code)}</div></div>
             <div><span class="ck">Type</span><div>${E(c.centre_type)}</div></div>
             <div><span class="ck">State</span><div>${E(c.state || '-')}</div></div>
             <div><span class="ck">District</span><div>${E(c.district || '-')}</div></div>
             <div><span class="ck">Pincode</span><div>${E(c.pincode || '-')}</div></div>
-            <div><span class="ck">Established</span><div>${E(c.established || '-')}</div></div>
             <div><span class="ck">Capacity</span><div>${c.capacity || '-'}</div></div>
             <div><span class="ck">Geo-fence</span><div>${c.geofence_m} m</div></div>
             <div style="grid-column:1/-1"><span class="ck">Address</span><div>${E(c.address || '-')}</div></div>
@@ -117,6 +117,17 @@ async function openCentreDetail(id) {
             <div><span class="ck">Email</span><div>${E(c.contact_email || '-')}</div></div>
             <div><span class="ck">Coordinates</span><div class="font-mono text-sm">${
                 c.latitude != null ? `${c.latitude}, ${c.longitude}` : 'not set'}</div></div>
+            ${c.coach_join_code ? `
+            <div style="grid-column:1/-1"><span class="ck">Coach registration code</span>
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                    <span class="font-mono" style="font-size:18px;letter-spacing:2px">${E(c.coach_join_code)}</span>
+                    <button class="btn btn-secondary" style="min-height:28px;padding:0 10px;font-size:12px"
+                        data-rotate-code data-centre-id="${c.id}">Issue a new code</button>
+                </div>
+                <div class="text-xs text-muted" style="margin-top:4px">
+                    Give this to a coach so they can register themselves. A super admin
+                    still approves them. Issuing a new code stops the old one working.
+                </div></div>` : ''}
         </div>
 
         <div class="stats-grid" style="margin-top:18px">
@@ -135,55 +146,114 @@ async function openCentreDetail(id) {
         <h3 style="margin:20px 0 8px">Coaches (${c.coach_count})</h3>
         ${roster(c.coaches, 'coaches')}
 
-        <h3 style="margin:20px 0 8px">Staff accounts</h3>
-        ${c.staff_accounts.length ? `<div class="detail-people">${c.staff_accounts.map(u => `
-            <div class="detail-person">
-                <div class="avatar avatar-sm">${E(u.full_name.charAt(0))}</div>
-                <div><div style="font-weight:600;font-size:13px">${E(u.full_name)}</div>
-                <div class="text-xs text-muted font-mono">${E(u.username)} &middot; ${E(u.role)}
-                ${u.is_active ? '' : ' &middot; disabled'}</div></div>
-            </div>`).join('')}</div>` : '<div class="text-sm text-muted">No login accounts linked to this centre.</div>'}
+        ${c.pending_count ? `<div class="notice notice-amber" style="margin-top:20px">
+            <strong>${c.pending_count} registration${c.pending_count === 1 ? '' : 's'}
+            waiting for approval</strong>
+            <div class="text-xs text-muted mt-1">Not counted above and not on any
+            roster until somebody approves them. They used to be listed here as
+            though they already trained at this centre.</div>
+        </div>` : ''}
+
         `,
-        `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`);
+        `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`
+        + (isSuperAdmin() ? `<button class="btn btn-primary" onclick="openEditCentreModal(${c.id})">Edit details</button>` : ''));
+}
+
+/* Form field id -> API field. One list for Add and Edit, so a field added to
+   the form cannot reach one and silently miss the other. */
+const CENTRE_FIELDS = {
+    'c-code': 'code', 'c-name': 'name', 'c-type': 'centre_type',
+    'c-state': 'state', 'c-district': 'district', 'c-address': 'address',
+    'c-pincode': 'pincode', 'c-capacity': 'capacity', 'c-sports': 'sports',
+    'c-lat': 'latitude', 'c-lng': 'longitude', 'c-fence': 'geofence_m',
+    'c-incharge': 'incharge_name', 'c-phone': 'contact_phone',
+    'c-email': 'contact_email', 'c-established': 'established',
+};
+
+function centreFormHtml(c = {}) {
+    const v = (x) => x == null ? '' : E(String(x));
+    const input = (id, label, val, attrs = '') => `
+        <div class="form-group"><label class="form-label" for="${id}">${label}</label>
+            <input id="${id}" class="form-input" value="${v(val)}" ${attrs}></div>`;
+    return `
+        <div class="form-row">
+            ${input('c-code', 'Code *', c.code, 'placeholder="KIC-DL-014" autocapitalize="characters"')}
+            ${input('c-name', 'Name *', c.name, 'placeholder="Centre name"')}
+        </div>
+        <div class="form-row">
+            ${input('c-type', 'Type', c.centre_type || 'KIC', 'list="c-type-list" autocapitalize="characters"')}
+            ${input('c-established', 'Established', c.established, 'placeholder="2020"')}
+        </div>
+        <datalist id="c-type-list"><option value="KIC"><option value="KISCE"></datalist>
+        <div class="form-row">
+            ${input('c-state', 'State', c.state)}
+            ${input('c-district', 'District', c.district)}
+        </div>
+        ${input('c-address', 'Address', c.address)}
+        <div class="form-row">
+            ${input('c-pincode', 'Pincode', c.pincode, 'inputmode="numeric"')}
+            ${input('c-capacity', 'Capacity', c.capacity ?? 0, 'type="number" min="0"')}
+        </div>
+        ${input('c-sports', 'Sports (comma separated)', (c.sports || []).join(', '), 'placeholder="Athletics, Hockey, Boxing"')}
+        <div class="form-row">
+            ${input('c-lat', 'Latitude', c.latitude, 'type="number" step="any" placeholder="28.5921"')}
+            ${input('c-lng', 'Longitude', c.longitude, 'type="number" step="any" placeholder="77.1691"')}
+        </div>
+        <div class="form-row">
+            ${input('c-fence', 'Geo-fence radius (m)', c.geofence_m ?? 300, 'type="number" min="10" max="10000"')}
+            ${input('c-incharge', 'In-charge', c.incharge_name)}
+        </div>
+        <div class="form-row">
+            ${input('c-phone', 'Phone', c.contact_phone, 'type="tel"')}
+            ${input('c-email', 'Email', c.contact_email, 'type="email"')}
+        </div>
+        <button class="btn btn-secondary w-full" onclick="fillCentreFromDevice()">Use my current location</button>`;
 }
 
 function openAddCentreModal() {
-    openModal('Add centre', `
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">Code *</label>
-                <input id="c-code" class="form-input" placeholder="KIC-DL-014"></div>
-            <div class="form-group"><label class="form-label">Name *</label>
-                <input id="c-name" class="form-input" placeholder="Centre name"></div>
-        </div>
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">State</label><input id="c-state" class="form-input"></div>
-            <div class="form-group"><label class="form-label">District</label><input id="c-district" class="form-input"></div>
-        </div>
-        <div class="form-group"><label class="form-label">Address</label><input id="c-address" class="form-input"></div>
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">Pincode</label><input id="c-pincode" class="form-input"></div>
-            <div class="form-group"><label class="form-label">Capacity</label><input id="c-capacity" type="number" class="form-input" value="0"></div>
-        </div>
-        <div class="form-group"><label class="form-label">Sports (comma separated)</label>
-            <input id="c-sports" class="form-input" placeholder="Athletics, Hockey, Boxing"></div>
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">Latitude</label>
-                <input id="c-lat" type="number" step="any" class="form-input" placeholder="28.5921"></div>
-            <div class="form-group"><label class="form-label">Longitude</label>
-                <input id="c-lng" type="number" step="any" class="form-input" placeholder="77.1691"></div>
-        </div>
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">Geo-fence radius (m)</label>
-                <input id="c-fence" type="number" class="form-input" value="300"></div>
-            <div class="form-group"><label class="form-label">In-charge</label><input id="c-incharge" class="form-input"></div>
-        </div>
-        <div class="form-row">
-            <div class="form-group"><label class="form-label">Phone</label><input id="c-phone" class="form-input"></div>
-            <div class="form-group"><label class="form-label">Email</label><input id="c-email" class="form-input"></div>
-        </div>
-        <button class="btn btn-secondary w-full" onclick="fillCentreFromDevice()">Use my current location</button>`,
+    openModal('Add centre', centreFormHtml(),
         `<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
          <button class="btn btn-primary" onclick="submitCentre()">Add centre</button>`);
+}
+
+async function openEditCentreModal(id) {
+    let c;
+    try { c = await api.get(`/api/centres/${id}`); } catch { return; }
+    openModal(`Edit ${c.name}`, centreFormHtml(c) + `
+        <div class="text-xs text-muted" style="margin-top:10px">
+            Leave a box empty to clear it. Changing the geo-fence or coordinates
+            applies to attendance taken from now on, not to records already saved.
+        </div>`,
+        `<button class="btn btn-secondary" onclick="openCentreDetail(${c.id})">Cancel</button>
+         <button class="btn btn-primary" id="c-save" data-old-code="${E(c.code)}"
+             onclick="saveCentreEdit(${c.id})">Save changes</button>`);
+}
+
+async function saveCentreEdit(id) {
+    const g = (fid) => document.getElementById(fid).value.trim();
+    const oldCode = document.getElementById('c-save').dataset.oldCode;
+    if (!g('c-code') || !g('c-name')) return showToast('Error', 'Code and name are required', 'error');
+    if (!!g('c-lat') !== !!g('c-lng')) {
+        return showToast('Error', 'Give both latitude and longitude, or clear both', 'error');
+    }
+    if (g('c-code').toUpperCase() !== oldCode && !window.confirm(
+        `Change the centre code from ${oldCode} to ${g('c-code').toUpperCase()}?\n\n`
+        + 'Anything outside the app that refers to the old code, such as a '
+        + 'spreadsheet or an import script, will need the new one.')) return;
+    // Every field is sent, blanks included: that is how a box emptied here
+    // clears the value on the server rather than being ignored.
+    const fd = new FormData();
+    Object.entries(CENTRE_FIELDS).forEach(([fid, key]) => fd.append(key, g(fid)));
+    const btn = document.getElementById('c-save');
+    if (btn) btn.disabled = true;
+    try {
+        const r = await api.postForm(`/api/centres/${id}`, fd, 'PATCH');
+        showToast('Centre updated', r.centre.name, 'success');
+        renderCentresPage();
+        openCentreDetail(id);
+    } catch {
+        if (btn) btn.disabled = false;     // reason already shown by the api layer
+    }
 }
 
 function fillCentreFromDevice() {
@@ -201,17 +271,10 @@ function fillCentreFromDevice() {
 async function submitCentre() {
     const g = id => document.getElementById(id).value.trim();
     if (!g('c-code') || !g('c-name')) return showToast('Error', 'Code and name are required', 'error');
+    // Blanks are left out so the server's defaults apply. A blank geo-fence
+    // used to be sent as "0" - a fence nobody could ever be inside.
     const fd = new FormData();
-    fd.append('code', g('c-code')); fd.append('name', g('c-name'));
-    ['state', 'district', 'address', 'pincode', 'sports', 'incharge_name', 'contact_phone', 'contact_email']
-        .forEach(k => {
-            const map = { incharge_name: 'c-incharge', contact_phone: 'c-phone', contact_email: 'c-email' };
-            const v = g(map[k] || 'c-' + k);
-            if (v) fd.append(k, v);
-        });
-    ['capacity', 'geofence_m'].forEach(k => fd.append(k, g(k === 'capacity' ? 'c-capacity' : 'c-fence') || '0'));
-    if (g('c-lat')) fd.append('latitude', g('c-lat'));
-    if (g('c-lng')) fd.append('longitude', g('c-lng'));
+    Object.entries(CENTRE_FIELDS).forEach(([fid, key]) => { if (g(fid)) fd.append(key, g(fid)); });
     try {
         await api.postForm('/api/centres', fd);
         closeModal();
@@ -259,29 +322,235 @@ async function purgeDemoCentres() {
    Users (super admin)
    ========================================================================== */
 
+/* The approval decision and the on/off switch are two different things and
+   were being shown as one. An account can be approved and disabled, or
+   rejected and still nominally "active" in the old column - which is how a
+   rejected registration could sit on this page looking fine. */
+function userStatusBadge(x) {
+    if (!x.is_active) return '<span class="badge badge-red">disabled</span>';
+    // Not "awaiting approval" until a verified face is on file - the account
+    // is created before any face is recorded, and the server refuses to
+    // approve it until one is (sessions.HAS_VERIFIED_FACE).
+    if (x.status === 'pending' && !(Number(x.templates) > 0)) {
+        return '<span class="badge badge-red">registration incomplete</span>';
+    }
+    if (x.status === 'pending') return '<span class="badge badge-amber">awaiting approval</span>';
+    if (x.status === 'rejected') return '<span class="badge badge-red">rejected</span>';
+    if (x.status && x.status !== 'active') return `<span class="badge badge-red">${E(x.status)}</span>`;
+    return '<span class="badge badge-green">active</span>';
+}
+
+async function reopenUser(id, name) {
+    if (!window.confirm(
+        `Send ${name} back to the approval queue?\n\nThey stay unable to sign in `
+        + `and their face stays out of the register until somebody decides again.`)) return;
+    try {
+        await api.postForm(`/api/approvals/${id}/reopen`, new FormData());
+        showToast('Back in the queue', `${name} is waiting for a decision again.`, 'success');
+        renderUsersPage();
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+async function decideUser(id, approve, name, role, templates) {
+    // The person row is created at the START of self-registration, before any
+    // face is ever recorded - so a pending account with 0 templates is not
+    // rare, it is what "the capture failed" or "they never got that far"
+    // looks like from here. Approving it anyway is sometimes the right call -
+    // a coach can register the face in person afterwards - but it must be a
+    // decision made with that fact in view, not a default nobody noticed.
+    const noFace = approve && !(Number(templates) > 0);
+    const faceWarning = noFace
+        ? `\n\n⚠ No face has been captured for this person yet. They will `
+          + `not be recognised in any capture until one is added.\n`
+        : '';
+    // Approving a COACH hands over a whole centre, and on this page it sits in
+    // a table of ordinary rows where the habit is to click through. Typing
+    // breaks that habit; an athlete gets a plain confirm.
+    if (approve && role === 'coach') {
+        const typed = window.prompt(
+            `Approving ${name} as a COACH.\n\nThey will see every athlete at their `
+            + `centre, take attendance, and approve athletes themselves.${faceWarning}\n`
+            + `Type APPROVE to confirm.`, '');
+        if ((typed || '').trim().toUpperCase() !== 'APPROVE') return;
+    } else if (approve) {
+        if (!window.confirm(`Approve ${name}? They will be able to sign in and be `
+                            + `recognised in a capture.${faceWarning}`)) return;
+    } else if (!window.confirm(`Reject ${name}? They stay unable to sign in.`)) {
+        return;
+    }
+    try {
+        const fd = new FormData();
+        fd.append('approve', approve ? 'true' : 'false');
+        await api.postForm(`/api/approvals/${id}`, fd);
+        showToast(approve ? 'Approved' : 'Rejected',
+                  approve ? `${name} can now sign in.` : `${name} was rejected.`,
+                  approve ? 'success' : 'info');
+        renderUsersPage();
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+async function deleteUserAccount(id, name, role) {
+    // Two steps for a coach or an admin, one for an athlete. Deleting an
+    // account now deletes the PERSON too - Directory entry, face, photos and
+    // attendance - because a login removed while its face stayed on file left
+    // that person matchable and blocked them from ever registering again.
+    if (role === 'coach' || role === 'super_admin') {
+        const typed = window.prompt(
+            `Delete the ${role === 'coach' ? 'coach' : 'super admin'} account "${name}".`
+            + `\n\nThis also removes them from the Directory, with their face, photos `
+            + `and attendance. This cannot be undone.\n\nType DELETE to confirm.`, '');
+        if ((typed || '').trim().toUpperCase() !== 'DELETE') return;
+    } else if (!window.confirm(
+            `Delete the account "${name}"?\n\nThis also removes them from the `
+            + `Directory, with their face, photos and attendance. This cannot be undone.`)) {
+        return;
+    }
+    try {
+        // quiet: this handler shows its own message, and two toasts for one
+        // failure is one too many.
+        await api.delete(`/api/users/${id}`, true);
+        showToast('Account deleted', `${name} was removed, along with their Directory entry.`, 'success');
+        renderUsersPage();
+    } catch (err) {
+        showToast('Could not delete', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+/* Forgotten-password requests, above the accounts table so they are seen: the
+   person asking is locked out until somebody acts. The new password is never
+   sent here - the admin approves a PERSON, having checked it is them. */
+function passwordResetCard(data) {
+    const list = (data && data.requests) || [];
+    if (!list.length) return '';
+    const btn = 'min-height:30px;padding:0 10px;font-size:12px';
+    return `
+      <div class="card" style="margin-bottom:16px;border-left:4px solid var(--amber, #d97706)">
+        <div class="card-body">
+          <h3 style="margin:0 0 4px">Password reset requests (${list.length})</h3>
+          <div class="text-xs text-muted" style="margin-bottom:10px">
+            Anyone can ask for a new password for any username. Before approving, contact the
+            person - by phone, or through their coach - and confirm they asked. Until you approve,
+            their old password still works.</div>
+          <div class="chart-scroll"><table class="data-table"><thead><tr>
+            <th>Name</th><th>Username</th><th>Role</th><th>Centre</th><th>Asked</th><th>Contact note</th><th></th>
+          </tr></thead><tbody>${list.map(x => `<tr>
+            <td class="cell-primary" data-label="Name">${E(x.full_name)}${x.is_active ? ''
+                : ' <span class="badge badge-red">disabled</span>'}</td>
+            <td class="font-mono text-sm" data-label="Username">${E(x.username)}</td>
+            <td data-label="Role">${E(roleShort(x.role))}</td>
+            <td data-label="Centre">${E(x.centre_name || '-')}</td>
+            <td class="text-sm text-muted" data-label="Asked">${E((x.requested_at || '').replace('T', ' '))}
+              ${Number(x.recent_requests) > 1 ? `<div class="text-xs" style="color:var(--red)">
+                ${Number(x.recent_requests)} requests this week</div>` : ''}</td>
+            <td class="text-sm" data-label="Contact">${E(x.note || '-')}
+              ${x.phone ? `<div class="text-xs text-muted">On file: ${E(x.phone)}</div>` : ''}</td>
+            <td style="white-space:nowrap" data-label="">
+              <button class="btn btn-primary" style="${btn}" data-decide-reset="approve"
+                data-request-id="${x.id}" data-user-role="${E(x.role)}"
+                data-username="${E(x.full_name || x.username)}">Approve</button>
+              <button class="btn btn-secondary" style="${btn}" data-decide-reset="reject"
+                data-request-id="${x.id}" data-user-role="${E(x.role)}"
+                data-username="${E(x.full_name || x.username)}">Reject</button>
+            </td></tr>`).join('')}</tbody></table></div>
+        </div>
+      </div>`;
+}
+
+async function decidePasswordReset(id, approve, name, role) {
+    if (approve) {
+        const warning = `Approve the new password for ${name}?\n\nOnly approve if you have `
+            + `confirmed with ${name} that they asked for it. Whoever made this request chose `
+            + `the password, so approving a request somebody else made hands them the account.`
+            + `\n\n${name} will be signed out everywhere and must sign in with the new password.`;
+        // A coach or super admin account reaches far more people than an
+        // athlete's, so it takes a typed confirmation - the same rule as
+        // approving a coach registration.
+        if (role === 'coach' || role === 'super_admin') {
+            const typed = window.prompt(`${warning}\n\nType APPROVE to confirm.`, '');
+            if ((typed || '').trim().toUpperCase() !== 'APPROVE') return;
+        } else if (!window.confirm(warning)) {
+            return;
+        }
+    } else if (!window.confirm(`Reject this request for ${name}? Their password stays as it is.`)) {
+        return;
+    }
+    try {
+        const fd = new FormData();
+        fd.append('approve', approve ? 'true' : 'false');
+        await api.postForm(`/api/password-resets/${id}`, fd, 'POST', true);
+        showToast(approve ? 'New password approved' : 'Request rejected',
+                  approve ? `${name} can now sign in with the password they chose.`
+                          : `${name}'s password was not changed.`,
+                  approve ? 'success' : 'info');
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+    renderUsersPage();
+}
+
 async function renderUsersPage() {
     const root = document.getElementById('users-root');
     root.innerHTML = '<div class="empty-state py-12">Loading accounts...</div>';
-    const [u, c] = await Promise.all([api.get('/api/users'), api.get('/api/centres')]);
+    let u, c, r;
+    try {
+        [u, c, r] = await Promise.all([
+            api.get('/api/users'), api.get('/api/centres'),
+            // Fetched directly, not through api.get: the accounts table should
+            // still render, without an error toast, if only this part fails.
+            fetch('/api/password-resets').then(x => (x.ok ? x.json() : null)).catch(() => null),
+        ]);
+    } catch (err) {
+        root.innerHTML = `<div class="empty-state py-12">Could not load accounts. `
+            + `${E((err && err.message) || 'The server did not answer.')}</div>`;
+        return;
+    }
     pageState.centres = c.centres;
-    root.innerHTML = `
+    root.innerHTML = passwordResetCard(r) + `
       <div class="card"><div class="card-body p-0">
         <table class="data-table"><thead><tr>
           <th>Name</th><th>Username</th><th>Role</th><th>Centre</th><th>Last sign-in</th><th>Status</th><th></th>
         </tr></thead><tbody>${u.users.map(x => `<tr>
           <td>${E(x.full_name)}</td>
           <td class="font-mono text-sm">${E(x.username)}</td>
-          <td><span class="badge ${x.role === 'super_admin' ? 'badge-blue' : 'badge-green'}">
-            ${x.role === 'super_admin' ? 'Super Admin' : 'Coach'}</span></td>
+          <td><span class="badge ${x.role === 'super_admin' ? 'badge-blue'
+              : x.role === 'athlete' ? 'badge-amber' : 'badge-green'}">
+            ${E(roleShort(x.role))}</span></td>
           <td>${E(x.centre_name || '-')}</td>
           <td class="text-sm text-muted">${E(x.last_login ? x.last_login.replace('T', ' ') : 'never')}</td>
-          <td>${x.is_active ? '<span class="badge badge-green">active</span>'
-                            : '<span class="badge badge-red">disabled</span>'}</td>
+          <td>${userStatusBadge(x)}
+            ${x.status === 'pending' && !(Number(x.templates) > 0) ? `
+            <div class="text-xs text-muted" style="margin-top:2px">
+              No verified face yet - cannot be approved</div>` : ''}
+          </td>
           <td style="white-space:nowrap">
+            ${x.status === 'pending' && Number(x.templates) > 0 ? `
+            <button class="btn btn-primary" style="min-height:30px;padding:0 10px;font-size:12px"
+              data-decide-user="approve" data-user-id="${x.id}" data-user-role="${E(x.role)}"
+              data-templates="${Number(x.templates) || 0}"
+              data-username="${E(x.full_name || x.username)}">Approve</button>` : ''}
+            ${x.status === 'pending' ? `
+            <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
+              data-decide-user="reject" data-user-id="${x.id}" data-user-role="${E(x.role)}"
+              data-username="${E(x.full_name || x.username)}">Reject</button>` : ''}
+            ${x.status === 'rejected' ? `
+            <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
+              data-reopen-user data-user-id="${x.id}" data-username="${E(x.full_name || x.username)}"
+              >Reconsider</button>` : ''}
             <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
               onclick="toggleUser(${x.id}, ${!x.is_active})">${x.is_active ? 'Disable' : 'Enable'}</button>
+            <!-- dataset, not an interpolated handler. E() is HTML escaping,
+                 and this was a JavaScript string context: the HTML parser
+                 turns &#39; back into a quote before the JS is parsed, so the
+                 escape was not merely weak, it was the wrong kind. -->
             <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px"
-              onclick="resetUserPassword(${x.id}, '${E(x.username)}')">Reset password</button>
+              data-reset-password data-user-id="${x.id}" data-username="${E(x.username)}">Reset password</button>
+            <button class="btn btn-secondary" style="min-height:30px;padding:0 10px;font-size:12px;color:#dc2626"
+              data-delete-user data-user-id="${x.id}" data-user-role="${E(x.role)}"
+              data-username="${E(x.full_name || x.username)}">Delete</button>
           </td></tr>`).join('')}</tbody></table>
       </div></div>`;
 }
@@ -337,7 +606,19 @@ async function submitUser() {
 async function toggleUser(id, active) {
     const fd = new FormData();
     fd.append('active', active ? 'true' : 'false');
-    await fetch(`/api/users/${id}/active`, { method: 'PATCH', body: fd });
+    try {
+        const res = await fetch(`/api/users/${id}/active`, { method: 'PATCH', body: fd });
+        if (!res.ok) {
+            let msg = 'The server refused that change';
+            try { msg = (await res.json()).detail || msg; } catch { /* not JSON */ }
+            showToast('Not changed', msg, 'error');
+            return;
+        }
+        showToast(active ? 'Account enabled' : 'Account disabled', '', 'success');
+    } catch {
+        showToast('Not changed', 'Could not reach the server', 'error');
+        return;
+    }
     renderUsersPage();
 }
 
@@ -350,4 +631,298 @@ async function resetUserPassword(id, username) {
         await api.postForm(`/api/users/${id}/password`, fd);
         showToast('Password reset', `${username} must sign in again`, 'success');
     } catch { /* surfaced */ }
+}
+
+// Delegated, so the users table can be re-rendered freely and no username is
+// ever interpolated into a handler string. See the note on the button.
+document.addEventListener('click', (e) => {
+    if (!e.target.closest) return;
+    const reset = e.target.closest('[data-reset-password]');
+    if (reset) {
+        e.preventDefault();
+        return resetUserPassword(reset.dataset.userId, reset.dataset.username || '');
+    }
+    const del = e.target.closest('[data-delete-user]');
+    if (del) {
+        e.preventDefault();
+        return deleteUserAccount(del.dataset.userId, del.dataset.username || '',
+                                 del.dataset.userRole || 'athlete');
+    }
+
+    const resetDecision = e.target.closest('[data-decide-reset]');
+    if (resetDecision) {
+        e.preventDefault();
+        return decidePasswordReset(resetDecision.dataset.requestId,
+                                   resetDecision.dataset.decideReset === 'approve',
+                                   resetDecision.dataset.username || '',
+                                   resetDecision.dataset.userRole || 'athlete');
+    }
+    const decide = e.target.closest('[data-decide-user]');
+    if (decide) {
+        e.preventDefault();
+        return decideUser(decide.dataset.userId,
+                          decide.dataset.decideUser === 'approve',
+                          decide.dataset.username || '',
+                          decide.dataset.userRole || 'athlete',
+                          decide.dataset.templates);
+    }
+    const reopen = e.target.closest('[data-reopen-user]');
+    if (reopen) {
+        e.preventDefault();
+        return reopenUser(reopen.dataset.userId, reopen.dataset.username || '');
+    }
+    const rotate = e.target.closest('[data-rotate-code]');
+    if (rotate) {
+        e.preventDefault();
+        return rotateJoinCode(rotate.dataset.centreId);
+    }
+});
+
+async function rotateJoinCode(centreId) {
+    if (!window.confirm(
+        'Issue a new coach registration code?\n\nThe current one stops working '
+        + 'straight away, so anyone part-way through registering will have to '
+        + 'start again with the new code.')) return;
+    try {
+        const r = await api.postForm(`/api/centres/${centreId}/join-code`, new FormData());
+        showToast('New code issued', r.coach_join_code, 'success');
+        openCentreDetail(centreId);
+    } catch (err) {
+        showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
+    }
+}
+
+
+/* ==========================================================================
+   Photo attendance, on the Dashboard - every group and single photo that
+   marked attendance (with its picture), the totals per centre, and every
+   attendance record over a date range. Nothing is cut to a top N.
+   ========================================================================== */
+
+const reportState = { data: null };
+
+const UPLOAD_KIND_LABEL = { group: 'Group photo', single: 'Single photo', self: 'Self-mark' };
+const pct = (x, digits = 0) => x == null ? '-' : (x * 100).toFixed(digits) + '%';
+
+async function initPhotoAttendance() {
+    if (!document.getElementById('rp-from')) return;
+    const from = document.getElementById('rp-from');
+    const to = document.getElementById('rp-to');
+    const today = localISODate();
+    const back = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return localISODate(d); };
+    to.value = today;
+    from.value = back(6);
+
+    // A coach's report is their own centre; the server pins it either way.
+    const centreSel = document.getElementById('rp-centre');
+    if (isSuperAdmin()) {
+        try {
+            const c = await api.get('/api/centres');
+            c.centres.forEach(x => centreSel.add(new Option(`${x.name} (${x.code})`, x.id)));
+        } catch { /* the report still works for all centres */ }
+    } else {
+        document.getElementById('rp-centre-wrap').style.display = 'none';
+    }
+
+    ['rp-from', 'rp-to', 'rp-centre'].forEach(id =>
+        document.getElementById(id).addEventListener('change', reportLoad));
+    document.querySelectorAll('[data-rp-range]').forEach(b => b.addEventListener('click', () => {
+        to.value = today;
+        from.value = back(parseInt(b.dataset.rpRange, 10));
+        reportLoad();
+    }));
+    document.getElementById('rp-export').addEventListener('click', () => {
+        window.location.href = '/api/reports/export?' + reportQuery();
+    });
+    await reportLoad();
+}
+
+function reportQuery() {
+    const p = new URLSearchParams();
+    p.set('date_from', document.getElementById('rp-from').value);
+    p.set('date_to', document.getElementById('rp-to').value);
+    const c = document.getElementById('rp-centre').value;
+    if (c) p.set('centre_id', c);
+    return p.toString();
+}
+
+async function reportLoad() {
+    const meta = document.getElementById('rp-meta');
+    if (meta) meta.textContent = 'Loading…';
+    let d;
+    try {
+        const res = await fetch('/api/reports?' + reportQuery());
+        d = await res.json();
+        if (!res.ok) throw new Error(d.detail || 'Could not load the report');
+    } catch (err) {
+        if (meta) meta.textContent = (err && err.message) || 'Could not load the report';
+        return;
+    }
+    reportState.data = d;
+    if (meta) meta.textContent = d.date_from === d.date_to
+        ? `Showing ${d.date_from}` : `Showing ${d.date_from} to ${d.date_to}`;
+
+    const t = d.totals;
+    const tile = (label, value, sub) => `<div class="stat-card">
+        <div class="stat-header">${E(label)}</div>
+        <div class="stat-value">${value}</div>
+        ${sub ? `<div class="text-xs text-muted" style="margin-top:4px">${sub}</div>` : ''}</div>`;
+    document.getElementById('rp-tiles').innerHTML =
+          tile('Attendance marked', t.confirmed,
+               t.drafts ? `+${t.drafts} waiting for the register to be submitted` : 'confirmed records')
+        + tile('Uploads', t.uploads,
+               `${t.group} group &middot; ${t.single} single &middot; ${t.self} self-mark`)
+        + tile('Faces recognised', t.faces_found ? `${t.faces_recognised} / ${t.faces_found}` : '-',
+               t.recognised_rate == null ? 'no uploads in this range'
+                   : `${pct(t.recognised_rate)} of the faces found in the photos`)
+        + tile('Centres marking', d.centres.filter(c => c.confirmed || c.drafts).length,
+               `of ${d.centres.length} listed`);
+
+    reportDrawCentres(d);
+    reportDrawUploads(d);
+    reportDrawRecords(d);
+}
+
+function reportDrawCentres(d) {
+    const host = document.getElementById('rp-centres');
+    if (!isSuperAdmin() && d.centres.length <= 1) { host.innerHTML = ''; return; }
+    const rows = d.centres.map(c => {
+        const rate = c.faces_found ? c.faces_recognised / c.faces_found : null;
+        return `<tr data-rp-centre="${c.centre_id}" style="cursor:pointer" title="Show only this centre">
+            <td class="cell-primary"><div style="font-weight:600">${E(c.centre_name)}</div>
+                <div class="text-xs text-muted font-mono">${E(c.centre_code)}${c.is_demo ? ' &middot; demo' : ''}</div></td>
+            <td data-label="Marked"><strong>${c.confirmed}</strong>${c.drafts ? ` <span class="text-xs text-muted">+${c.drafts} draft</span>` : ''}</td>
+            <td data-label="People">${c.people}</td>
+            <td data-label="Days">${c.days}</td>
+            <td data-label="Group">${c.uploads.group}</td>
+            <td data-label="Single">${c.uploads.single}</td>
+            <td data-label="Self-mark">${c.uploads.self}</td>
+            <td data-label="Recognised">${c.faces_found ? `${c.faces_recognised}/${c.faces_found} (${pct(rate)})` : '-'}</td>
+            <td data-label="No face scan">${c.no_face_scan ? `<span class="badge badge-amber">${c.no_face_scan}</span>` : '0'}</td>
+        </tr>`;
+    }).join('');
+    host.innerHTML = `<div class="card" style="margin-bottom:16px">
+        <div class="card-header"><h3 class="card-title">Attendance by centre</h3></div>
+        <div class="card-body p-0"><div class="data-table-wrapper"><table class="data-table">
+            <thead><tr><th>Centre</th><th>Marked</th><th>People</th><th>Days</th>
+                <th>Group</th><th>Single</th><th>Self-mark</th><th>Faces recognised</th><th>No face scan</th></tr></thead>
+            <tbody>${rows}</tbody></table></div></div></div>`;
+    host.querySelectorAll('[data-rp-centre]').forEach(tr => tr.addEventListener('click', () => {
+        const sel = document.getElementById('rp-centre');
+        if (!sel || !isSuperAdmin()) return;
+        sel.value = tr.dataset.rpCentre;
+        reportLoad();
+    }));
+}
+
+function reportMatchChips(matches) {
+    if (!matches.length) return '<span class="text-xs text-muted">Nobody recognised</span>';
+    return matches.map(m => `<span class="badge ${m.already ? 'badge-blue' : 'badge-green'}"
+            title="${m.already ? 'Already on the register - recognised again' : 'Marked present by this photo'}"
+            style="margin:0 4px 4px 0">${E(m.name || 'Unknown')} &middot; ${pct(m.confidence)}${m.already ? ' (already)' : ''}</span>`).join('');
+}
+
+/* One card per kind - group photos, single photos, athlete self-marks - so a
+   group photo and a single photo are never mixed in one list. */
+function reportDrawUploads(d) {
+    const host = document.getElementById('rp-uploads');
+    const section = (kind, title, empty) => {
+        const list = d.uploads.map((u, i) => [u, i]).filter(([u]) => u.kind === kind);
+        const faces = list.reduce((n, [u]) => n + (u.faces_detected || 0), 0);
+        const recog = list.reduce((n, [u]) => n + (u.recognised || 0), 0);
+        const marked = list.reduce((n, [u]) => n + (u.newly_marked || 0), 0);
+        const summary = list.length
+            ? `<span class="text-xs text-muted">${marked} marked present &middot; recognised ${recog} of ${faces} faces${
+                faces ? ` (${pct(recog / faces)})` : ''}</span>` : '';
+        return `<div class="card" style="margin-bottom:16px">
+            <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+                <h3 class="card-title">${E(title)} (${list.length})</h3>${summary}</div>
+            <div class="card-body">${list.length
+                ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px">${
+                    list.map(([u, i]) => reportUploadCard(u, i)).join('')}</div>`
+                : `<div class="empty-state">${E(empty)}</div>`}</div></div>`;
+    };
+    host.innerHTML =
+          section('group', 'Group photo attendance', 'No group photos in these days.')
+        + section('single', 'Single photo attendance', 'No single photos in these days.')
+        + (d.uploads.some(u => u.kind === 'self')
+            ? section('self', 'Athlete self-marks', '') : '')
+        + (d.uploads.length ? '' : `<div class="text-xs text-muted" style="margin:-8px 0 16px">
+            Photos are kept from 26 September 2026 on - scans before that were not saved,
+            but their attendance is in the history below.</div>`);
+    host.querySelectorAll('[data-rp-upload]').forEach(b => b.addEventListener('click', () =>
+        reportOpenUpload(d.uploads[parseInt(b.dataset.rpUpload, 10)])));
+}
+
+function reportUploadCard(u, i) {
+    const when = (u.created_at || '').replace('T', ' ').slice(0, 16);
+    const faces = u.faces_detected || 0;
+    const img = u.image_url
+        ? `<button type="button" data-rp-upload="${i}" style="display:block;width:100%;padding:0;border:0;background:var(--bg-subtle);cursor:zoom-in">
+               <img src="${u.image_url}" loading="lazy" alt="Attendance photo"
+                    style="display:block;width:100%;aspect-ratio:4/3;object-fit:cover"></button>`
+        : `<div style="aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;background:var(--bg-subtle)"
+                class="text-xs text-muted">Older capture - no photo</div>`;
+    return `<div class="card" style="overflow:hidden;margin:0">
+        ${img}
+        <div style="padding:12px">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px">
+                <span class="badge ${u.kind === 'group' ? 'badge-blue' : u.kind === 'self' ? 'badge-amber' : 'badge-green'}">${E(UPLOAD_KIND_LABEL[u.kind] || 'Older capture')}</span>
+                <span class="text-xs text-muted">${E(when)}</span>
+            </div>
+            <div class="text-sm" style="font-weight:600">${E(u.centre_name || '-')}</div>
+            <div class="text-xs text-muted" style="margin-bottom:6px">${E(u.uploaded_by_name || u.coach_name || '')}${u.register_status === 'submitted' ? '' : ' &middot; register not submitted yet'}</div>
+            <div class="text-sm" style="margin-bottom:6px">Recognised <strong>${u.recognised || 0} of ${faces}</strong> face${faces === 1 ? '' : 's'}${u.recognised_rate != null ? ` (${pct(u.recognised_rate)})` : ''}</div>
+            <div>${reportMatchChips(u.matches)}</div>
+        </div></div>`;
+}
+
+function reportOpenUpload(u) {
+    if (!u || !u.image_url) return;
+    const faces = u.faces_detected || 0;
+    openModal(`${UPLOAD_KIND_LABEL[u.kind] || 'Upload'} - ${u.centre_name || ''}`, `
+        <img src="${u.image_url}" alt="Attendance photo" style="display:block;width:100%;border-radius:8px;margin-bottom:12px">
+        <div class="text-sm" style="margin-bottom:4px">${E((u.created_at || '').replace('T', ' ').slice(0, 16))}
+            &middot; ${E(u.uploaded_by_name || u.coach_name || '')}</div>
+        <div class="text-sm" style="margin-bottom:8px">Recognised <strong>${u.recognised || 0} of ${faces}</strong>
+            face${faces === 1 ? '' : 's'} &middot; ${u.newly_marked} newly marked present</div>
+        <div>${reportMatchChips(u.matches)}</div>
+        <div class="text-xs text-muted" style="margin-top:10px">"Recognised" is faces matched to somebody on
+            the roster, out of faces found in the photo. It is not checked against who was really there.</div>`,
+        `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`);
+}
+
+function reportHow(r) {
+    if (r.capture_kind === 'group') return 'Group photo';
+    if (r.capture_kind === 'single') return 'Single photo';
+    return { recognised: 'Face scan', self_marked: 'Self-mark', coach_added: 'Ticked by hand',
+             late_added: 'Added late', late_approved: 'Added late' }[r.origin] || 'Earlier method';
+}
+
+function reportDrawRecords(d) {
+    const host = document.getElementById('rp-records');
+    const rows = d.records.map(r => `<tr>
+        <td data-label="Date" class="font-mono">${E(r.date)} <span class="text-muted">${E(r.time || '')}</span></td>
+        <td class="cell-primary"><div style="font-weight:600">${E(r.name)}</div>
+            <div class="text-xs text-muted font-mono">${E(r.roll_no || '')}</div></td>
+        <td data-label="Centre" class="text-muted">${E(r.centre_name || '-')}</td>
+        <td data-label="How">${E(reportHow(r))}</td>
+        <td data-label="Match" class="font-mono">${r.confidence == null
+            ? '<span class="badge badge-amber">No face scan</span>' : pct(r.confidence, 1)}</td>
+        <td data-label="Status">${r.status === 'confirmed' ? '<span class="badge badge-green">Confirmed</span>'
+                                                           : '<span class="badge badge-blue">Not submitted</span>'}</td>
+        <td data-label="Photo">${r.image_url
+            ? `<img src="${r.image_url}" loading="lazy" alt="" data-rp-photo="${E(r.image_url)}"
+                    style="width:44px;height:44px;border-radius:6px;object-fit:cover;cursor:zoom-in">` : '-'}</td>
+    </tr>`).join('');
+    host.innerHTML = `<div class="card" style="margin-bottom:16px">
+        <div class="card-header"><h3 class="card-title">Attendance history (${d.records.length})</h3></div>
+        <div class="card-body p-0">${d.records.length
+            ? `<div class="data-table-wrapper"><table class="data-table">
+                <thead><tr><th>Date</th><th>Name</th><th>Centre</th><th>How</th><th>Match</th><th>Status</th><th>Photo</th></tr></thead>
+                <tbody>${rows}</tbody></table></div>`
+            : '<div class="empty-state py-12">No attendance in this range.</div>'}</div></div>`;
+    host.querySelectorAll('[data-rp-photo]').forEach(img => img.addEventListener('click', () =>
+        openModal('Attendance photo', `<img src="${img.dataset.rpPhoto}" alt="" style="display:block;width:100%;border-radius:8px">`,
+                  `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`)));
 }

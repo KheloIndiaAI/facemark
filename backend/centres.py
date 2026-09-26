@@ -10,11 +10,15 @@ placeholders with `delete_demo_centres()`.
 from __future__ import annotations
 
 import json
+import logging
 import math
+import secrets
 from datetime import datetime
 from typing import List, Optional
 
-from . import database
+from . import config, database
+
+log = logging.getLogger(__name__)
 
 EARTH_RADIUS_M = 6_371_000.0
 
@@ -30,12 +34,51 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 def _row(r) -> dict:
     d = dict(r)
+    # Stripped by default, restored deliberately. search_centres does SELECT *,
+    # so without this the code would ride out on every centre listing - and one
+    # of those listings is the unauthenticated one the signup form reads.
+    d.pop("coach_join_code", None)
     try:
         d["sports"] = json.loads(d["sports"]) if d.get("sports") else []
     except (json.JSONDecodeError, TypeError):
         d["sports"] = []
     d["is_demo"] = bool(d.get("is_demo"))
     return d
+
+
+# --- coach join codes --------------------------------------------------------
+
+def join_code(centre_id: int) -> Optional[str]:
+    """This centre's coach join code. Super-admin eyes only - callers enforce."""
+    with database.connect() as conn:
+        row = conn.execute("SELECT coach_join_code FROM centres WHERE id = ?",
+                           (int(centre_id),)).fetchone()
+    return row["coach_join_code"] if row else None
+
+
+def rotate_join_code(centre_id: int) -> str:
+    """Issue a fresh code, retiring the old one immediately."""
+    code = database.new_join_code()
+    with database.connect() as conn:
+        n = conn.execute("UPDATE centres SET coach_join_code = ? WHERE id = ?",
+                         (code, int(centre_id))).rowcount
+    if not n:
+        raise ValueError("No such centre")
+    return code
+
+
+def check_join_code(centre_id: int, supplied: str) -> bool:
+    """Whether `supplied` is this centre's code.
+
+    Case and spacing are forgiven because this is read off a screen or a piece
+    of paper and typed by hand. compare_digest rather than ==, so a wrong code
+    cannot be narrowed down by timing.
+    """
+    have = join_code(centre_id)
+    if not have:
+        return False
+    return secrets.compare_digest(
+        have.strip().upper(), (supplied or "").strip().upper().replace(" ", ""))
 
 
 # --- CRUD --------------------------------------------------------------------
@@ -59,41 +102,96 @@ def create_centre(
     established: Optional[str] = None,
     is_demo: bool = False,
 ) -> int:
-    now = datetime.now().isoformat(timespec="seconds")
+    now = config.now_stamp()
     with database.connect() as conn:
-        cur = conn.execute(
+        return conn.insert(
             "INSERT INTO centres (code, name, centre_type, state, district, address, pincode, "
             "sports, capacity, latitude, longitude, geofence_m, incharge_name, contact_phone, "
-            "contact_email, established, is_demo, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "contact_email, established, is_demo, coach_join_code, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 code.strip().upper(), name.strip(), centre_type, state, district, address,
                 pincode, json.dumps(sports or []), capacity, latitude, longitude, geofence_m,
-                incharge_name, contact_phone, contact_email, established, int(is_demo), now,
+                incharge_name, contact_phone, contact_email, established, int(is_demo),
+                database.new_join_code(), now,
             ),
         )
-        return int(cur.lastrowid)
 
 
-def update_centre(centre_id: int, **fields) -> None:
-    allowed = {
-        "code", "name", "centre_type", "state", "district", "address", "pincode",
-        "sports", "capacity", "latitude", "longitude", "geofence_m",
-        "incharge_name", "contact_phone", "contact_email", "established",
-    }
-    sets, params = [], []
-    for k, v in fields.items():
-        if k not in allowed or v is None:
-            continue
-        if k == "sports" and isinstance(v, list):
-            v = json.dumps(v)
-        sets.append(f"{k} = ?")
-        params.append(v)
-    if not sets:
-        return
-    params.append(centre_id)
-    with database.connect() as conn:
-        conn.execute(f"UPDATE centres SET {', '.join(sets)} WHERE id = ?", params)
+# Blank means "clear it" for these. Before, a field left empty in the form was
+# either skipped (so a wrong phone number could never be removed) or stored as
+# "" - and an empty latitude reached float() and came back as a 500.
+_CLEARABLE_TEXT = {"state", "district", "address", "pincode", "incharge_name",
+                   "contact_phone", "contact_email", "established"}
+GEOFENCE_MIN_M, GEOFENCE_MAX_M = 10, 10_000
+
+
+def update_centre(centre_id: int, fields: dict) -> Optional[dict]:
+    """Apply the fields a super admin sent, and return the centre as saved.
+
+    Only keys PRESENT in `fields` change; a present key with a blank value
+    clears it. Returns None when there is no such centre. Raises ValueError
+    with a sentence fit to show the admin when a value is not acceptable, and
+    lets database.IntegrityError through for a code another centre already has.
+    """
+    def text(k):
+        return str(fields[k]).strip()
+
+    sets: dict = {}
+    for k in ("code", "name", "centre_type"):
+        if k in fields:
+            if not text(k):
+                raise ValueError({"code": "Code", "name": "Name",
+                                  "centre_type": "Type"}[k] + " cannot be empty")
+            sets[k] = text(k).upper() if k != "name" else text(k)
+    for k in _CLEARABLE_TEXT & fields.keys():
+        sets[k] = text(k) or None
+    if "sports" in fields:
+        raw = fields["sports"]
+        items = raw if isinstance(raw, list) else str(raw).split(",")
+        seen, sports = set(), []
+        for s in (str(x).strip() for x in items):
+            if s and s.lower() not in seen:
+                seen.add(s.lower())
+                sports.append(s)
+        sets["sports"] = json.dumps(sports)
+    if "capacity" in fields:
+        cap = _i(text("capacity") or 0, -1)
+        if cap < 0:
+            raise ValueError("Capacity must be a whole number, 0 or more")
+        sets["capacity"] = cap
+    if "geofence_m" in fields:
+        fence = _i(text("geofence_m"), -1)
+        if not GEOFENCE_MIN_M <= fence <= GEOFENCE_MAX_M:
+            raise ValueError(f"Geo-fence must be between {GEOFENCE_MIN_M} and "
+                             f"{GEOFENCE_MAX_M:,} metres")
+        sets["geofence_m"] = fence
+    for k, limit, label in (("latitude", 90, "Latitude"), ("longitude", 180, "Longitude")):
+        if k in fields:
+            if not text(k):
+                sets[k] = None
+                continue
+            v = _f(text(k))
+            if v is None or not -limit <= v <= limit:
+                raise ValueError(f"{label} must be a number between -{limit} and {limit}")
+            sets[k] = v
+
+    current = get_centre(centre_id)
+    if not current:
+        return None
+    # One coordinate without the other is a fence around nowhere: the
+    # geo-check needs both, so a half-set pair would silently do nothing.
+    lat = sets.get("latitude", current.get("latitude"))
+    lng = sets.get("longitude", current.get("longitude"))
+    if (lat is None) != (lng is None):
+        raise ValueError("Give both latitude and longitude, or clear both")
+
+    if sets:
+        with database.connect() as conn:
+            conn.execute(
+                f"UPDATE centres SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?",
+                [*sets.values(), int(centre_id)])
+    return get_centre(centre_id)
 
 
 def delete_centre(centre_id: int) -> None:
@@ -123,15 +221,19 @@ def search_centres(
     q = (query or "").strip()
     if q:
         sql += (
-            " AND (code LIKE ? OR name LIKE ? OR state LIKE ? OR district LIKE ?"
-            " OR address LIKE ? OR sports LIKE ? OR incharge_name LIKE ?)"
+            # ILIKE, not LIKE. SQLite's LIKE is case-insensitive for ASCII
+            # and PostgreSQL's is not, so after the migration searching "pune"
+            # returned nothing while "Pune" worked - a search box that silently
+            # depends on capitalisation reads as "we have no such centre".
+            " AND (code ILIKE ? OR name ILIKE ? OR state ILIKE ? OR district ILIKE ?"
+            " OR address ILIKE ? OR sports ILIKE ? OR incharge_name ILIKE ?)"
         )
         params += [f"%{q}%"] * 7
     if state:
         sql += " AND state = ?"
         params.append(state)
     if sport:
-        sql += " AND sports LIKE ?"
+        sql += " AND sports ILIKE ?"
         params.append(f"%{sport}%")
     sql += " ORDER BY name LIMIT ?"
     params.append(limit)
@@ -139,9 +241,15 @@ def search_centres(
         rows = [_row(r) for r in conn.execute(sql, params).fetchall()]
         # Enrolled headcount travels with each centre so the UI can default to
         # the one actually in use rather than guessing from a demo flag.
-        counts = dict(conn.execute(
+        # Built column-by-column rather than dict(rows). A row is now a mapping,
+        # so dict() over a list of them would consume each row's column NAMES as
+        # the key/value pair and silently produce {"centre_id": "count"}.
+        # Enrolled people, not applications. This number is the one on the
+        # centre card, and it counted anybody who had started a registration.
+        counts = {r[0]: r[1] for r in conn.execute(
             "SELECT centre_id, COUNT(*) FROM students "
-            "WHERE centre_id IS NOT NULL GROUP BY centre_id").fetchall())
+            "WHERE centre_id IS NOT NULL AND status = 'active' "
+            "GROUP BY centre_id").fetchall()}
     for r in rows:
         r["people_count"] = counts.get(r["id"], 0)
     return rows
@@ -153,30 +261,44 @@ def centre_detail(centre_id: int) -> Optional[dict]:
     if not centre:
         return None
     with database.connect() as conn:
+        # ACTIVE ONLY. This page showed three unapproved coach applications
+        # (PEND-0C2F4634, PEND-1707B81B, PEND-A33A62F0) as the centre's
+        # coaching staff, indistinguishable from real people, and counted them
+        # in "Coaches (3)". Anybody who begins a registration and abandons it
+        # appeared on a centre's roster until the retention sweep removed them
+        # thirty days later.
         centre["athletes"] = [dict(r) for r in conn.execute(
             "SELECT id, name, roll_no, gender, sport, photo_path, role "
-            "FROM students WHERE centre_id = ? AND role = 'athlete' ORDER BY name",
+            "FROM students WHERE centre_id = ? AND role = 'athlete' "
+            "  AND status = 'active' ORDER BY name",
             (centre_id,),
         ).fetchall()]
         centre["coaches"] = [dict(r) for r in conn.execute(
             "SELECT id, name, roll_no, gender, sport, photo_path, role "
-            "FROM students WHERE centre_id = ? AND role = 'coach' ORDER BY name",
+            "FROM students WHERE centre_id = ? AND role = 'coach' "
+            "  AND status = 'active' ORDER BY name",
             (centre_id,),
         ).fetchall()]
-        centre["staff_accounts"] = [dict(r) for r in conn.execute(
-            "SELECT id, username, full_name, role, is_active, last_login "
-            "FROM users WHERE centre_id = ? ORDER BY role, full_name",
-            (centre_id,),
-        ).fetchall()]
+        # Surfaced as a NUMBER rather than hidden entirely: an administrator
+        # looking at a centre should know applications are waiting, and where.
+        centre["pending_count"] = conn.execute(
+            "SELECT COUNT(*) FROM students s WHERE s.centre_id = ? "
+            "  AND s.status = 'pending' "
+            # Only finished registrations - see sessions.HAS_VERIFIED_FACE.
+            "  AND EXISTS (SELECT 1 FROM templates t WHERE t.student_id = s.id)",
+            (centre_id,)
+        ).fetchone()[0]
         centre["attendance_days"] = conn.execute(
-            "SELECT COUNT(DISTINCT date) FROM attendance WHERE centre_id = ?", (centre_id,)
+            "SELECT COUNT(DISTINCT date) FROM attendance "
+            "WHERE centre_id = ? AND status = 'confirmed'", (centre_id,)
         ).fetchone()[0]
         centre["attendance_records"] = conn.execute(
-            "SELECT COUNT(*) FROM attendance WHERE centre_id = ?", (centre_id,)
+            "SELECT COUNT(*) FROM attendance "
+            "WHERE centre_id = ? AND status = 'confirmed'", (centre_id,)
         ).fetchone()[0]
         centre["recent_attendance"] = [dict(r) for r in conn.execute(
             "SELECT a.date, COUNT(*) AS present FROM attendance a "
-            "WHERE a.centre_id = ? GROUP BY a.date ORDER BY a.date DESC LIMIT 14",
+            "WHERE a.centre_id = ? AND a.status = 'confirmed' GROUP BY a.date ORDER BY a.date DESC LIMIT 14",
             (centre_id,),
         ).fetchall()]
     centre["athlete_count"] = len(centre["athletes"])
@@ -283,27 +405,62 @@ def delete_demo_centres() -> int:
         return conn.execute("DELETE FROM centres WHERE is_demo = 1").rowcount
 
 
-def import_centres(rows: List[dict]) -> int:
-    """Bulk-load real centres. Each row needs at least `code` and `name`."""
+def import_centres(rows: List[dict]) -> dict:
+    """Bulk-load real centres. Each row needs at least `code` and `name`.
+
+    ONE BAD ROW USED TO KILL THE WHOLE IMPORT, halfway through. `int(...)` on a
+    capacity of "n/a", a row that is a list rather than an object, or a code
+    already in the table all raised, the request became a 500, and the rows
+    before the bad one were already committed - so the operator saw a server
+    error, no idea how far it got, and a re-run then failed on the duplicates
+    it had itself created.
+
+    Each row is now judged on its own and the failures are REPORTED. An import
+    of two hundred centres with three typos should load a hundred and
+    ninety-seven and name the three.
+    """
     n = 0
-    for r in rows:
+    skipped: List[dict] = []
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            skipped.append({"row": i + 1, "reason": "not a record"})
+            continue
         if not r.get("code") or not r.get("name"):
+            skipped.append({"row": i + 1, "code": r.get("code"),
+                            "reason": "code and name are both required"})
             continue
         sports = r.get("sports")
         if isinstance(sports, str):
             sports = [s.strip() for s in sports.split(",") if s.strip()]
-        create_centre(
-            code=r["code"], name=r["name"], centre_type=r.get("centre_type", "KIC"),
-            state=r.get("state"), district=r.get("district"), address=r.get("address"),
-            pincode=r.get("pincode"), sports=sports, capacity=int(r.get("capacity") or 0),
-            latitude=_f(r.get("latitude")), longitude=_f(r.get("longitude")),
-            geofence_m=int(r.get("geofence_m") or 300),
-            incharge_name=r.get("incharge_name"), contact_phone=r.get("contact_phone"),
-            contact_email=r.get("contact_email"), established=r.get("established"),
-            is_demo=False,
-        )
+        try:
+            create_centre(
+                code=r["code"], name=r["name"], centre_type=r.get("centre_type", "KIC"),
+                state=r.get("state"), district=r.get("district"), address=r.get("address"),
+                pincode=r.get("pincode"), sports=sports,
+                capacity=_i(r.get("capacity"), 0),
+                latitude=_f(r.get("latitude")), longitude=_f(r.get("longitude")),
+                geofence_m=_i(r.get("geofence_m"), 300),
+                incharge_name=r.get("incharge_name"), contact_phone=r.get("contact_phone"),
+                contact_email=r.get("contact_email"), established=r.get("established"),
+                is_demo=False,
+            )
+        except Exception as e:      # noqa: BLE001 - one row must not sink the file
+            log.warning("Centre import skipped row %d (%s): %s",
+                        i + 1, r.get("code"), e)
+            skipped.append({"row": i + 1, "code": r.get("code"),
+                            "reason": str(e)[:120]})
+            continue
         n += 1
-    return n
+    return {"imported": n, "skipped": skipped}
+
+
+def _i(v, default: int) -> int:
+    """int() that treats junk as absent. "n/a" in a capacity column is a typo,
+    not a reason to abandon two hundred good rows."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
 
 
 def _f(v):
@@ -311,3 +468,4 @@ def _f(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+
