@@ -691,3 +691,217 @@ async function rotateJoinCode(centreId) {
         showToast('Could not do that', (err && err.message) || 'Try again.', 'error');
     }
 }
+
+
+/* ==========================================================================
+   Reports - every upload (with its photo) and every attendance record over a
+   date range, and the totals per centre. Nothing is cut to a top N.
+   ========================================================================== */
+
+const reportState = { data: null };
+
+const UPLOAD_KIND_LABEL = { group: 'Group photo', single: 'Single photo', self: 'Self-mark' };
+const pct = (x, digits = 0) => x == null ? '-' : (x * 100).toFixed(digits) + '%';
+
+async function initReportsPage() {
+    const from = document.getElementById('rp-from');
+    const to = document.getElementById('rp-to');
+    const today = localISODate();
+    const back = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return localISODate(d); };
+    to.value = today;
+    from.value = back(6);
+
+    // A coach's report is their own centre; the server pins it either way.
+    const centreSel = document.getElementById('rp-centre');
+    if (isSuperAdmin()) {
+        try {
+            const c = await api.get('/api/centres');
+            c.centres.forEach(x => centreSel.add(new Option(`${x.name} (${x.code})`, x.id)));
+        } catch { /* the report still works for all centres */ }
+    } else {
+        document.getElementById('rp-centre-wrap').style.display = 'none';
+    }
+
+    ['rp-from', 'rp-to', 'rp-centre', 'rp-kind'].forEach(id =>
+        document.getElementById(id).addEventListener('change', reportLoad));
+    document.querySelectorAll('[data-rp-range]').forEach(b => b.addEventListener('click', () => {
+        to.value = today;
+        from.value = back(parseInt(b.dataset.rpRange, 10));
+        reportLoad();
+    }));
+    document.getElementById('rp-export').addEventListener('click', () => {
+        window.location.href = '/api/reports/export?' + reportQuery(false);
+    });
+    await reportLoad();
+}
+
+function reportQuery(withKind = true) {
+    const p = new URLSearchParams();
+    p.set('date_from', document.getElementById('rp-from').value);
+    p.set('date_to', document.getElementById('rp-to').value);
+    const c = document.getElementById('rp-centre').value;
+    if (c) p.set('centre_id', c);
+    const k = document.getElementById('rp-kind').value;
+    if (withKind && k) p.set('kind', k);
+    return p.toString();
+}
+
+async function reportLoad() {
+    const meta = document.getElementById('rp-meta');
+    if (meta) meta.textContent = 'Loading…';
+    let d;
+    try {
+        const res = await fetch('/api/reports?' + reportQuery());
+        d = await res.json();
+        if (!res.ok) throw new Error(d.detail || 'Could not load the report');
+    } catch (err) {
+        if (meta) meta.textContent = (err && err.message) || 'Could not load the report';
+        return;
+    }
+    reportState.data = d;
+    if (meta) meta.textContent = d.date_from === d.date_to
+        ? `Showing ${d.date_from}` : `Showing ${d.date_from} to ${d.date_to}`;
+
+    const t = d.totals;
+    const tile = (label, value, sub) => `<div class="stat-card">
+        <div class="stat-header">${E(label)}</div>
+        <div class="stat-value">${value}</div>
+        ${sub ? `<div class="text-xs text-muted" style="margin-top:4px">${sub}</div>` : ''}</div>`;
+    document.getElementById('rp-tiles').innerHTML =
+          tile('Attendance marked', t.confirmed,
+               t.drafts ? `+${t.drafts} waiting for the register to be submitted` : 'confirmed records')
+        + tile('Uploads', t.uploads,
+               `${t.group} group &middot; ${t.single} single &middot; ${t.self} self-mark`)
+        + tile('Faces recognised', t.faces_found ? `${t.faces_recognised} / ${t.faces_found}` : '-',
+               t.recognised_rate == null ? 'no uploads in this range'
+                   : `${pct(t.recognised_rate)} of the faces found in the photos`)
+        + tile('Centres marking', d.centres.filter(c => c.confirmed || c.drafts).length,
+               `of ${d.centres.length} listed`);
+
+    reportDrawCentres(d);
+    reportDrawUploads(d);
+    reportDrawRecords(d);
+}
+
+function reportDrawCentres(d) {
+    const host = document.getElementById('rp-centres');
+    if (!isSuperAdmin() && d.centres.length <= 1) { host.innerHTML = ''; return; }
+    const rows = d.centres.map(c => {
+        const rate = c.faces_found ? c.faces_recognised / c.faces_found : null;
+        return `<tr data-rp-centre="${c.centre_id}" style="cursor:pointer" title="Show only this centre">
+            <td class="cell-primary"><div style="font-weight:600">${E(c.centre_name)}</div>
+                <div class="text-xs text-muted font-mono">${E(c.centre_code)}${c.is_demo ? ' &middot; demo' : ''}</div></td>
+            <td data-label="Marked"><strong>${c.confirmed}</strong>${c.drafts ? ` <span class="text-xs text-muted">+${c.drafts} draft</span>` : ''}</td>
+            <td data-label="People">${c.people}</td>
+            <td data-label="Days">${c.days}</td>
+            <td data-label="Group">${c.uploads.group}</td>
+            <td data-label="Single">${c.uploads.single}</td>
+            <td data-label="Self-mark">${c.uploads.self}</td>
+            <td data-label="Recognised">${c.faces_found ? `${c.faces_recognised}/${c.faces_found} (${pct(rate)})` : '-'}</td>
+            <td data-label="No face scan">${c.no_face_scan ? `<span class="badge badge-amber">${c.no_face_scan}</span>` : '0'}</td>
+        </tr>`;
+    }).join('');
+    host.innerHTML = `<div class="card" style="margin-bottom:16px">
+        <div class="card-header"><h3 class="card-title">Attendance by centre</h3></div>
+        <div class="card-body p-0"><div class="data-table-wrapper"><table class="data-table">
+            <thead><tr><th>Centre</th><th>Marked</th><th>People</th><th>Days</th>
+                <th>Group</th><th>Single</th><th>Self-mark</th><th>Faces recognised</th><th>No face scan</th></tr></thead>
+            <tbody>${rows}</tbody></table></div></div></div>`;
+    host.querySelectorAll('[data-rp-centre]').forEach(tr => tr.addEventListener('click', () => {
+        const sel = document.getElementById('rp-centre');
+        if (!sel || !isSuperAdmin()) return;
+        sel.value = tr.dataset.rpCentre;
+        reportLoad();
+    }));
+}
+
+function reportMatchChips(matches) {
+    if (!matches.length) return '<span class="text-xs text-muted">Nobody recognised</span>';
+    return matches.map(m => `<span class="badge ${m.already ? 'badge-blue' : 'badge-green'}"
+            title="${m.already ? 'Already on the register - recognised again' : 'Marked present by this photo'}"
+            style="margin:0 4px 4px 0">${E(m.name || 'Unknown')} &middot; ${pct(m.confidence)}${m.already ? ' (already)' : ''}</span>`).join('');
+}
+
+function reportDrawUploads(d) {
+    const host = document.getElementById('rp-uploads');
+    const cards = d.uploads.map((u, i) => {
+        const when = (u.created_at || '').replace('T', ' ').slice(0, 16);
+        const faces = u.faces_detected || 0;
+        const img = u.image_url
+            ? `<button type="button" data-rp-upload="${i}" style="display:block;width:100%;padding:0;border:0;background:var(--bg-subtle);cursor:zoom-in">
+                   <img src="${u.image_url}" loading="lazy" alt="Attendance photo"
+                        style="display:block;width:100%;aspect-ratio:4/3;object-fit:cover"></button>`
+            : `<div style="aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;background:var(--bg-subtle)"
+                    class="text-xs text-muted">Older capture - no photo</div>`;
+        return `<div class="card" style="overflow:hidden;margin:0">
+            ${img}
+            <div style="padding:12px">
+                <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px">
+                    <span class="badge ${u.kind === 'group' ? 'badge-blue' : u.kind === 'self' ? 'badge-amber' : 'badge-green'}">${E(UPLOAD_KIND_LABEL[u.kind] || 'Older capture')}</span>
+                    <span class="text-xs text-muted">${E(when)}</span>
+                </div>
+                <div class="text-sm" style="font-weight:600">${E(u.centre_name || '-')}</div>
+                <div class="text-xs text-muted" style="margin-bottom:6px">${E(u.uploaded_by_name || u.coach_name || '')}${u.register_status === 'submitted' ? '' : ' &middot; register not submitted yet'}</div>
+                <div class="text-sm" style="margin-bottom:6px">Recognised <strong>${u.recognised || 0} of ${faces}</strong> face${faces === 1 ? '' : 's'}${u.recognised_rate != null ? ` (${pct(u.recognised_rate)})` : ''}</div>
+                <div>${reportMatchChips(u.matches)}</div>
+            </div></div>`;
+    }).join('');
+    host.innerHTML = `<div class="card" style="margin-bottom:16px">
+        <div class="card-header"><h3 class="card-title">Uploads (${d.uploads.length})</h3></div>
+        <div class="card-body">${d.uploads.length
+            ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px">${cards}</div>`
+            : '<div class="empty-state">No photos were uploaded in this range. Photos are kept from this update on - earlier scans were not saved.</div>'}
+        </div></div>`;
+    host.querySelectorAll('[data-rp-upload]').forEach(b => b.addEventListener('click', () =>
+        reportOpenUpload(d.uploads[parseInt(b.dataset.rpUpload, 10)])));
+}
+
+function reportOpenUpload(u) {
+    if (!u || !u.image_url) return;
+    const faces = u.faces_detected || 0;
+    openModal(`${UPLOAD_KIND_LABEL[u.kind] || 'Upload'} - ${u.centre_name || ''}`, `
+        <img src="${u.image_url}" alt="Attendance photo" style="display:block;width:100%;border-radius:8px;margin-bottom:12px">
+        <div class="text-sm" style="margin-bottom:4px">${E((u.created_at || '').replace('T', ' ').slice(0, 16))}
+            &middot; ${E(u.uploaded_by_name || u.coach_name || '')}</div>
+        <div class="text-sm" style="margin-bottom:8px">Recognised <strong>${u.recognised || 0} of ${faces}</strong>
+            face${faces === 1 ? '' : 's'} &middot; ${u.newly_marked} newly marked present</div>
+        <div>${reportMatchChips(u.matches)}</div>
+        <div class="text-xs text-muted" style="margin-top:10px">"Recognised" is faces matched to somebody on
+            the roster, out of faces found in the photo. It is not checked against who was really there.</div>`,
+        `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`);
+}
+
+function reportHow(r) {
+    if (r.capture_kind === 'group') return 'Group photo';
+    if (r.capture_kind === 'single') return 'Single photo';
+    return { recognised: 'Face scan', self_marked: 'Self-mark', coach_added: 'Ticked by hand',
+             late_added: 'Added late', late_approved: 'Added late' }[r.origin] || 'Earlier method';
+}
+
+function reportDrawRecords(d) {
+    const host = document.getElementById('rp-records');
+    const rows = d.records.map(r => `<tr>
+        <td data-label="Date" class="font-mono">${E(r.date)} <span class="text-muted">${E(r.time || '')}</span></td>
+        <td class="cell-primary"><div style="font-weight:600">${E(r.name)}</div>
+            <div class="text-xs text-muted font-mono">${E(r.roll_no || '')}</div></td>
+        <td data-label="Centre" class="text-muted">${E(r.centre_name || '-')}</td>
+        <td data-label="How">${E(reportHow(r))}</td>
+        <td data-label="Match" class="font-mono">${r.confidence == null
+            ? '<span class="badge badge-amber">No face scan</span>' : pct(r.confidence, 1)}</td>
+        <td data-label="Status">${r.status === 'confirmed' ? '<span class="badge badge-green">Confirmed</span>'
+                                                           : '<span class="badge badge-blue">Not submitted</span>'}</td>
+        <td data-label="Photo">${r.image_url
+            ? `<img src="${r.image_url}" loading="lazy" alt="" data-rp-photo="${E(r.image_url)}"
+                    style="width:44px;height:44px;border-radius:6px;object-fit:cover;cursor:zoom-in">` : '-'}</td>
+    </tr>`).join('');
+    host.innerHTML = `<div class="card" style="margin-bottom:16px">
+        <div class="card-header"><h3 class="card-title">All attendance records (${d.records.length})</h3></div>
+        <div class="card-body p-0">${d.records.length
+            ? `<div class="data-table-wrapper"><table class="data-table">
+                <thead><tr><th>Date</th><th>Name</th><th>Centre</th><th>How</th><th>Match</th><th>Status</th><th>Photo</th></tr></thead>
+                <tbody>${rows}</tbody></table></div>`
+            : '<div class="empty-state py-12">No attendance in this range.</div>'}</div></div>`;
+    host.querySelectorAll('[data-rp-photo]').forEach(img => img.addEventListener('click', () =>
+        openModal('Attendance photo', `<img src="${img.dataset.rpPhoto}" alt="" style="display:block;width:100%;border-radius:8px">`,
+                  `<button class="btn btn-secondary" onclick="closeModal()">Close</button>`)));
+}

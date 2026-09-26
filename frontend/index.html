@@ -166,6 +166,10 @@
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
                     Centres
                 </a>
+                <a href="#/reports" class="nav-item" data-route="/reports" data-role-only="super_admin,coach">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+                    Reports
+                </a>
                 <a href="#/oversight" class="nav-item" data-route="/oversight" data-role-only="super_admin">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
                     Oversight
@@ -321,6 +325,45 @@
     </div>
     <div id="ov-tiles" class="stats-grid" style="margin-bottom:16px"></div>
     <div id="ov-lists"></div>
+</template>
+
+<!-- Reports: every upload (with its photo) and every attendance record over a
+     date range, and the totals per centre. Nothing cut to a top N. -->
+<template id="tpl-reports">
+    <div class="card" style="margin-bottom:16px">
+        <div class="card-body">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+                <div class="form-group" style="margin:0">
+                    <label class="form-label" for="rp-from">From</label>
+                    <input type="date" id="rp-from" class="form-input" style="max-width:170px"></div>
+                <div class="form-group" style="margin:0">
+                    <label class="form-label" for="rp-to">To</label>
+                    <input type="date" id="rp-to" class="form-input" style="max-width:170px"></div>
+                <div class="form-group" style="margin:0" id="rp-centre-wrap">
+                    <label class="form-label" for="rp-centre">Centre</label>
+                    <select id="rp-centre" class="form-input" style="max-width:260px">
+                        <option value="">All centres</option></select></div>
+                <div class="form-group" style="margin:0">
+                    <label class="form-label" for="rp-kind">Uploads</label>
+                    <select id="rp-kind" class="form-input" style="max-width:190px">
+                        <option value="">All uploads</option>
+                        <option value="group">Group photos</option>
+                        <option value="single">Single photos</option>
+                        <option value="self">Athlete self-marks</option></select></div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap">
+                    <button type="button" class="btn btn-secondary" data-rp-range="0">Today</button>
+                    <button type="button" class="btn btn-secondary" data-rp-range="6">7 days</button>
+                    <button type="button" class="btn btn-secondary" data-rp-range="29">30 days</button>
+                    <button type="button" class="btn btn-secondary" id="rp-export">Export CSV</button>
+                </div>
+            </div>
+            <div class="text-xs text-muted" id="rp-meta" style="margin-top:10px"></div>
+        </div>
+    </div>
+    <div class="stats-grid" id="rp-tiles" style="margin-bottom:16px"></div>
+    <div id="rp-centres"></div>
+    <div id="rp-uploads"></div>
+    <div id="rp-records"></div>
 </template>
 
 <template id="tpl-me">

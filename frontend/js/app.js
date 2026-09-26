@@ -427,7 +427,7 @@ function handleRoute() {
     // routes' endpoints is staff-only now - but a page that loads and then
     // fails every request is a worse answer than not opening it.
     const STAFF_ROUTES = ['/dashboard', '/oversight', '/register', '/take-attendance',
-                          '/students', '/centres', '/users'];
+                          '/students', '/centres', '/users', '/reports'];
     if (typeof isAthlete === 'function' && isAthlete() && STAFF_ROUTES.includes(hash)) {
         window.location.hash = '#' + home;
         return;
@@ -474,6 +474,11 @@ function handleRoute() {
         const tpl = document.getElementById('tpl-oversight').content.cloneNode(true);
         root.appendChild(tpl);
         initOversightPage();
+    }
+    else if (hash === '/reports') {
+        title.textContent = 'Reports';
+        root.appendChild(document.getElementById('tpl-reports').content.cloneNode(true));
+        initReportsPage();
     }
     else if (hash === '/me') {
         title.textContent = 'My attendance';
@@ -893,14 +898,21 @@ async function renderDashboard() {
         }
 
         // Render Recent Activity
+        // Every record of the latest day with attendance, not a top few.
+        const recentHead = stats.recent.length
+            ? `<div class="text-xs text-muted" style="padding:10px 16px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+                   <span>${stats.recent.length} marked on ${Charts.esc(stats.recent[0].date)}</span>
+                   <a href="#/reports" style="color:var(--accent);font-weight:600">Full history and photos &rarr;</a></div>`
+            : '';
         const recentHtml = stats.recent.length === 0 ?
             '<div class="p-4 text-center text-muted">No recent activity</div>' :
-            stats.recent.map(r => `
+            recentHead + stats.recent.map(r => `
                 <div class="activity-item">
                     <div class="avatar">${Charts.esc(String(r.name || '').charAt(0))}</div>
                     <div class="activity-details">
                         <div class="activity-name">${Charts.esc(r.name)}</div>
-                        <div class="activity-sub">${Charts.esc(r.roll_no)}</div>
+                        <div class="activity-sub">${Charts.esc(r.roll_no)}${
+                            r.centre_name ? ' &middot; ' + Charts.esc(r.centre_name) : ''}</div>
                     </div>
                     <div class="activity-meta">
                         ${matchBadge(r)}
@@ -1129,11 +1141,39 @@ async function renderStudents() {
 function drawStudents(students) {
     const grid = document.getElementById('students-grid');
     if (students.length === 0) {
+        grid.style.display = '';
         grid.innerHTML = `<div class="empty-state py-12" style="grid-column: 1/-1">No students found</div>`;
         return;
     }
+    // One section per centre, so athletes (and coaches) of different centres
+    // never sit mixed in one grid. Each section is its own grid of cards.
+    const groups = new Map();
+    students.forEach(s => {
+        const key = s.centre_name || 'No centre assigned';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(s);
+    });
+    const ordered = [...groups.entries()].sort((a, b) =>
+        (a[0] === 'No centre assigned') - (b[0] === 'No centre assigned') || a[0].localeCompare(b[0]));
+    const noun = studentRole === 'coach' ? 'coach' : 'athlete';
+    grid.style.display = 'block';
+    grid.innerHTML = ordered.map(([centre, people]) => `
+        <section style="margin-bottom:24px">
+            <div class="card" style="margin-bottom:12px">
+                <div class="card-body" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 16px">
+                    <div style="display:flex;align-items:center;gap:10px">
+                        ${Icon('pin', 18)}
+                        <div style="font-weight:700">${Charts.esc(centre)}</div>
+                    </div>
+                    <span class="badge badge-blue">${people.length} ${noun}${people.length === 1 ? '' : (noun === 'coach' ? 'es' : 's')}</span>
+                </div>
+            </div>
+            <div class="students-grid">${studentCards(people)}</div>
+        </section>`).join('');
+}
 
-    grid.innerHTML = students.map(s => {
+function studentCards(students) {
+    return students.map(s => {
         const nTmpl = s.templates || 0;
         const tmplBadge = nTmpl > 0 ?
             `<span class="badge ${nTmpl >= 6 ? 'badge-green' : 'badge-blue'}" style="font-size: 10px;" title="Face templates stored for this person">${nTmpl} template${nTmpl === 1 ? '' : 's'}</span>` : '';

@@ -34,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from . import (auth, centres as centres_mod, config, database, db as pgdb,
                sessions as sessions_mod, signup as signup_mod,
                maintenance as maintenance_mod, password_reset as password_reset_mod,
-               portrait as portrait_mod,
+               portrait as portrait_mod, reports as reports_mod,
                liveness, metaheuristics, routes, storage, utils)
 from .detector import Face, estimate_landmarks, get_detector
 from .enhancer import get_enhancer, sharpness_quality
@@ -2040,6 +2040,38 @@ def pending_register(user: dict = Depends(auth.require_staff)):
     return {"ok": True, "pending": p}
 
 
+# Long side of a stored attendance photo. Phone photos arrive at 12+ MP; the
+# reports only ever show them on a screen, and at this size a group of twenty
+# is still legible.
+UPLOAD_MAX_SIDE = 1600
+
+
+def _record_upload(img, rotation, sess: dict, kind: str, faces: int,
+                   matches: list, user: dict, prefix: str):
+    """Keep the photo an attendance mark came from, for the reports' preview.
+
+    Returns (capture_id, media_key), or (None, None) if it could not be kept.
+    Never raises: attendance already recorded must not be lost because the
+    picture of it could not be stored.
+    """
+    try:
+        img = sessions_mod.turn_photo(img, rotation)
+        h, w = img.shape[:2]
+        if max(h, w) > UPLOAD_MAX_SIDE:
+            f = UPLOAD_MAX_SIDE / max(h, w)
+            img = cv2.resize(img, (round(w * f), round(h * f)), interpolation=cv2.INTER_AREA)
+        name = f"{prefix}_{sess['id']}_{utils.timestamp()}.jpg"
+        utils.save_image(img, "uploads", name)
+        cid = sessions_mod.add_capture(
+            sess["id"], name, kind, faces_detected=int(faces),
+            recognised=len(matches),   # recognised in the photo, new or already marked
+            matches=matches, uploaded_by=int(user["id"]))
+        return cid, name
+    except Exception:            # noqa: BLE001
+        log.exception("Could not keep the %s photo for register %s", kind, sess.get("id"))
+        return None, None
+
+
 @app.post("/api/attendance/scan")
 async def scan_attendance(
     photo: UploadFile = File(...),
@@ -2074,12 +2106,17 @@ async def scan_attendance(
     if not found["faces"]:
         return {"ok": False, "reason": "no_face",
                 "message": "No face found - point the camera at the athletes and try again"}
+    day = config.today_str()
+    sess = sessions_mod.get_or_create(centre_id, coach_id, int(user["id"]), day)
     if not found["matches"]:
+        # Kept too: an upload where nobody was recognised is exactly what the
+        # reports need to show when recognition is doing badly somewhere.
+        _record_upload(img, found.get("rotation"), sess,
+                       "group" if found["faces"] > 1 else "single",
+                       found["faces"], [], user, "scan")
         return {"ok": False, "reason": "unknown", "faces": found["faces"],
                 "message": "Nobody recognised - make sure these athletes are registered and "
                            "approved at your centre, then try again a little closer"}
-    day = config.today_str()
-    sess = sessions_mod.get_or_create(centre_id, coach_id, int(user["id"]), day)
     late = sess["status"] == "submitted"
     marked = []
     for m in found["matches"]:
@@ -2095,6 +2132,12 @@ async def scan_attendance(
                                              centre_id=centre_id, marked_by=int(user["id"]))
         marked.append({"student_id": sid, "name": m["name"],
                        "score": round(m["score"], 4), "already": already})
+    capture_id, media_key = _record_upload(
+        img, found.get("rotation"), sess, "group" if found["faces"] > 1 else "single",
+        found["faces"], marked, user, "scan")
+    if capture_id:
+        sessions_mod.link_capture(sess["id"], [m["student_id"] for m in marked if not m["already"]],
+                                  capture_id, media_key)
     log.info("Take Attendance: coach %s photo - %d faces, %d recognised (%s)%s",
              coach_id, found["faces"], len(marked), "late" if late else "drafted",
              f" - photo was turned {found['rotation']}" if found.get("rotation") else "")
@@ -2379,6 +2422,21 @@ async def mark_myself(
         accuracy_m=accuracy_m, geo_status=geo["geo_status"],
         distance_m=geo["distance_m"], marked_by=int(user["id"]),
     )
+    if added:
+        # The self-mark photo is already stored; this makes it an upload the
+        # reports can list, and lets the coach's centre open it.
+        try:
+            me_row = database.get_student(me) or {}
+            cid = sessions_mod.add_capture(
+                sess["id"], frame_name, "self", faces_detected=1, recognised=1,
+                latitude=latitude, longitude=longitude, geo_status=geo["geo_status"],
+                distance_m=geo["distance_m"],
+                matches=[{"student_id": me, "name": me_row.get("name"),
+                          "score": round(score, 4), "already": False}],
+                uploaded_by=int(user["id"]))
+            sessions_mod.link_capture(sess["id"], [me], cid, frame_name)
+        except Exception:        # noqa: BLE001 - the mark itself is already saved
+            log.exception("Could not record self-mark upload for person %s", me)
     return {
         "ok": True, "added": added, "session_id": sess["id"],
         "status": "draft", "origin": "self_marked",
@@ -3092,6 +3150,107 @@ def export_attendance(
 
 
 # --- static files & sample images -------------------------------------------
+
+def _report_scope(user: dict, date_from, date_to, centre_id):
+    """Validated (from, to, centre) for a report. A coach is pinned to their
+    own centre whatever they pass; a super admin may pick one or see all."""
+    try:
+        d_from, d_to = reports_mod.parse_range(date_from, date_to, config.today_str())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return d_from, d_to, auth.scope_centre(user, centre_id)
+
+
+def _upload_url(key: Optional[str]) -> Optional[str]:
+    return f"/api/uploads/{Path(key).name}" if key else None
+
+
+@app.get("/api/reports")
+def attendance_report(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    centre_id: Optional[int] = None,
+    kind: Optional[str] = None,
+    user: dict = Depends(auth.require_staff),
+):
+    """Everything uploaded and marked over a date range, in full.
+
+    centres: attendance and uploads per centre. uploads: every photo, with a
+    preview URL, the faces found and recognised in it and each match's
+    percentage. records: every attendance row. Nothing is cut to a top N.
+    """
+    d_from, d_to, scope = _report_scope(user, date_from, date_to, centre_id)
+    if kind not in (None, "", "all", *reports_mod.UPLOAD_KINDS):
+        raise HTTPException(400, "kind must be group, single, self or all")
+
+    ups = reports_mod.uploads(d_from, d_to, scope, kind)
+    for u in ups:
+        # Legacy clips were liveness evidence, not a picture to preview.
+        u["image_url"] = _upload_url(u["media_key"]) if u["kind"] in reports_mod.UPLOAD_KINDS else None
+        for m in u["matches"]:
+            m["confidence"] = _shown_confidence(m.get("score"))
+        faces = int(u.get("faces_detected") or 0)
+        u["recognised_rate"] = round(int(u.get("recognised") or 0) / faces, 4) if faces else None
+        u["newly_marked"] = sum(1 for m in u["matches"] if not m.get("already"))
+
+    recs = reports_mod.records(d_from, d_to, scope)
+    for r in recs:
+        r["confidence"] = _shown_confidence(r.get("confidence"))
+        r["time"] = (r.get("marked_at") or "").split("T")[-1][:5]
+        r["image_url"] = _upload_url(r.pop("capture_media", None))
+
+    centres = reports_mod.centre_summary(d_from, d_to, scope)
+    faces = sum(c["faces_found"] for c in centres)
+    recog = sum(c["faces_recognised"] for c in centres)
+    return {
+        "ok": True, "date_from": d_from, "date_to": d_to, "centre_id": scope,
+        "totals": {
+            "confirmed": sum(c["confirmed"] for c in centres),
+            "drafts": sum(c["drafts"] for c in centres),
+            "uploads": len(ups),
+            "group": sum(1 for u in ups if u["kind"] == "group"),
+            "single": sum(1 for u in ups if u["kind"] == "single"),
+            "self": sum(1 for u in ups if u["kind"] == "self"),
+            "faces_found": faces, "faces_recognised": recog,
+            "recognised_rate": round(recog / faces, 4) if faces else None,
+        },
+        "centres": centres, "uploads": ups, "records": recs,
+    }
+
+
+@app.get("/api/reports/export")
+def attendance_report_export(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    centre_id: Optional[int] = None,
+    user: dict = Depends(auth.require_staff),
+):
+    """Every attendance row in the range as CSV - the report's records table."""
+    d_from, d_to, scope = _report_scope(user, date_from, date_to, centre_id)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["DATE", "TIME", "NSRS ID", "NAME", "ROLE", "CENTRE", "COACH",
+                     "STATUS", "HOW", "MATCH", "LOCATION"])
+    how = {"recognised": "face scan", "self_marked": "self-marked",
+           "coach_added": "ticked by hand", "late_added": "added late",
+           "late_approved": "added late"}
+    for r in reports_mod.records(d_from, d_to, scope):
+        conf = _shown_confidence(r.get("confidence"))
+        kind = r.get("capture_kind")
+        writer.writerow([
+            _csv_safe(r["date"]), _csv_safe((r.get("marked_at") or "").split("T")[-1][:5]),
+            _csv_safe(r["roll_no"]), _csv_safe(r["name"]), _csv_safe(r.get("role")),
+            _csv_safe(r.get("centre_name")), _csv_safe(r.get("coach_name")),
+            _csv_safe(r.get("status")),
+            _csv_safe(f"{kind} photo" if kind in ("group", "single") else how.get(r.get("origin"), r.get("origin") or "")),
+            "" if conf is None else f"{conf * 100:.1f}%",
+            _csv_safe(r.get("geo_status")),
+        ])
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="attendance_{d_from}_to_{d_to}.csv"'})
+
 
 @app.get("/api/sample-images/download")
 def download_test_suite(user: dict = Depends(auth.current_user)):

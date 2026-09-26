@@ -19,6 +19,7 @@ Two rules run through everything here:
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import timedelta
 from typing import Dict, List, Optional
@@ -337,17 +338,42 @@ def add_capture(session_id: int, media_key: str, kind: str,
                 faces_detected: int = 0, recognised: int = 0,
                 latitude: Optional[float] = None, longitude: Optional[float] = None,
                 geo_status: Optional[str] = None,
-                distance_m: Optional[float] = None) -> int:
+                distance_m: Optional[float] = None,
+                matches: Optional[List[dict]] = None,
+                uploaded_by: Optional[int] = None) -> int:
+    """Record one uploaded photo (or legacy clip) against a register.
+
+    kind: 'group' | 'single' (Take Attendance, by how many faces were in the
+    photo), 'self' (an athlete's self-mark), or the legacy 'video' | 'photo'.
+    `matches` is everyone recognised in it with their score, INCLUDING anybody
+    already on the register - so the upload can be reviewed as it was taken.
+    """
     with connect() as conn:
         return conn.insert(
             "INSERT INTO session_captures "
             "(session_id, media_key, kind, liveness_verdict, liveness_depth, "
             " faces_detected, recognised, latitude, longitude, geo_status, "
-            " distance_m, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            " distance_m, created_at, matches, uploaded_by) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (session_id, media_key, kind, liveness_verdict, liveness_depth,
              faces_detected, recognised, latitude, longitude, geo_status,
-             distance_m, config.now_stamp()),
+             distance_m, config.now_stamp(),
+             json.dumps(matches) if matches is not None else None, uploaded_by),
         )
+
+
+def link_capture(session_id: int, student_ids, capture_id: int, media_key: str) -> None:
+    """Point attendance rows at the photo that put them there - only rows that
+    do not already have one, so a person scanned twice keeps the first photo."""
+    ids = [int(i) for i in student_ids]
+    if not ids:
+        return
+    marks = ",".join("?" for _ in ids)
+    with connect() as conn:
+        conn.execute(
+            f"UPDATE attendance SET capture_id = ?, image_path = COALESCE(image_path, ?) "
+            f"WHERE session_id = ? AND capture_id IS NULL AND student_id IN ({marks})",
+            [int(capture_id), media_key, int(session_id), *ids])
 
 
 def captures_of(session_id: int) -> List[dict]:

@@ -313,6 +313,12 @@ def init_db() -> None:
             "distance_m": "DOUBLE PRECISION",
             "marked_by": "INTEGER REFERENCES users(id) ON DELETE SET NULL",
         })
+        _ensure_columns(conn, "session_captures", {
+            # JSON list of everyone recognised in the photo, with their score -
+            # including people already on the register, who get no new row.
+            "matches": "TEXT",
+            "uploaded_by": "INTEGER REFERENCES users(id) ON DELETE SET NULL",
+        })
         # Runs last: dropping before _ensure_columns would let it re-add them.
         _drop_age_columns(conn)
         # After the columns exist - the swap references session_id.
@@ -730,7 +736,9 @@ def list_students(centre_id: Optional[int] = None, role: Optional[str] = None,
             " AND a.status = 'confirmed') AS total_present, "
             "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id) AS templates, "
             "(SELECT COUNT(*) FROM templates t WHERE t.student_id = s.id AND t.source = 'adapted') AS adapted, "
-            "s.role, s.centre_id, s.gender, s.sport, s.phone, s.status "
+            "s.role, s.centre_id, s.gender, s.sport, s.phone, s.status, "
+            # For the directory's one-section-per-centre layout.
+            "(SELECT c.name FROM centres c WHERE c.id = s.centre_id) AS centre_name "
             "FROM students s WHERE 1=1"
             # An unapproved applicant is not in the directory. They are in the
             # approval queue, which is a different screen for a different job.
@@ -1192,13 +1200,21 @@ def stats(centre_id: Optional[int] = None) -> dict:
         total_rows = conn.execute(
             "SELECT COUNT(*) FROM attendance a WHERE a.status = 'confirmed'" + acs, cp
         ).fetchone()[0]
+        # EVERY record of the most recent day with attendance, not the last
+        # eight: a list cut at eight answered "who was here" for eight people.
+        # Longer ranges are the Reports page's job.
+        last_day = conn.execute(
+            "SELECT MAX(a.date) FROM attendance a WHERE a.status = 'confirmed'" + acs, cp
+        ).fetchone()[0]
         recent = conn.execute(
-            "SELECT a.date, a.marked_at, a.confidence, a.origin, s.name, s.roll_no "
+            "SELECT a.date, a.marked_at, a.confidence, a.origin, s.name, s.roll_no, "
+            "  c.name AS centre_name "
             "FROM attendance a JOIN students s ON s.id = a.student_id "
-            "WHERE a.status = 'confirmed'"
+            "LEFT JOIN centres c ON c.id = a.centre_id "
+            "WHERE a.status = 'confirmed' AND a.date = ?"
             + (" AND a.centre_id = ?" if centre_id is not None else "") +
-            " ORDER BY a.marked_at DESC LIMIT 8", cp
-        ).fetchall()
+            " ORDER BY a.marked_at DESC", [last_day] + cp
+        ).fetchall() if last_day else []
     return {
         "students": n_students,
         "coaches": n_coaches,
