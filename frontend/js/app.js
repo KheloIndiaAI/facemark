@@ -427,7 +427,7 @@ function handleRoute() {
     // routes' endpoints is staff-only now - but a page that loads and then
     // fails every request is a worse answer than not opening it.
     const STAFF_ROUTES = ['/dashboard', '/oversight', '/register', '/take-attendance',
-                          '/students', '/centres', '/users', '/reports'];
+                          '/students', '/centres', '/users'];
     if (typeof isAthlete === 'function' && isAthlete() && STAFF_ROUTES.includes(hash)) {
         window.location.hash = '#' + home;
         return;
@@ -468,17 +468,14 @@ function handleRoute() {
         const tpl = document.getElementById('tpl-dashboard').content.cloneNode(true);
         root.appendChild(tpl);
         renderDashboard();
+        // Group and single photo attendance, per centre, and the full history.
+        initPhotoAttendance();
     }
     else if (hash === '/oversight') {
         title.textContent = 'Oversight';
         const tpl = document.getElementById('tpl-oversight').content.cloneNode(true);
         root.appendChild(tpl);
         initOversightPage();
-    }
-    else if (hash === '/reports') {
-        title.textContent = 'Reports';
-        root.appendChild(document.getElementById('tpl-reports').content.cloneNode(true));
-        initReportsPage();
     }
     else if (hash === '/me') {
         title.textContent = 'My attendance';
@@ -509,7 +506,7 @@ function handleRoute() {
         root.appendChild(tpl);
         renderStudents();
     }
-    else if (hash === '/analytics' || hash === '/records') {
+    else if (hash === '/analytics' || hash === '/records' || hash === '/reports') {
         // Analytics was removed; Records moved to the foot of Mark Attendance.
         // Redirected rather than left to fall through, so an old bookmark, an
         // installed PWA shortcut or a back button lands somewhere useful
@@ -902,7 +899,8 @@ async function renderDashboard() {
         const recentHead = stats.recent.length
             ? `<div class="text-xs text-muted" style="padding:10px 16px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
                    <span>${stats.recent.length} marked on ${Charts.esc(stats.recent[0].date)}</span>
-                   <a href="#/reports" style="color:var(--accent);font-weight:600">Full history and photos &rarr;</a></div>`
+                   <a href="#" onclick="document.getElementById('rp-records').scrollIntoView({behavior:'smooth'});return false"
+                      style="color:var(--accent);font-weight:600">Full history &darr;</a></div>`
             : '';
         const recentHtml = stats.recent.length === 0 ?
             '<div class="p-4 text-center text-muted">No recent activity</div>' :
@@ -1100,53 +1098,146 @@ async function setNsrsId(studentId, current, name) {
 }
 
 let studentRole = 'athlete';
+// null = the centre tiles; otherwise the centre being looked at (its id, or
+// NO_CENTRE for people not yet assigned to one).
+let dirCentre = null;
+const NO_CENTRE = 'none';
+const centreKey = (s) => s.centre_id == null ? NO_CENTRE : String(s.centre_id);
 
 async function renderStudents() {
     try {
-        // The page is the ATHLETE Directory, so it asks for athletes. Coaches
-        // are enrolled people too and this is the only screen that can enrol
-        // one, so they are one button away rather than unreachable.
-        const data = await api.get(`/api/students?role=${encodeURIComponent(studentRole)}`);
+        // Everyone, both roles: a centre's tile counts its athletes AND its
+        // coaches, and opening it switches between them without a reload.
+        const data = await api.get('/api/students');
         state.students = data.students;
-        drawStudents(state.students);
+        const keys = new Set(state.students.map(centreKey));
+        if (dirCentre && !keys.has(dirCentre)) dirCentre = null;
+        // One centre (a coach's view): no point showing one tile to tap.
+        if (!dirCentre && keys.size === 1) dirCentre = [...keys][0];
 
         document.querySelectorAll('[data-role-filter]').forEach(b => {
-            b.className = 'btn ' + (b.dataset.roleFilter === studentRole
-                ? 'btn-primary' : 'btn-secondary');
             b.onclick = () => {
                 if (studentRole === b.dataset.roleFilter) return;
                 studentRole = b.dataset.roleFilter;
-                renderStudents();
+                drawDirectory();
             };
         });
-        const title = document.getElementById('page-title');
-        if (title) {
-            title.textContent = studentRole === 'coach'
-                ? 'Coaches' : 'Athletes';
+        const search = document.getElementById('student-search');
+        if (search && !search.dataset.bound) {
+            search.dataset.bound = '1';
+            search.addEventListener('input', drawDirectory);
         }
-
-        document.getElementById('student-search').addEventListener('input', (e) => {
-            const term = e.target.value.toLowerCase();
-            const filtered = state.students.filter(s => 
-                s.name.toLowerCase().includes(term) || 
-                s.roll_no.toLowerCase().includes(term)
-            );
-            drawStudents(filtered);
-        });
+        drawDirectory();
     } catch (e) {
         console.error(e);
     }
 }
 
-function drawStudents(students) {
+function directoryMatches(s, term) {
+    return !term || s.name.toLowerCase().includes(term) || (s.roll_no || '').toLowerCase().includes(term);
+}
+
+function drawDirectory() {
     const grid = document.getElementById('students-grid');
-    if (students.length === 0) {
-        grid.style.display = '';
-        grid.innerHTML = `<div class="empty-state py-12" style="grid-column: 1/-1">No students found</div>`;
+    const roleBar = document.getElementById('student-role-filter');
+    const search = document.getElementById('student-search');
+    const term = ((search && search.value) || '').trim().toLowerCase();
+    const title = document.getElementById('page-title');
+    if (title) title.textContent = 'Directory';
+    if (!grid) return;
+    grid.style.display = 'block';
+
+    // --- the centre tiles
+    if (!dirCentre) {
+        if (roleBar) roleBar.style.display = 'none';
+        if (search) search.placeholder = 'Search a name or NSRS ID in every centre...';
+        if (term) {
+            // A search from the tiles looks in every centre, still one
+            // section per centre so nobody is mixed up.
+            return drawCentreSections(state.students.filter(s => directoryMatches(s, term)));
+        }
+        const byCentre = new Map();
+        state.students.forEach(s => {
+            const k = centreKey(s);
+            if (!byCentre.has(k)) byCentre.set(k, { key: k, name: s.centre_name || 'No centre assigned',
+                                                    athletes: 0, coaches: 0 });
+            byCentre.get(k)[s.role === 'coach' ? 'coaches' : 'athletes'] += 1;
+        });
+        const tiles = [...byCentre.values()].sort((a, b) =>
+            (a.key === NO_CENTRE) - (b.key === NO_CENTRE) || a.name.localeCompare(b.name));
+        if (!tiles.length) {
+            grid.innerHTML = '<div class="empty-state py-12">Nobody is registered yet.</div>';
+            return;
+        }
+        grid.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px">${
+            tiles.map(t => `
+            <button type="button" class="card" data-dir-centre="${Charts.esc(t.key)}"
+                    style="margin:0;padding:18px;text-align:left;cursor:pointer;border:1px solid var(--border-subtle);font:inherit;color:inherit">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;color:var(--accent)">
+                    ${Icon('pin', 18)}<span style="font-weight:700;color:var(--text-primary)">${Charts.esc(t.name)}</span>
+                </div>
+                <div style="display:flex;gap:18px">
+                    <div><div style="font-size:24px;font-weight:700">${t.athletes}</div>
+                         <div class="text-xs text-muted">athlete${t.athletes === 1 ? '' : 's'}</div></div>
+                    <div><div style="font-size:24px;font-weight:700">${t.coaches}</div>
+                         <div class="text-xs text-muted">coach${t.coaches === 1 ? '' : 'es'}</div></div>
+                </div>
+                <div class="text-xs" style="margin-top:12px;color:var(--accent);font-weight:600">Open &rarr;</div>
+            </button>`).join('')}</div>`;
+        grid.querySelectorAll('[data-dir-centre]').forEach(b => b.addEventListener('click', () => {
+            dirCentre = b.dataset.dirCentre;
+            if (search) search.value = '';
+            drawDirectory();
+            window.scrollTo(0, 0);
+        }));
         return;
     }
-    // One section per centre, so athletes (and coaches) of different centres
-    // never sit mixed in one grid. Each section is its own grid of cards.
+
+    // --- inside one centre
+    if (search) search.placeholder = 'Search by name or NSRS ID...';
+    const here = state.students.filter(s => centreKey(s) === dirCentre);
+    const name = (here[0] && here[0].centre_name) || 'No centre assigned';
+    const nAth = here.filter(s => s.role !== 'coach').length;
+    const nCoach = here.length - nAth;
+    if (roleBar) {
+        roleBar.style.display = 'flex';
+        roleBar.querySelectorAll('[data-role-filter]').forEach(b => {
+            const r = b.dataset.roleFilter;
+            b.className = 'btn ' + (r === studentRole ? 'btn-primary' : 'btn-secondary');
+            b.textContent = r === 'coach' ? `Coaches (${nCoach})` : `Athletes (${nAth})`;
+        });
+    }
+    const people = here.filter(s => (s.role === 'coach') === (studentRole === 'coach')
+                                    && directoryMatches(s, term));
+    const many = new Set(state.students.map(centreKey)).size > 1;
+    grid.innerHTML = `
+        <div class="card" style="margin-bottom:14px">
+            <div class="card-body" style="display:flex;align-items:center;gap:12px;padding:12px 16px;flex-wrap:wrap">
+                ${many ? `<button type="button" class="btn btn-secondary" id="dir-back"
+                             style="min-height:34px;padding:0 12px">&larr; All centres</button>` : ''}
+                <div style="display:flex;align-items:center;gap:8px">${Icon('pin', 18)}
+                    <span style="font-weight:700">${Charts.esc(name)}</span></div>
+            </div>
+        </div>
+        ${people.length
+            ? `<div class="students-grid">${studentCards(people)}</div>`
+            : `<div class="empty-state py-12">No ${studentRole === 'coach' ? 'coaches' : 'athletes'}${
+                term ? ' match that search' : ' at this centre yet'}.</div>`}`;
+    const back = document.getElementById('dir-back');
+    if (back) back.addEventListener('click', () => {
+        dirCentre = null;
+        if (search) search.value = '';
+        drawDirectory();
+    });
+}
+
+/* Search results from the tiles: one section per centre. */
+function drawCentreSections(students) {
+    const grid = document.getElementById('students-grid');
+    if (!students.length) {
+        grid.innerHTML = '<div class="empty-state py-12">Nobody matches that search.</div>';
+        return;
+    }
     const groups = new Map();
     students.forEach(s => {
         const key = s.centre_name || 'No centre assigned';
@@ -1155,17 +1246,13 @@ function drawStudents(students) {
     });
     const ordered = [...groups.entries()].sort((a, b) =>
         (a[0] === 'No centre assigned') - (b[0] === 'No centre assigned') || a[0].localeCompare(b[0]));
-    const noun = studentRole === 'coach' ? 'coach' : 'athlete';
-    grid.style.display = 'block';
     grid.innerHTML = ordered.map(([centre, people]) => `
         <section style="margin-bottom:24px">
             <div class="card" style="margin-bottom:12px">
                 <div class="card-body" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 16px">
-                    <div style="display:flex;align-items:center;gap:10px">
-                        ${Icon('pin', 18)}
-                        <div style="font-weight:700">${Charts.esc(centre)}</div>
-                    </div>
-                    <span class="badge badge-blue">${people.length} ${noun}${people.length === 1 ? '' : (noun === 'coach' ? 'es' : 's')}</span>
+                    <div style="display:flex;align-items:center;gap:10px">${Icon('pin', 18)}
+                        <div style="font-weight:700">${Charts.esc(centre)}</div></div>
+                    <span class="badge badge-blue">${people.length} found</span>
                 </div>
             </div>
             <div class="students-grid">${studentCards(people)}</div>

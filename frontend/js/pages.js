@@ -694,8 +694,9 @@ async function rotateJoinCode(centreId) {
 
 
 /* ==========================================================================
-   Reports - every upload (with its photo) and every attendance record over a
-   date range, and the totals per centre. Nothing is cut to a top N.
+   Photo attendance, on the Dashboard - every group and single photo that
+   marked attendance (with its picture), the totals per centre, and every
+   attendance record over a date range. Nothing is cut to a top N.
    ========================================================================== */
 
 const reportState = { data: null };
@@ -703,7 +704,8 @@ const reportState = { data: null };
 const UPLOAD_KIND_LABEL = { group: 'Group photo', single: 'Single photo', self: 'Self-mark' };
 const pct = (x, digits = 0) => x == null ? '-' : (x * 100).toFixed(digits) + '%';
 
-async function initReportsPage() {
+async function initPhotoAttendance() {
+    if (!document.getElementById('rp-from')) return;
     const from = document.getElementById('rp-from');
     const to = document.getElementById('rp-to');
     const today = localISODate();
@@ -722,7 +724,7 @@ async function initReportsPage() {
         document.getElementById('rp-centre-wrap').style.display = 'none';
     }
 
-    ['rp-from', 'rp-to', 'rp-centre', 'rp-kind'].forEach(id =>
+    ['rp-from', 'rp-to', 'rp-centre'].forEach(id =>
         document.getElementById(id).addEventListener('change', reportLoad));
     document.querySelectorAll('[data-rp-range]').forEach(b => b.addEventListener('click', () => {
         to.value = today;
@@ -730,19 +732,17 @@ async function initReportsPage() {
         reportLoad();
     }));
     document.getElementById('rp-export').addEventListener('click', () => {
-        window.location.href = '/api/reports/export?' + reportQuery(false);
+        window.location.href = '/api/reports/export?' + reportQuery();
     });
     await reportLoad();
 }
 
-function reportQuery(withKind = true) {
+function reportQuery() {
     const p = new URLSearchParams();
     p.set('date_from', document.getElementById('rp-from').value);
     p.set('date_to', document.getElementById('rp-to').value);
     const c = document.getElementById('rp-centre').value;
     if (c) p.set('centre_id', c);
-    const k = document.getElementById('rp-kind').value;
-    if (withKind && k) p.set('kind', k);
     return p.toString();
 }
 
@@ -822,38 +822,59 @@ function reportMatchChips(matches) {
             style="margin:0 4px 4px 0">${E(m.name || 'Unknown')} &middot; ${pct(m.confidence)}${m.already ? ' (already)' : ''}</span>`).join('');
 }
 
+/* One card per kind - group photos, single photos, athlete self-marks - so a
+   group photo and a single photo are never mixed in one list. */
 function reportDrawUploads(d) {
     const host = document.getElementById('rp-uploads');
-    const cards = d.uploads.map((u, i) => {
-        const when = (u.created_at || '').replace('T', ' ').slice(0, 16);
-        const faces = u.faces_detected || 0;
-        const img = u.image_url
-            ? `<button type="button" data-rp-upload="${i}" style="display:block;width:100%;padding:0;border:0;background:var(--bg-subtle);cursor:zoom-in">
-                   <img src="${u.image_url}" loading="lazy" alt="Attendance photo"
-                        style="display:block;width:100%;aspect-ratio:4/3;object-fit:cover"></button>`
-            : `<div style="aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;background:var(--bg-subtle)"
-                    class="text-xs text-muted">Older capture - no photo</div>`;
-        return `<div class="card" style="overflow:hidden;margin:0">
-            ${img}
-            <div style="padding:12px">
-                <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px">
-                    <span class="badge ${u.kind === 'group' ? 'badge-blue' : u.kind === 'self' ? 'badge-amber' : 'badge-green'}">${E(UPLOAD_KIND_LABEL[u.kind] || 'Older capture')}</span>
-                    <span class="text-xs text-muted">${E(when)}</span>
-                </div>
-                <div class="text-sm" style="font-weight:600">${E(u.centre_name || '-')}</div>
-                <div class="text-xs text-muted" style="margin-bottom:6px">${E(u.uploaded_by_name || u.coach_name || '')}${u.register_status === 'submitted' ? '' : ' &middot; register not submitted yet'}</div>
-                <div class="text-sm" style="margin-bottom:6px">Recognised <strong>${u.recognised || 0} of ${faces}</strong> face${faces === 1 ? '' : 's'}${u.recognised_rate != null ? ` (${pct(u.recognised_rate)})` : ''}</div>
-                <div>${reportMatchChips(u.matches)}</div>
-            </div></div>`;
-    }).join('');
-    host.innerHTML = `<div class="card" style="margin-bottom:16px">
-        <div class="card-header"><h3 class="card-title">Uploads (${d.uploads.length})</h3></div>
-        <div class="card-body">${d.uploads.length
-            ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px">${cards}</div>`
-            : '<div class="empty-state">No photos were uploaded in this range. Photos are kept from this update on - earlier scans were not saved.</div>'}
-        </div></div>`;
+    const section = (kind, title, empty) => {
+        const list = d.uploads.map((u, i) => [u, i]).filter(([u]) => u.kind === kind);
+        const faces = list.reduce((n, [u]) => n + (u.faces_detected || 0), 0);
+        const recog = list.reduce((n, [u]) => n + (u.recognised || 0), 0);
+        const marked = list.reduce((n, [u]) => n + (u.newly_marked || 0), 0);
+        const summary = list.length
+            ? `<span class="text-xs text-muted">${marked} marked present &middot; recognised ${recog} of ${faces} faces${
+                faces ? ` (${pct(recog / faces)})` : ''}</span>` : '';
+        return `<div class="card" style="margin-bottom:16px">
+            <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+                <h3 class="card-title">${E(title)} (${list.length})</h3>${summary}</div>
+            <div class="card-body">${list.length
+                ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px">${
+                    list.map(([u, i]) => reportUploadCard(u, i)).join('')}</div>`
+                : `<div class="empty-state">${E(empty)}</div>`}</div></div>`;
+    };
+    host.innerHTML =
+          section('group', 'Group photo attendance', 'No group photos in these days.')
+        + section('single', 'Single photo attendance', 'No single photos in these days.')
+        + (d.uploads.some(u => u.kind === 'self')
+            ? section('self', 'Athlete self-marks', '') : '')
+        + (d.uploads.length ? '' : `<div class="text-xs text-muted" style="margin:-8px 0 16px">
+            Photos are kept from 26 September 2026 on - scans before that were not saved,
+            but their attendance is in the history below.</div>`);
     host.querySelectorAll('[data-rp-upload]').forEach(b => b.addEventListener('click', () =>
         reportOpenUpload(d.uploads[parseInt(b.dataset.rpUpload, 10)])));
+}
+
+function reportUploadCard(u, i) {
+    const when = (u.created_at || '').replace('T', ' ').slice(0, 16);
+    const faces = u.faces_detected || 0;
+    const img = u.image_url
+        ? `<button type="button" data-rp-upload="${i}" style="display:block;width:100%;padding:0;border:0;background:var(--bg-subtle);cursor:zoom-in">
+               <img src="${u.image_url}" loading="lazy" alt="Attendance photo"
+                    style="display:block;width:100%;aspect-ratio:4/3;object-fit:cover"></button>`
+        : `<div style="aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;background:var(--bg-subtle)"
+                class="text-xs text-muted">Older capture - no photo</div>`;
+    return `<div class="card" style="overflow:hidden;margin:0">
+        ${img}
+        <div style="padding:12px">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px">
+                <span class="badge ${u.kind === 'group' ? 'badge-blue' : u.kind === 'self' ? 'badge-amber' : 'badge-green'}">${E(UPLOAD_KIND_LABEL[u.kind] || 'Older capture')}</span>
+                <span class="text-xs text-muted">${E(when)}</span>
+            </div>
+            <div class="text-sm" style="font-weight:600">${E(u.centre_name || '-')}</div>
+            <div class="text-xs text-muted" style="margin-bottom:6px">${E(u.uploaded_by_name || u.coach_name || '')}${u.register_status === 'submitted' ? '' : ' &middot; register not submitted yet'}</div>
+            <div class="text-sm" style="margin-bottom:6px">Recognised <strong>${u.recognised || 0} of ${faces}</strong> face${faces === 1 ? '' : 's'}${u.recognised_rate != null ? ` (${pct(u.recognised_rate)})` : ''}</div>
+            <div>${reportMatchChips(u.matches)}</div>
+        </div></div>`;
 }
 
 function reportOpenUpload(u) {
@@ -895,7 +916,7 @@ function reportDrawRecords(d) {
                     style="width:44px;height:44px;border-radius:6px;object-fit:cover;cursor:zoom-in">` : '-'}</td>
     </tr>`).join('');
     host.innerHTML = `<div class="card" style="margin-bottom:16px">
-        <div class="card-header"><h3 class="card-title">All attendance records (${d.records.length})</h3></div>
+        <div class="card-header"><h3 class="card-title">Attendance history (${d.records.length})</h3></div>
         <div class="card-body p-0">${d.records.length
             ? `<div class="data-table-wrapper"><table class="data-table">
                 <thead><tr><th>Date</th><th>Name</th><th>Centre</th><th>How</th><th>Match</th><th>Status</th><th>Photo</th></tr></thead>
